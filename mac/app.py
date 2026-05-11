@@ -131,7 +131,7 @@ def sanitize_pdf_metadata(doc):
             "subject": "",
             "keywords": "",
             "creator": "",
-            "producer": "Anonimizzatore PDF",
+            "producer": "",
             "creationDate": "",
             "modDate": "",
         })
@@ -255,7 +255,7 @@ def has_inline_images(page, min_image_area_ratio=0.05):
         if not images:
             return False
 
-        page_area = page.rect.width * page.rect.height
+        page_area = abs(page.mediabox.width) * abs(page.mediabox.height)
         if page_area <= 0:
             return False
 
