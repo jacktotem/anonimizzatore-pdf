@@ -1,0 +1,92 @@
+Anonimizzatore PDF
+==================
+
+Copyright (C) 2026 Jacopo Romani
+Licenza: GNU Affero General Public License v3.0 (AGPL-3.0)
+
+Questo prodotto include software sviluppato da terze parti, distribuito sotto
+le rispettive licenze open source elencate di seguito.
+
+================================================================================
+DIPENDENZE PYTHON
+================================================================================
+
+Streamlit
+---------
+Copyright (c) Streamlit Inc.
+Licenza: Apache License 2.0
+https://github.com/streamlit/streamlit
+https://www.apache.org/licenses/LICENSE-2.0
+
+PyMuPDF (fitz)
+--------------
+Copyright (c) Artifex Software, Inc.
+Licenza: GNU AGPL v3.0
+https://github.com/pymupdf/PyMuPDF
+https://www.gnu.org/licenses/agpl-3.0.html
+
+NOTA IMPORTANTE: PyMuPDF è distribuito sotto AGPL v3, la stessa licenza
+adottata da questo progetto. Per uso commerciale con licenze diverse,
+è disponibile una licenza commerciale da Artifex Software.
+
+Microsoft Presidio (analyzer + anonymizer)
+------------------------------------------
+Copyright (c) Microsoft Corporation
+Licenza: MIT License
+https://github.com/microsoft/presidio
+
+spaCy
+-----
+Copyright (c) Explosion AI
+Licenza: MIT License
+https://github.com/explosion/spaCy
+
+Modello linguistico italiano (it_core_news_lg)
+----------------------------------------------
+Copyright (c) Explosion AI
+Licenza: CC BY-SA 4.0
+https://spacy.io/models/it
+
+pytesseract
+-----------
+Copyright (c) Samuel Hoffstaetter
+Licenza: Apache License 2.0
+https://github.com/madmaze/pytesseract
+
+Pillow (PIL Fork)
+-----------------
+Copyright (c) Jeffrey A. Clark and contributors
+Licenza: HPND License (MIT-like)
+https://github.com/python-pillow/Pillow
+
+================================================================================
+DIPENDENZE DI SISTEMA
+================================================================================
+
+Tesseract OCR
+-------------
+Copyright (c) Google Inc., Hewlett-Packard, et al.
+Licenza: Apache License 2.0
+https://github.com/tesseract-ocr/tesseract
+
+Python
+------
+Copyright (c) Python Software Foundation
+Licenza: PSF License (compatible with GPL)
+https://www.python.org/
+
+================================================================================
+TESTO DELLE LICENZE
+================================================================================
+
+I testi completi delle licenze sono disponibili nei seguenti URL:
+
+- AGPL v3: https://www.gnu.org/licenses/agpl-3.0.txt
+- Apache 2.0: https://www.apache.org/licenses/LICENSE-2.0.txt
+- MIT: https://opensource.org/licenses/MIT
+- HPND: https://opensource.org/licenses/HPND
+- CC BY-SA 4.0: https://creativecommons.org/licenses/by-sa/4.0/legalcode
+
+================================================================================
+
+Per domande sulla compliance delle licenze, contattare: [inserire email]

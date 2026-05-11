@@ -1,0 +1,38 @@
+                    GNU AFFERO GENERAL PUBLIC LICENSE
+                       Version 3, 19 November 2007
+
+ Copyright (C) 2026 Jacopo Romani
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+ Anonimizzatore PDF — Strumento di anonimizzazione PDF per studi legali
+ Copyright (C) 2026 Jacopo Romani
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU Affero General Public License as
+ published by the Free Software Foundation, either version 3 of the
+ License, or (at your option) any later version.
+
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU Affero General Public License for more details.
+
+ You should have received a copy of the GNU Affero General Public License
+ along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+================================================================================
+NOTA: Questo è un placeholder con i metadati del copyright.
+Il testo completo della licenza AGPL v3 deve essere scaricato da:
+
+    https://www.gnu.org/licenses/agpl-3.0.txt
+
+Prima di pubblicare la repository:
+1. Scarica il file https://www.gnu.org/licenses/agpl-3.0.txt
+2. Sostituisci il contenuto di questo file con quello scaricato
+3. Aggiungi in cima le 6 righe di copyright qui sopra (dalla riga 1 alla 6
+   e dalla riga 9 alla 22) per identificare il progetto
+
+In alternativa, GitHub aggiunge automaticamente il testo completo della
+licenza quando crei il repository selezionando "AGPL-3.0" come licenza.
+================================================================================

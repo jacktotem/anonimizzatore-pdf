@@ -1,0 +1,661 @@
+"""
+Anonimizzatore PDF
+Basato su Microsoft Presidio + PyMuPDF + Tesseract OCR
+Anonimizzazione locale di documenti legali italiani (testo + scansioni).
+"""
+
+import streamlit as st
+import fitz  # PyMuPDF
+import os
+import sys
+from io import BytesIO
+from collections import Counter
+from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+
+# ============================================================
+# DETECTION TESSERACT OCR
+# ============================================================
+
+TESSERACT_AVAILABLE = False
+TESSERACT_PATH = None
+TESSERACT_VERSION = None
+ITALIAN_AVAILABLE = False
+
+try:
+    import pytesseract
+    from PIL import Image, ImageDraw
+
+    # Cerca Tesseract nei path tipici di Windows
+    if sys.platform == "win32":
+        possible_paths = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            os.path.expanduser(r"~\AppData\Local\Tesseract-OCR\tesseract.exe"),
+            os.path.expanduser(r"~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"),
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                pytesseract.pytesseract.tesseract_cmd = path
+                TESSERACT_PATH = path
+                break
+
+    TESSERACT_VERSION = str(pytesseract.get_tesseract_version())
+    TESSERACT_AVAILABLE = True
+
+    available_langs = pytesseract.get_languages(config="")
+    ITALIAN_AVAILABLE = "ita" in available_langs
+
+except Exception:
+    pass
+
+
+# ============================================================
+# CONFIGURAZIONE PAGINA
+# ============================================================
+
+st.set_page_config(
+    page_title="Anonimizzatore PDF",
+    page_icon="🔒",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# ============================================================
+# INIZIALIZZAZIONE MOTORE DI ANALISI
+# ============================================================
+
+@st.cache_resource(show_spinner=False)
+def initialize_analyzer():
+    """Inizializza l'analyzer di Presidio con modello italiano."""
+    configuration = {
+        "nlp_engine_name": "spacy",
+        "models": [{"lang_code": "it", "model_name": "it_core_news_lg"}],
+    }
+    provider = NlpEngineProvider(nlp_configuration=configuration)
+    nlp_engine = provider.create_engine()
+
+    registry = RecognizerRegistry(supported_languages=["it"])
+    registry.load_predefined_recognizers(languages=["it"])
+
+    analyzer = AnalyzerEngine(
+        nlp_engine=nlp_engine,
+        registry=registry,
+        supported_languages=["it"],
+    )
+    return analyzer
+
+
+# ============================================================
+# UTILITY
+# ============================================================
+
+def is_scanned_page(page, threshold_chars=50):
+    """Heuristica: pagina con pochissimo testo estraibile = probabilmente scansionata."""
+    text = page.get_text()
+    return len(text.strip()) < threshold_chars
+
+
+# ============================================================
+# REDAZIONE PAGINA TESTUALE (standard)
+# ============================================================
+
+def redact_text_page(page, selected_entities, custom_terms, analyzer, min_score, log, page_num, debug_first=False):
+    """Redazione su pagina con testo selezionabile."""
+    text = page.get_text()
+
+    if debug_first:
+        st.write(f"🔍 Pagina {page_num} (testuale) — primi 200 caratteri: `{text[:200]}`")
+
+    raw_count = 0
+    filtered_count = 0
+
+    if text.strip() and selected_entities:
+        try:
+            # Analisi SENZA score_threshold, filtriamo a mano
+            all_results = analyzer.analyze(
+                text=text,
+                entities=selected_entities,
+                language="it",
+            )
+            raw_count = len(all_results)
+
+            if debug_first and all_results:
+                debug_sample = [
+                    f"{r.entity_type}={text[r.start:r.end][:25]!r}(s={r.score:.2f})"
+                    for r in all_results[:6]
+                ]
+                st.write(f"   Esempi grezzi: {' | '.join(debug_sample)}")
+
+            # Filtro manuale per soglia
+            results = [r for r in all_results if r.score >= min_score]
+            filtered_count = len(results)
+
+        except Exception as e:
+            st.error(f"❌ Errore analisi pagina {page_num}: {type(e).__name__}: {e}")
+            results = []
+
+        for result in results:
+            found_text = text[result.start:result.end].strip()
+            if not found_text or len(found_text) < 2:
+                continue
+            areas = page.search_for(found_text)
+            for area in areas:
+                page.add_redact_annot(area, fill=(0, 0, 0))
+                log.append({
+                    "Pagina": page_num,
+                    "Tipo": result.entity_type,
+                    "Testo": found_text,
+                    "Confidenza": f"{result.score:.0%}",
+                    "Metodo": "Testo",
+                })
+
+    for term in custom_terms:
+        term = term.strip()
+        if not term:
+            continue
+        areas = page.search_for(term)
+        for area in areas:
+            page.add_redact_annot(area, fill=(0, 0, 0))
+            log.append({
+                "Pagina": page_num,
+                "Tipo": "TERMINE PERSONALIZZATO",
+                "Testo": term,
+                "Confidenza": "100%",
+                "Metodo": "Testo",
+            })
+
+    page.apply_redactions()
+    return raw_count, filtered_count
+
+
+# ============================================================
+# REDAZIONE PAGINA SCANSIONATA (OCR)
+# ============================================================
+
+def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
+                         analyzer, min_score, dpi, lang, log, page_num, debug_first=False):
+    """OCR su pagina scansionata + redazione con rettangoli su immagine."""
+    # Render pagina come immagine ad alta risoluzione
+    zoom = dpi / 72
+    mat = fitz.Matrix(zoom, zoom)
+    pix = src_page.get_pixmap(matrix=mat, alpha=False)
+    img_data = pix.tobytes("png")
+    img = Image.open(BytesIO(img_data))
+
+    raw_count = 0
+    filtered_count = 0
+
+    # OCR con bounding box
+    try:
+        ocr_data = pytesseract.image_to_data(
+            img, lang=lang, output_type=pytesseract.Output.DICT
+        )
+    except Exception as e:
+        st.warning(f"❌ Errore OCR pagina {page_num}: {e}. Pagina copiata senza redazione.")
+        new_page = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
+        img_bytes = BytesIO()
+        img.save(img_bytes, format="JPEG", quality=85)
+        new_page.insert_image(new_page.rect, stream=img_bytes.getvalue())
+        return 0, 0
+
+    # Lista parole con bbox, filtrate per confidenza minima OCR
+    words = []
+    for i in range(len(ocr_data["text"])):
+        word = ocr_data["text"][i].strip()
+        try:
+            conf = int(ocr_data["conf"][i])
+        except (ValueError, TypeError):
+            conf = 0
+        if word and conf > 30:
+            words.append({
+                "text": word,
+                "x": ocr_data["left"][i],
+                "y": ocr_data["top"][i],
+                "w": ocr_data["width"][i],
+                "h": ocr_data["height"][i],
+            })
+
+    if debug_first:
+        st.write(f"🔍 Pagina {page_num} (OCR) — parole rilevate: {len(words)}")
+        if words:
+            sample = " ".join([w["text"] for w in words[:20]])
+            st.write(f"   Estratto OCR: `{sample}...`")
+
+    draw = ImageDraw.Draw(img)
+
+    if words:
+        # Ricostruisci testo completo tracciando offset
+        full_text = ""
+        word_positions = []
+        for idx, w in enumerate(words):
+            start = len(full_text)
+            full_text += w["text"]
+            end = len(full_text)
+            word_positions.append((start, end, idx))
+            full_text += " "
+
+        # Analisi Presidio
+        results = []
+        if selected_entities and full_text.strip():
+            try:
+                all_results = analyzer.analyze(
+                    text=full_text,
+                    entities=selected_entities,
+                    language="it",
+                )
+                raw_count = len(all_results)
+                results = [r for r in all_results if r.score >= min_score]
+                filtered_count = len(results)
+
+                if debug_first and all_results:
+                    sample = [
+                        f"{r.entity_type}={full_text[r.start:r.end][:25]!r}(s={r.score:.2f})"
+                        for r in all_results[:6]
+                    ]
+                    st.write(f"   Entità grezze OCR: {' | '.join(sample)}")
+
+            except Exception as e:
+                st.warning(f"Errore Presidio pagina {page_num} (OCR): {e}")
+
+        # Rettangoli su entità Presidio
+        for result in results:
+            matching_idx = [
+                idx for start, end, idx in word_positions
+                if start < result.end and end > result.start
+            ]
+            if matching_idx:
+                matching = [words[i] for i in matching_idx]
+                x_min = min(w["x"] for w in matching)
+                y_min = min(w["y"] for w in matching)
+                x_max = max(w["x"] + w["w"] for w in matching)
+                y_max = max(w["y"] + w["h"] for w in matching)
+                pad = 2
+                draw.rectangle(
+                    [(x_min - pad, y_min - pad), (x_max + pad, y_max + pad)],
+                    fill="black",
+                )
+                log.append({
+                    "Pagina": page_num,
+                    "Tipo": result.entity_type,
+                    "Testo": full_text[result.start:result.end],
+                    "Confidenza": f"{result.score:.0%}",
+                    "Metodo": "OCR",
+                })
+
+        # Termini personalizzati: matching sequenza esatta
+        for term in custom_terms:
+            term = term.strip()
+            if not term:
+                continue
+            term_words = term.split()
+            for i in range(len(words) - len(term_words) + 1):
+                match = all(
+                    words[i + j]["text"].lower() == term_words[j].lower()
+                    for j in range(len(term_words))
+                )
+                if match:
+                    matching = words[i:i + len(term_words)]
+                    x_min = min(w["x"] for w in matching)
+                    y_min = min(w["y"] for w in matching)
+                    x_max = max(w["x"] + w["w"] for w in matching)
+                    y_max = max(w["y"] + w["h"] for w in matching)
+                    pad = 2
+                    draw.rectangle(
+                        [(x_min - pad, y_min - pad), (x_max + pad, y_max + pad)],
+                        fill="black",
+                    )
+                    log.append({
+                        "Pagina": page_num,
+                        "Tipo": "TERMINE PERSONALIZZATO",
+                        "Testo": term,
+                        "Confidenza": "100%",
+                        "Metodo": "OCR",
+                    })
+
+    # Salva immagine redatta come nuova pagina
+    img_bytes = BytesIO()
+    img.save(img_bytes, format="JPEG", quality=85, optimize=True)
+    img_bytes.seek(0)
+    new_page = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
+    new_page.insert_image(new_page.rect, stream=img_bytes.getvalue())
+
+    return raw_count, filtered_count
+
+
+# ============================================================
+# FUNZIONE PRINCIPALE
+# ============================================================
+
+def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
+               min_score=0.4, ocr_mode="auto", ocr_dpi=300, ocr_lang="ita"):
+    """
+    Anonimizza un PDF. Gestisce sia pagine testuali che scansionate.
+    ocr_mode: 'auto' | 'always' | 'never'
+    """
+    src_doc = fitz.open(stream=input_bytes, filetype="pdf")
+    out_doc = fitz.open()
+    log = []
+
+    st.write(f"📄 Documento: {len(src_doc)} pagine")
+    st.write(f"🎯 Entità cercate ({len(selected_entities)}): {', '.join(selected_entities)}")
+    st.write(f"📊 Soglia minima: {min_score:.0%} · Modalità OCR: **{ocr_mode}**")
+
+    total_pages = len(src_doc)
+    progress_bar = st.progress(0.0)
+    status_text = st.empty()
+
+    total_raw = 0
+    total_filtered = 0
+    pages_ocr = 0
+    pages_text = 0
+
+    for page_num, src_page in enumerate(src_doc, start=1):
+        progress_bar.progress(page_num / total_pages)
+
+        scanned = is_scanned_page(src_page)
+        use_ocr = (
+            (ocr_mode == "always" and TESSERACT_AVAILABLE) or
+            (ocr_mode == "auto" and scanned and TESSERACT_AVAILABLE)
+        )
+
+        is_first_processed_page = (page_num == 1)
+
+        if use_ocr:
+            status_text.text(f"🔍 OCR pagina {page_num}/{total_pages} (può richiedere alcuni secondi)...")
+            raw, filtered = process_scanned_page(
+                src_page, out_doc, selected_entities, custom_terms,
+                analyzer, min_score, ocr_dpi, ocr_lang, log, page_num,
+                debug_first=is_first_processed_page,
+            )
+            pages_ocr += 1
+        else:
+            if scanned and not TESSERACT_AVAILABLE:
+                status_text.text(f"⚠️ Pagina {page_num}/{total_pages} sembra scansionata ma OCR non disponibile")
+            else:
+                status_text.text(f"📄 Pagina {page_num}/{total_pages}...")
+
+            # Copia pagina nel doc di output e applica redazione standard
+            out_doc.insert_pdf(src_doc, from_page=page_num - 1, to_page=page_num - 1)
+            new_page = out_doc[-1]
+            raw, filtered = redact_text_page(
+                new_page, selected_entities, custom_terms,
+                analyzer, min_score, log, page_num,
+                debug_first=is_first_processed_page,
+            )
+            pages_text += 1
+
+        total_raw += raw
+        total_filtered += filtered
+
+    progress_bar.empty()
+    status_text.empty()
+
+    # Riepilogo
+    st.write(f"📈 **Riepilogo:** {pages_text} pagine testuali · {pages_ocr} pagine OCR")
+    st.write(f"   Presidio: {total_raw} risultati grezzi → {total_filtered} dopo filtro soglia ≥{min_score:.0%}")
+    if total_raw > 0 and total_filtered == 0:
+        st.warning(f"⚠️ Presidio ha trovato entità ma tutte con score < {min_score:.0%}. Abbassa la soglia nella sidebar.")
+
+    output_bytes = BytesIO()
+    out_doc.save(output_bytes, garbage=4, deflate=True, clean=True)
+    out_doc.close()
+    src_doc.close()
+    output_bytes.seek(0)
+    return output_bytes.getvalue(), log
+
+
+# ============================================================
+# INTERFACCIA UTENTE
+# ============================================================
+
+st.title("🔒 Anonimizzatore PDF")
+st.caption("Anonimizzazione documenti in locale · Powered by Microsoft Presidio + Tesseract OCR")
+
+# Banner stato OCR
+if TESSERACT_AVAILABLE and ITALIAN_AVAILABLE:
+    st.success(f"✅ OCR attivo (Tesseract {TESSERACT_VERSION}) — PDF scansionati supportati in italiano")
+elif TESSERACT_AVAILABLE and not ITALIAN_AVAILABLE:
+    st.warning(f"⚠️ Tesseract installato ma lingua italiana mancante. Reinstalla Tesseract scegliendo il pacchetto italiano.")
+else:
+    st.info("ℹ️ Tesseract OCR non rilevato — funzionano solo PDF testuali. Per installare Tesseract, vedi README.md")
+
+# --- SIDEBAR ---
+with st.sidebar:
+    st.header("⚙️ Cosa anonimizzare")
+
+    st.subheader("Dati personali")
+    use_person = st.checkbox("Nomi di persona", value=True)
+    use_email = st.checkbox("Email", value=True)
+    use_phone = st.checkbox("Numeri di telefono", value=True)
+    use_location = st.checkbox("Località e indirizzi", value=True)
+    use_date = st.checkbox("Date", value=False, help="Disabilitato di default: spesso le date servono nei documenti legali")
+
+    st.subheader("Documenti italiani")
+    use_cf = st.checkbox("Codice fiscale", value=True)
+    use_piva = st.checkbox("Partita IVA", value=True)
+    use_ci = st.checkbox("Carta d'identità", value=True)
+    use_patente = st.checkbox("Patente di guida", value=True)
+    use_passport = st.checkbox("Passaporto", value=True)
+
+    st.subheader("Dati finanziari")
+    use_iban = st.checkbox("IBAN", value=True)
+    use_credit_card = st.checkbox("Carta di credito", value=True)
+
+    st.subheader("Altri")
+    use_url = st.checkbox("URL", value=False)
+    use_ip = st.checkbox("Indirizzi IP", value=False)
+    use_crypto = st.checkbox("Wallet crypto", value=False)
+
+    st.divider()
+
+    st.subheader("🎚️ Soglia di confidenza")
+    min_score = st.slider(
+        "Sensibilità del rilevamento",
+        min_value=0.1, max_value=1.0, value=0.4, step=0.05,
+        help="Più alto = meno falsi positivi ma rischio di perdere occorrenze.",
+    )
+
+    st.divider()
+
+    st.subheader("🔍 OCR (PDF scansionati)")
+    if TESSERACT_AVAILABLE:
+        ocr_mode = st.radio(
+            "Modalità OCR",
+            options=["auto", "always", "never"],
+            format_func=lambda x: {
+                "auto": "🤖 Automatica (consigliata)",
+                "always": "🔄 Forza OCR su tutto",
+                "never": "❌ Mai OCR",
+            }[x],
+            help="Auto: rileva automaticamente le pagine scansionate e applica OCR solo dove serve.",
+        )
+        ocr_dpi = st.select_slider(
+            "Qualità OCR (DPI)",
+            options=[150, 200, 300, 400, 600],
+            value=300,
+            help="Più alto = OCR più accurato ma più lento. 300 è lo standard.",
+        )
+    else:
+        ocr_mode = "never"
+        ocr_dpi = 300
+        st.caption("⚠️ Tesseract non installato — vedi README.md")
+
+# Mappa entità - LISTA di tuple (non dict con bool come chiavi!)
+entity_map = [
+    (use_person, "PERSON"),
+    (use_email, "EMAIL_ADDRESS"),
+    (use_phone, "PHONE_NUMBER"),
+    (use_location, "LOCATION"),
+    (use_date, "DATE_TIME"),
+    (use_cf, "IT_FISCAL_CODE"),
+    (use_piva, "IT_VAT_CODE"),
+    (use_ci, "IT_IDENTITY_CARD"),
+    (use_patente, "IT_DRIVER_LICENSE"),
+    (use_passport, "IT_PASSPORT"),
+    (use_iban, "IBAN_CODE"),
+    (use_credit_card, "CREDIT_CARD"),
+    (use_url, "URL"),
+    (use_ip, "IP_ADDRESS"),
+    (use_crypto, "CRYPTO"),
+]
+selected_entities = [entity for flag, entity in entity_map if flag]
+
+# --- MAIN ---
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("📄 Documento")
+    uploaded_file = st.file_uploader(
+        "Carica il PDF da anonimizzare",
+        type=["pdf"],
+        label_visibility="collapsed",
+    )
+
+with col2:
+    st.subheader("🎯 Termini specifici")
+    custom_terms_text = st.text_area(
+        "Inserisci nomi, ragioni sociali, indirizzi (uno per riga)",
+        placeholder="Mario Rossi\nACME S.p.A.\nVia Roma 12, Milano",
+        height=140,
+        label_visibility="collapsed",
+    )
+
+custom_terms = [t for t in custom_terms_text.split("\n") if t.strip()] if custom_terms_text else []
+
+if selected_entities or custom_terms:
+    summary = []
+    if selected_entities:
+        summary.append(f"**{len(selected_entities)} categorie automatiche**")
+    if custom_terms:
+        summary.append(f"**{len(custom_terms)} termini specifici**")
+    summary.append(f"OCR: **{ocr_mode}**" if TESSERACT_AVAILABLE else "OCR: **non disponibile**")
+    st.info(" · ".join(summary))
+
+st.divider()
+
+# --- SEZIONE DIAGNOSTICA ---
+with st.expander("🧪 Test e diagnostica"):
+    st.markdown("**Verifica che tutti i componenti funzionino correttamente**")
+
+    col_test1, col_test2 = st.columns(2)
+
+    with col_test1:
+        if st.button("Test Presidio (rilevamento entità)"):
+            with st.spinner("Test in corso..."):
+                try:
+                    analyzer = initialize_analyzer()
+                    test_text = """
+                    Mario Rossi, nato il 15/03/1980 a Roma.
+                    Email: mario.rossi@example.com
+                    Telefono: +39 3201234567
+                    Codice Fiscale: RSSMRA80C15H501U
+                    Partita IVA: 12345678901
+                    IBAN: IT60X0542811101000000123456
+                    """
+                    results = analyzer.analyze(
+                        text=test_text,
+                        entities=selected_entities if selected_entities else None,
+                        language="it",
+                    )
+                    if results:
+                        st.success(f"✅ Test OK: {len(results)} entità rilevate")
+                        for r in results:
+                            st.text(f"- {r.entity_type}: {test_text[r.start:r.end]} ({r.score:.0%})")
+                    else:
+                        st.warning("⚠️ Nessuna entità rilevata. Verifica i flag in sidebar.")
+                except Exception as e:
+                    st.error(f"❌ Errore: {e}")
+
+    with col_test2:
+        st.markdown("**Stato componenti:**")
+        st.markdown(f"- Presidio: ✅ pronto")
+        st.markdown(f"- Categorie attive: **{len(selected_entities)}**")
+        st.markdown(f"- Soglia: **{min_score:.0%}**")
+        st.markdown(f"- Termini custom: **{len(custom_terms)}**")
+        if TESSERACT_AVAILABLE:
+            st.markdown(f"- Tesseract: ✅ versione {TESSERACT_VERSION}")
+            st.markdown(f"- Lingua italiana: {'✅' if ITALIAN_AVAILABLE else '❌'}")
+            if TESSERACT_PATH:
+                st.caption(f"Path: `{TESSERACT_PATH}`")
+        else:
+            st.markdown(f"- Tesseract: ❌ non rilevato")
+            st.caption("Installa Tesseract per supportare PDF scansionati")
+
+st.divider()
+
+# --- AZIONE ---
+if uploaded_file is not None:
+    if not selected_entities and not custom_terms:
+        st.error("⚠️ Seleziona almeno una categoria nella sidebar o inserisci un termine specifico.")
+    else:
+        if st.button("🔒 Anonimizza documento", type="primary", use_container_width=True):
+
+            with st.status("Caricamento motore di analisi...", expanded=False) as status:
+                analyzer = initialize_analyzer()
+                status.update(label="✅ Motore pronto", state="complete")
+
+            input_bytes = uploaded_file.read()
+            output_bytes, log = redact_pdf(
+                input_bytes,
+                selected_entities,
+                custom_terms,
+                analyzer,
+                min_score=min_score,
+                ocr_mode=ocr_mode,
+                ocr_dpi=ocr_dpi,
+                ocr_lang="ita" if ITALIAN_AVAILABLE else "eng",
+            )
+
+            if log:
+                st.success(f"✅ Anonimizzazione completata: **{len(log)} elementi oscurati**")
+
+                col_a, col_b = st.columns([1, 2])
+
+                with col_a:
+                    output_filename = f"anonimizzato_{uploaded_file.name}"
+                    st.download_button(
+                        label="📥 Scarica PDF anonimizzato",
+                        data=output_bytes,
+                        file_name=output_filename,
+                        mime="application/pdf",
+                        type="primary",
+                        use_container_width=True,
+                    )
+
+                with col_b:
+                    types_count = Counter(item["Tipo"] for item in log)
+                    method_count = Counter(item["Metodo"] for item in log)
+                    summary = " · ".join([f"{count} {tipo}" for tipo, count in types_count.most_common()])
+                    st.caption(f"**Tipi:** {summary}")
+                    st.caption(f"**Metodi:** {dict(method_count)}")
+
+                with st.expander(f"📊 Report completo ({len(log)} redazioni)"):
+                    st.dataframe(log, use_container_width=True, hide_index=True)
+            else:
+                st.warning("⚠️ Nessuna entità sensibile rilevata. Controlla il riepilogo Presidio sopra.")
+
+# --- FOOTER ---
+st.divider()
+with st.expander("ℹ️ Informazioni e avvertenze"):
+    st.markdown("""
+    **Privacy:** tutti i file sono elaborati in locale. Nessun dato esce dal computer.
+
+    **Redazione testo:** rimozione fisica del testo + rettangolo nero (irreversibile).
+
+    **Redazione scansioni (OCR):** il PDF viene rasterizzato e ricostruito come immagine con rettangoli neri (la pagina diventa solo immagine, non selezionabile — più sicuro per dati sensibili).
+
+    **Limiti:**
+    - L'OCR può perdere parole con scansioni di bassa qualità.
+    - Nomi inusuali possono sfuggire — usa sempre i "termini specifici" per certezza.
+    - Date disabilitate di default perché spesso rilevanti nei documenti legali.
+
+    **Workflow:**
+    1. Carica PDF
+    2. Lascia i flag predefiniti per documenti italiani
+    3. Aggiungi nei "termini specifici" nomi/società da oscurare con certezza
+    4. Anonimizza
+    5. **Verifica sempre il PDF risultante** prima dell'invio
+    """)
