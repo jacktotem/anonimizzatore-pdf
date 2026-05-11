@@ -4,7 +4,7 @@
 ; ========================================
 
 #define MyAppName "Anonimizzatore PDF"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "Anonimizzatore PDF"
 #define MyAppExeName "AnonimizzatorePDF.bat"
 #define MyAppId "{{B9E4D3F2-5C6D-5E9F-A2B3-3D4E5F6A7B8C}"
