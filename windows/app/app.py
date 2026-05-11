@@ -2,38 +2,56 @@
 Anonimizzatore PDF
 Basato su Microsoft Presidio + PyMuPDF + Tesseract OCR
 Anonimizzazione locale di documenti legali italiani (testo + scansioni).
+
+Versione: 1.1.0
+Licenza: GNU AGPL v3.0
 """
 
 import streamlit as st
 import fitz  # PyMuPDF
 import os
 import sys
+import logging
 from io import BytesIO
 from collections import Counter
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
+__version__ = "1.1.0"
+
+# Logging diagnostico (sostituisce i try/except: pass)
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("anonimizzatore-pdf")
+
 
 # ============================================================
 # DETECTION TESSERACT OCR
 # ============================================================
+# L-02: cerchiamo PRIMA nei path di sistema (Program Files),
+# DOPO in %LOCALAPPDATA% per evitare path hijacking
+# L-01: niente try/except: pass cieco — logghiamo gli errori
 
 TESSERACT_AVAILABLE = False
 TESSERACT_PATH = None
 TESSERACT_VERSION = None
 ITALIAN_AVAILABLE = False
+TESSERACT_INIT_ERROR = None
 
 try:
     import pytesseract
     from PIL import Image, ImageDraw
 
-    # Cerca Tesseract nei path tipici di Windows
     if sys.platform == "win32":
+        # ORDINE IMPORTANTE: prima i path di sistema (richiedono admin per
+        # essere modificati), poi quelli utente. Mai il contrario.
         possible_paths = [
             r"C:\Program Files\Tesseract-OCR\tesseract.exe",
             r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-            os.path.expanduser(r"~\AppData\Local\Tesseract-OCR\tesseract.exe"),
             os.path.expanduser(r"~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"),
+            os.path.expanduser(r"~\AppData\Local\Tesseract-OCR\tesseract.exe"),
         ]
         for path in possible_paths:
             if os.path.exists(path):
@@ -47,8 +65,13 @@ try:
     available_langs = pytesseract.get_languages(config="")
     ITALIAN_AVAILABLE = "ita" in available_langs
 
-except Exception:
-    pass
+except ImportError as e:
+    TESSERACT_INIT_ERROR = f"Modulo non disponibile: {type(e).__name__}"
+    logger.warning("Tesseract/PIL non importabili: %s", e)
+except Exception as e:
+    # Niente più 'pass' silenzioso: registriamo l'errore
+    TESSERACT_INIT_ERROR = f"{type(e).__name__}"
+    logger.warning("Inizializzazione Tesseract fallita: %s", e)
 
 
 # ============================================================
@@ -89,6 +112,124 @@ def initialize_analyzer():
 
 
 # ============================================================
+# SANITIZZAZIONE PDF (M-01, M-03)
+# ============================================================
+
+def sanitize_pdf_metadata(doc):
+    """
+    M-01: Rimuove TUTTI i metadata del PDF (autore, titolo, oggetto,
+    creator, producer) e l'XMP metadata stream.
+
+    Un PDF generato da Word può avere autore "Mario Rossi" nei metadata;
+    pdfinfo o qualsiasi PDF reader li mostra. Vanno azzerati.
+    """
+    try:
+        # Azzera tutti i metadata standard
+        doc.set_metadata({
+            "title": "",
+            "author": "",
+            "subject": "",
+            "keywords": "",
+            "creator": "",
+            "producer": "Anonimizzatore PDF",
+            "creationDate": "",
+            "modDate": "",
+        })
+        # Rimuove anche l'XMP metadata stream (Adobe Extensible Metadata)
+        doc.del_xml_metadata()
+        logger.info("Metadata sanitizzati")
+    except Exception as e:
+        logger.warning("Sanitizzazione metadata fallita: %s", e)
+
+
+def sanitize_pdf_objects(doc):
+    """
+    M-03: Rimuove annotazioni, allegati, AcroForm e JavaScript.
+
+    Per documenti legali è critico: i commenti spesso contengono nomi,
+    gli allegati possono essere CV/contratti, i campi form contengono
+    dati inseriti, JavaScript può estrarre informazioni.
+    """
+    annotations_removed = 0
+    forms_cleared = 0
+    js_removed = 0
+
+    try:
+        # 1. Annotazioni (commenti, sticky note, evidenziature) su ogni pagina
+        for page in doc:
+            annots = list(page.annots() or [])
+            for annot in annots:
+                try:
+                    page.delete_annot(annot)
+                    annotations_removed += 1
+                except Exception as e:
+                    logger.warning("Rimozione annotazione fallita: %s", e)
+
+        # 2. AcroForm fields (valori inseriti nei moduli)
+        for page in doc:
+            try:
+                widgets = list(page.widgets() or [])
+                for widget in widgets:
+                    try:
+                        # Svuota il valore del campo
+                        widget.field_value = ""
+                        widget.update()
+                        forms_cleared += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # 3. Allegati embedded (file collegati al PDF)
+        attachments_removed = 0
+        try:
+            embedded_count = doc.embfile_count()
+            # embfile_del lavora per indice o nome; iteriamo a ritroso
+            for i in range(embedded_count - 1, -1, -1):
+                try:
+                    info = doc.embfile_info(i)
+                    doc.embfile_del(info["filename"])
+                    attachments_removed += 1
+                except Exception as e:
+                    logger.warning("Rimozione allegato fallita: %s", e)
+        except Exception:
+            pass
+
+        # 4. JavaScript a livello documento (può eseguire codice all'apertura)
+        try:
+            js_count = doc.get_js()
+            if js_count:
+                # Cerca e rimuove ogni JS azione
+                for xref in range(1, doc.xref_length()):
+                    try:
+                        obj = doc.xref_object(xref)
+                        if "/JavaScript" in obj or "/JS" in obj:
+                            # Sostituisce il contenuto con vuoto
+                            doc.update_object(xref, "<< >>")
+                            js_removed += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        logger.info(
+            "Sanitizzazione: %d annotazioni, %d form fields, %d allegati, %d JS rimossi",
+            annotations_removed, forms_cleared, attachments_removed, js_removed
+        )
+
+        return {
+            "annotations": annotations_removed,
+            "forms": forms_cleared,
+            "attachments": attachments_removed,
+            "javascript": js_removed,
+        }
+
+    except Exception as e:
+        logger.warning("Sanitizzazione oggetti fallita: %s", e)
+        return {"annotations": 0, "forms": 0, "attachments": 0, "javascript": 0}
+
+
+# ============================================================
 # UTILITY
 # ============================================================
 
@@ -98,11 +239,66 @@ def is_scanned_page(page, threshold_chars=50):
     return len(text.strip()) < threshold_chars
 
 
+def has_inline_images(page, min_image_area_ratio=0.05):
+    """
+    M-02: Detect immagini inline significative in una pagina testuale.
+
+    Una pagina di contratto con testo + foto di carta d'identità
+    NON viene rilevata come "scansionata" (ha abbondante testo),
+    ma l'immagine contiene PII che vanno OCRate.
+
+    Ritorna True se ci sono immagini che occupano almeno il 5%
+    dell'area della pagina (escludiamo logo piccoli, watermark, ecc.).
+    """
+    try:
+        images = page.get_images(full=True)
+        if not images:
+            return False
+
+        page_area = page.rect.width * page.rect.height
+        if page_area <= 0:
+            return False
+
+        # Calcola area totale delle immagini significative
+        for img in images:
+            xref = img[0]
+            # Trova i bounding box dell'immagine sulla pagina
+            try:
+                bbox_list = page.get_image_bbox(img)
+                if not isinstance(bbox_list, list):
+                    bbox_list = [bbox_list]
+                for bbox in bbox_list:
+                    if hasattr(bbox, "width") and hasattr(bbox, "height"):
+                        img_area = bbox.width * bbox.height
+                        if img_area / page_area >= min_image_area_ratio:
+                            return True
+            except Exception:
+                # Se non riusciamo a calcolare il bbox, conservativo: True
+                return True
+
+        return False
+    except Exception as e:
+        logger.warning("Detection immagini fallita: %s", e)
+        return False
+
+
+def safe_error_message(action, exception):
+    """
+    L-03: Restituisce un messaggio di errore SENZA esporre dettagli
+    sensibili (stacktrace può contenere frammenti del PDF processato).
+    """
+    error_type = type(exception).__name__
+    # Logghiamo i dettagli completi (file locale), ma all'utente diamo solo il tipo
+    logger.error("%s: %s — %s", action, error_type, str(exception)[:200])
+    return f"❌ {action}: {error_type}. Controlla i log per i dettagli."
+
+
 # ============================================================
 # REDAZIONE PAGINA TESTUALE (standard)
 # ============================================================
 
-def redact_text_page(page, selected_entities, custom_terms, analyzer, min_score, log, page_num, debug_first=False):
+def redact_text_page(page, selected_entities, custom_terms, analyzer, min_score,
+                     log, page_num, debug_first=False):
     """Redazione su pagina con testo selezionabile."""
     text = page.get_text()
 
@@ -114,7 +310,6 @@ def redact_text_page(page, selected_entities, custom_terms, analyzer, min_score,
 
     if text.strip() and selected_entities:
         try:
-            # Analisi SENZA score_threshold, filtriamo a mano
             all_results = analyzer.analyze(
                 text=text,
                 entities=selected_entities,
@@ -129,12 +324,12 @@ def redact_text_page(page, selected_entities, custom_terms, analyzer, min_score,
                 ]
                 st.write(f"   Esempi grezzi: {' | '.join(debug_sample)}")
 
-            # Filtro manuale per soglia
             results = [r for r in all_results if r.score >= min_score]
             filtered_count = len(results)
 
         except Exception as e:
-            st.error(f"❌ Errore analisi pagina {page_num}: {type(e).__name__}: {e}")
+            # L-03: messaggio sanitizzato, dettagli solo nei log
+            st.error(safe_error_message(f"Analisi pagina {page_num}", e))
             results = []
 
         for result in results:
@@ -176,9 +371,9 @@ def redact_text_page(page, selected_entities, custom_terms, analyzer, min_score,
 # ============================================================
 
 def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
-                         analyzer, min_score, dpi, lang, log, page_num, debug_first=False):
+                         analyzer, min_score, dpi, lang, log, page_num,
+                         debug_first=False):
     """OCR su pagina scansionata + redazione con rettangoli su immagine."""
-    # Render pagina come immagine ad alta risoluzione
     zoom = dpi / 72
     mat = fitz.Matrix(zoom, zoom)
     pix = src_page.get_pixmap(matrix=mat, alpha=False)
@@ -188,20 +383,19 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
     raw_count = 0
     filtered_count = 0
 
-    # OCR con bounding box
     try:
         ocr_data = pytesseract.image_to_data(
             img, lang=lang, output_type=pytesseract.Output.DICT
         )
     except Exception as e:
-        st.warning(f"❌ Errore OCR pagina {page_num}: {e}. Pagina copiata senza redazione.")
+        # L-03: messaggio sanitizzato
+        st.warning(safe_error_message(f"OCR pagina {page_num}", e))
         new_page = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
         img_bytes = BytesIO()
         img.save(img_bytes, format="JPEG", quality=85)
         new_page.insert_image(new_page.rect, stream=img_bytes.getvalue())
         return 0, 0
 
-    # Lista parole con bbox, filtrate per confidenza minima OCR
     words = []
     for i in range(len(ocr_data["text"])):
         word = ocr_data["text"][i].strip()
@@ -227,7 +421,6 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
     draw = ImageDraw.Draw(img)
 
     if words:
-        # Ricostruisci testo completo tracciando offset
         full_text = ""
         word_positions = []
         for idx, w in enumerate(words):
@@ -237,7 +430,6 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
             word_positions.append((start, end, idx))
             full_text += " "
 
-        # Analisi Presidio
         results = []
         if selected_entities and full_text.strip():
             try:
@@ -258,9 +450,9 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                     st.write(f"   Entità grezze OCR: {' | '.join(sample)}")
 
             except Exception as e:
-                st.warning(f"Errore Presidio pagina {page_num} (OCR): {e}")
+                # L-03: messaggio sanitizzato
+                st.warning(safe_error_message(f"Presidio OCR pagina {page_num}", e))
 
-        # Rettangoli su entità Presidio
         for result in results:
             matching_idx = [
                 idx for start, end, idx in word_positions
@@ -285,7 +477,6 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                     "Metodo": "OCR",
                 })
 
-        # Termini personalizzati: matching sequenza esatta
         for term in custom_terms:
             term = term.strip()
             if not term:
@@ -315,7 +506,6 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                         "Metodo": "OCR",
                     })
 
-    # Salva immagine redatta come nuova pagina
     img_bytes = BytesIO()
     img.save(img_bytes, format="JPEG", quality=85, optimize=True)
     img_bytes.seek(0)
@@ -351,11 +541,21 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     total_filtered = 0
     pages_ocr = 0
     pages_text = 0
+    pages_with_inline_images = 0
 
     for page_num, src_page in enumerate(src_doc, start=1):
         progress_bar.progress(page_num / total_pages)
 
         scanned = is_scanned_page(src_page)
+
+        # M-02: rileva immagini inline significative in pagine testuali
+        has_images = False
+        if not scanned:
+            has_images = has_inline_images(src_page)
+            if has_images:
+                pages_with_inline_images += 1
+
+        # Decide se applicare OCR
         use_ocr = (
             (ocr_mode == "always" and TESSERACT_AVAILABLE) or
             (ocr_mode == "auto" and scanned and TESSERACT_AVAILABLE)
@@ -364,7 +564,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         is_first_processed_page = (page_num == 1)
 
         if use_ocr:
-            status_text.text(f"🔍 OCR pagina {page_num}/{total_pages} (può richiedere alcuni secondi)...")
+            status_text.text(f"🔍 OCR pagina {page_num}/{total_pages}...")
             raw, filtered = process_scanned_page(
                 src_page, out_doc, selected_entities, custom_terms,
                 analyzer, min_score, ocr_dpi, ocr_lang, log, page_num,
@@ -373,11 +573,12 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             pages_ocr += 1
         else:
             if scanned and not TESSERACT_AVAILABLE:
-                status_text.text(f"⚠️ Pagina {page_num}/{total_pages} sembra scansionata ma OCR non disponibile")
+                status_text.text(f"⚠️ Pagina {page_num}/{total_pages} scansionata ma OCR non disponibile")
+            elif has_images and ocr_mode == "auto":
+                status_text.text(f"📄 Pagina {page_num}/{total_pages} (⚠️ contiene immagini)")
             else:
                 status_text.text(f"📄 Pagina {page_num}/{total_pages}...")
 
-            # Copia pagina nel doc di output e applica redazione standard
             out_doc.insert_pdf(src_doc, from_page=page_num - 1, to_page=page_num - 1)
             new_page = out_doc[-1]
             raw, filtered = redact_text_page(
@@ -393,9 +594,35 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     progress_bar.empty()
     status_text.empty()
 
+    # M-02: warning se ci sono immagini inline in modalità auto
+    if pages_with_inline_images > 0 and ocr_mode == "auto":
+        st.warning(
+            f"⚠️ **Attenzione:** rilevate immagini significative in {pages_with_inline_images} pagine "
+            f"testuali (firme scansionate, foto di documenti, timbri...). "
+            f"Queste immagini **NON sono state OCRate**. Se possono contenere dati sensibili, "
+            f"rilancia l'anonimizzazione in modalità **'Forza OCR su tutto'**."
+        )
+
+    # M-01 + M-03: sanitizzazione PDF di output
+    status_text.text("🧹 Sanitizzazione metadata e oggetti residui...")
+    sanitize_pdf_metadata(out_doc)
+    sanitize_stats = sanitize_pdf_objects(out_doc)
+    status_text.empty()
+
     # Riepilogo
     st.write(f"📈 **Riepilogo:** {pages_text} pagine testuali · {pages_ocr} pagine OCR")
     st.write(f"   Presidio: {total_raw} risultati grezzi → {total_filtered} dopo filtro soglia ≥{min_score:.0%}")
+
+    sanitize_total = sum(sanitize_stats.values())
+    if sanitize_total > 0:
+        st.write(
+            f"   🧹 Sanitizzazione: "
+            f"{sanitize_stats['annotations']} annotazioni · "
+            f"{sanitize_stats['forms']} form fields · "
+            f"{sanitize_stats['attachments']} allegati · "
+            f"{sanitize_stats['javascript']} JavaScript rimossi"
+        )
+
     if total_raw > 0 and total_filtered == 0:
         st.warning(f"⚠️ Presidio ha trovato entità ma tutte con score < {min_score:.0%}. Abbassa la soglia nella sidebar.")
 
@@ -412,15 +639,19 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 # ============================================================
 
 st.title("🔒 Anonimizzatore PDF")
-st.caption("Anonimizzazione documenti in locale · Powered by Microsoft Presidio + Tesseract OCR")
+st.caption(f"Anonimizzazione documenti in locale · Powered by Microsoft Presidio + Tesseract OCR · v{__version__}")
 
 # Banner stato OCR
 if TESSERACT_AVAILABLE and ITALIAN_AVAILABLE:
     st.success(f"✅ OCR attivo (Tesseract {TESSERACT_VERSION}) — PDF scansionati supportati in italiano")
 elif TESSERACT_AVAILABLE and not ITALIAN_AVAILABLE:
-    st.warning(f"⚠️ Tesseract installato ma lingua italiana mancante. Reinstalla Tesseract scegliendo il pacchetto italiano.")
+    st.warning("⚠️ Tesseract installato ma lingua italiana mancante. Reinstalla Tesseract scegliendo il pacchetto italiano.")
 else:
-    st.info("ℹ️ Tesseract OCR non rilevato — funzionano solo PDF testuali. Per installare Tesseract, vedi README.md")
+    info_msg = "ℹ️ Tesseract OCR non rilevato — funzionano solo PDF testuali."
+    if TESSERACT_INIT_ERROR:
+        info_msg += f" (causa: {TESSERACT_INIT_ERROR})"
+    info_msg += " Per installare Tesseract, vedi README.md"
+    st.info(info_msg)
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -466,11 +697,15 @@ with st.sidebar:
             "Modalità OCR",
             options=["auto", "always", "never"],
             format_func=lambda x: {
-                "auto": "🤖 Automatica (consigliata)",
-                "always": "🔄 Forza OCR su tutto",
+                "auto": "🤖 Automatica",
+                "always": "🔄 Forza OCR su tutto (più sicuro)",
                 "never": "❌ Mai OCR",
             }[x],
-            help="Auto: rileva automaticamente le pagine scansionate e applica OCR solo dove serve.",
+            help=(
+                "Auto: rileva automaticamente le pagine scansionate. "
+                "Forza OCR: applica OCR a ogni pagina anche se testuale, "
+                "utile per documenti che contengono firme/timbri/foto di ID. Più sicuro ma più lento."
+            ),
         )
         ocr_dpi = st.select_slider(
             "Qualità OCR (DPI)",
@@ -567,10 +802,11 @@ with st.expander("🧪 Test e diagnostica"):
                     else:
                         st.warning("⚠️ Nessuna entità rilevata. Verifica i flag in sidebar.")
                 except Exception as e:
-                    st.error(f"❌ Errore: {e}")
+                    st.error(safe_error_message("Test Presidio", e))
 
     with col_test2:
         st.markdown("**Stato componenti:**")
+        st.markdown(f"- Versione app: **{__version__}**")
         st.markdown(f"- Presidio: ✅ pronto")
         st.markdown(f"- Categorie attive: **{len(selected_entities)}**")
         st.markdown(f"- Soglia: **{min_score:.0%}**")
@@ -582,6 +818,8 @@ with st.expander("🧪 Test e diagnostica"):
                 st.caption(f"Path: `{TESSERACT_PATH}`")
         else:
             st.markdown(f"- Tesseract: ❌ non rilevato")
+            if TESSERACT_INIT_ERROR:
+                st.caption(f"Errore: {TESSERACT_INIT_ERROR}")
             st.caption("Installa Tesseract per supportare PDF scansionati")
 
 st.divider()
@@ -640,22 +878,27 @@ if uploaded_file is not None:
 # --- FOOTER ---
 st.divider()
 with st.expander("ℹ️ Informazioni e avvertenze"):
-    st.markdown("""
+    st.markdown(f"""
+    **Versione:** {__version__}
     **Privacy:** tutti i file sono elaborati in locale. Nessun dato esce dal computer.
 
     **Redazione testo:** rimozione fisica del testo + rettangolo nero (irreversibile).
 
-    **Redazione scansioni (OCR):** il PDF viene rasterizzato e ricostruito come immagine con rettangoli neri (la pagina diventa solo immagine, non selezionabile — più sicuro per dati sensibili).
+    **Redazione scansioni (OCR):** il PDF viene rasterizzato e ricostruito come immagine con rettangoli neri (la pagina diventa solo immagine, non selezionabile).
+
+    **Sanitizzazione automatica (v1.1+):** il PDF di output viene ripulito da metadata (autore, titolo), annotazioni, allegati, campi form e JavaScript.
 
     **Limiti:**
     - L'OCR può perdere parole con scansioni di bassa qualità.
     - Nomi inusuali possono sfuggire — usa sempre i "termini specifici" per certezza.
     - Date disabilitate di default perché spesso rilevanti nei documenti legali.
+    - Per documenti che contengono firme scansionate, foto di documenti d'identità o timbri all'interno di pagine altrimenti testuali, usa la modalità **"Forza OCR su tutto"**.
 
     **Workflow:**
     1. Carica PDF
     2. Lascia i flag predefiniti per documenti italiani
     3. Aggiungi nei "termini specifici" nomi/società da oscurare con certezza
-    4. Anonimizza
-    5. **Verifica sempre il PDF risultante** prima dell'invio
+    4. Scegli modalità OCR (Auto va bene per testo puro; Forza OCR per documenti con immagini)
+    5. Anonimizza
+    6. **Verifica sempre il PDF risultante** prima dell'invio
     """)
