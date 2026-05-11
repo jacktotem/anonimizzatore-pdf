@@ -3,7 +3,7 @@ Anonimizzatore PDF
 Basato su Microsoft Presidio + PyMuPDF + Tesseract OCR
 Anonimizzazione locale di documenti legali italiani (testo + scansioni).
 
-Versione: 1.1.0
+Versione: 1.1.1
 Licenza: GNU AGPL v3.0
 """
 
@@ -17,7 +17,7 @@ from collections import Counter
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -269,7 +269,7 @@ def has_inline_images(page, min_image_area_ratio=0.05):
                     bbox_list = [bbox_list]
                 for bbox in bbox_list:
                     if hasattr(bbox, "width") and hasattr(bbox, "height"):
-                        img_area = bbox.width * bbox.height
+                        img_area = abs(bbox.width) * abs(bbox.height)
                         if img_area / page_area >= min_image_area_ratio:
                             return True
             except Exception:
