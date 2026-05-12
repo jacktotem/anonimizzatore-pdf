@@ -53,13 +53,13 @@ $Binaries = @{
         # TODO(release): scaricare il file dall'URL sopra e pinnare l'hash con:
         #   Get-FileHash tesseract-ocr-w64-setup-5.4.0.20240606.exe -Algorithm SHA256
         # Il setup ora fallisce in produzione finché questo valore è il placeholder.
-        Sha256 = "AGGIORNARE_AL_PRIMO_RILASCIO"
+        Sha256 = "C885FFF6998E0608BA4BB8AB51436E1C6775C2BAFC2559A19B423E18678B60C9"
     }
     TessdataIta = @{
         # Tessdata ufficiale (mantained dal team Tesseract)
         Url = "https://github.com/tesseract-ocr/tessdata/raw/4.1.0/ita.traineddata"
         # TODO(release): pinnare l'hash del file servito al commit/tag 4.1.0.
-        Sha256 = "AGGIORNARE_AL_PRIMO_RILASCIO"
+        Sha256 = "4F7476C611312BEB8F8E182888DA08EA642D9824AE4402CC6235F61AB1406406"
     }
 }
 
