@@ -13,7 +13,7 @@ La sicurezza è critica per uno strumento di anonimizzazione di documenti legali
 
 ### Come segnalare
 
-Manda una email a: **REPLACE-BEFORE-MERGE@example.invalid**
+Manda una email a: **info@jacoporomani.it**
 
 Includi:
 - **Descrizione** della vulnerabilità

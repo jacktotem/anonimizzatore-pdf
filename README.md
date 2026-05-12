@@ -175,7 +175,7 @@ streamlit run src/app.py
 
 ### 📩 Contatti commerciali
 
-**Email**: REPLACE-BEFORE-MERGE@example.invalid
+**Email**: info@jacoporomani.it
 **Sito**: [inserire sito]
 **LinkedIn**: [inserire LinkedIn]
 

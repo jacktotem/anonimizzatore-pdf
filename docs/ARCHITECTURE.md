@@ -355,6 +355,6 @@ Contributi benvenuti — vedi `CONTRIBUTING.md`.
 
 - **GitHub Issues** per discussioni pubbliche
 - **GitHub Discussions** per Q&A
-- **Email**: REPLACE-BEFORE-MERGE@example.invalid per privato
+- **Email**: info@jacoporomani.it per privato
 
 Buon coding! 🚀

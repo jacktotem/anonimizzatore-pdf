@@ -143,7 +143,7 @@ Il codice è pubblico su GitHub. Puoi:
 ## 📞 Domande?
 
 - **GitHub Issues** per domande pubbliche
-- **Email**: REPLACE-BEFORE-MERGE@example.invalid per audit/compliance privato
+- **Email**: info@jacoporomani.it per audit/compliance privato
 
 ---
 

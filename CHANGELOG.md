@@ -57,7 +57,7 @@ le 10 issue aperte (`#1` – `#10`).
   da una sola variabile `$AppVersion`. Banner di log e dialog di
   successo non sono più disallineati con `installer.iss` e `src/app.py`. (`#9`)
 - Placeholder `[inserire email]` / `[inserire email security]` sostituiti
-  con `REPLACE-BEFORE-MERGE@example.invalid` in 8 file (SECURITY.md,
+  con `info@jacoporomani.it` in 8 file (SECURITY.md,
   README.md, CODE_OF_CONDUCT.md, CONTRIBUTING.md, mac/README-MAC.md,
   docs/FAQ.md, docs/PRIVACY-GDPR.md, docs/ARCHITECTURE.md). Il CI guard
   rifiuta il merge finché non sono sostituiti con un'email reale. (`#5`)
@@ -75,7 +75,7 @@ le 10 issue aperte (`#1` – `#10`).
 ### Known issues
 - Il guard CI fallisce il build finché:
   - L'email reale del maintainer non sostituisce
-    `REPLACE-BEFORE-MERGE@example.invalid` (`#5`)
+    `info@jacoporomani.it` (`#5`)
   - Gli SHA256 reali di Tesseract e Tessdata non sostituiscono
     `AGGIORNARE_AL_PRIMO_RILASCIO` in `windows/setup-dependencies.ps1`
     (`#1`)

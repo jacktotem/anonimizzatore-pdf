@@ -34,7 +34,7 @@ Questo Codice di Condotta si applica sia all'interno degli spazi del progetto si
 
 ## Applicazione
 
-Casi di comportamento abusivo, molesto o altrimenti inaccettabile possono essere segnalati contattando il team del progetto a **REPLACE-BEFORE-MERGE@example.invalid**. Tutte le segnalazioni saranno revisionate e investigate e si tradurranno in una risposta ritenuta necessaria e appropriata alle circostanze. Il team è obbligato a mantenere la riservatezza rispetto a chi segnala un incidente.
+Casi di comportamento abusivo, molesto o altrimenti inaccettabile possono essere segnalati contattando il team del progetto a **info@jacoporomani.it**. Tutte le segnalazioni saranno revisionate e investigate e si tradurranno in una risposta ritenuta necessaria e appropriata alle circostanze. Il team è obbligato a mantenere la riservatezza rispetto a chi segnala un incidente.
 
 I manutentori del progetto che non seguono o applicano il Codice di Condotta in buona fede possono affrontare ripercussioni temporanee o permanenti come determinato da altri membri della leadership del progetto.
 

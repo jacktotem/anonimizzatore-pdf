@@ -10,19 +10,19 @@ Questa guida è per **te** (Jacopo), per gestire le release del progetto su GitH
 
 Cerca e sostituisci nel repository:
 - `[username]` → il tuo username GitHub effettivo
-- `REPLACE-BEFORE-MERGE@example.invalid` → la tua email reale (commerciale + security)
+- `info@jacoporomani.it` → la tua email reale (commerciale + security)
 - `[inserire sito]` → l'URL della landing page (quando ce l'avrai)
 - `[inserire LinkedIn]` → il tuo profilo LinkedIn
 
 > ⚠️ Il check `scripts/release-checks.sh` (eseguito in CI) fallisce il build
-> se trova ancora `REPLACE-BEFORE-MERGE@example.invalid` in qualsiasi file
+> se trova ancora `info@jacoporomani.it` in qualsiasi file
 > tracciato. Vedi issue N-01 (#5).
 
 Comando rapido (su Mac/Linux):
 ```bash
 grep -rl "\[username\]" . | xargs sed -i '' 's/\[username\]/jacopo-romani/g'
-grep -rl "REPLACE-BEFORE-MERGE@example.invalid" . | \
-    xargs sed -i '' 's/REPLACE-BEFORE-MERGE@example.invalid/tua@email.it/g'
+grep -rl "info@jacoporomani.it" . | \
+    xargs sed -i '' 's/info@jacoporomani.it/tua@email.it/g'
 ```
 
 ### 2. Scarica il testo completo della licenza AGPL v3
