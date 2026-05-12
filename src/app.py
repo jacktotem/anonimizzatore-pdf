@@ -17,7 +17,7 @@ from collections import Counter
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -183,35 +183,68 @@ def sanitize_pdf_objects(doc):
 
         # 3. Allegati embedded (file collegati al PDF)
         attachments_removed = 0
+        # M-03-R3 (#4): cancelliamo per indice, non per nome. embfile_del(name)
+        # rimuove solo la prima occorrenza con quel nome — PDF prodotti fuori
+        # PyMuPDF (Acrobat, Word) possono avere allegati con nomi duplicati.
+        # L'eliminazione rinumera gli indici, quindi rileggiamo il count a
+        # ogni iterazione e rimuoviamo sempre l'ultimo.
         try:
-            embedded_count = doc.embfile_count()
-            # embfile_del lavora per indice o nome; iteriamo a ritroso
-            for i in range(embedded_count - 1, -1, -1):
+            max_iterations = doc.embfile_count() + 10  # safety cap
+            iteration = 0
+            while doc.embfile_count() > 0 and iteration < max_iterations:
+                iteration += 1
+                last_idx = doc.embfile_count() - 1
                 try:
-                    info = doc.embfile_info(i)
-                    doc.embfile_del(info["filename"])
+                    doc.embfile_del(last_idx)
                     attachments_removed += 1
                 except Exception as e:
-                    logger.warning("Rimozione allegato fallita: %s", e)
-        except Exception:
-            pass
+                    logger.warning(
+                        "Rimozione allegato indice %d fallita: %s", last_idx, e
+                    )
+                    break  # evita loop infinito se un entry rifiuta di essere cancellato
+        except Exception as e:
+            logger.warning("Enumerazione allegati fallita: %s", e)
 
         # 4. JavaScript a livello documento (può eseguire codice all'apertura)
+        # M-03-R1 (#2): doc.get_js() NON esiste in PyMuPDF — il vecchio guard
+        # sollevava AttributeError che veniva ingoiato silenziosamente, quindi
+        # questa branca non è mai eseguita dalla v1.0.0. Eseguiamo il loop xref
+        # direttamente e logghiamo le singole eccezioni invece di nasconderle.
+        for xref in range(1, doc.xref_length()):
+            try:
+                obj = doc.xref_object(xref)
+                if "/JavaScript" in obj or "/JS" in obj:
+                    # Sostituisce il contenuto con dict vuoto
+                    doc.update_object(xref, "<<>>")
+                    js_removed += 1
+            except Exception as e:
+                logger.warning("xref %d cleanup fallito: %s", xref, e)
+
+        # M-03-R2 (#3): defense in depth. Anche con gli xref svuotati, il
+        # catalog continua a riferire /Names/JavaScript e /OpenAction —
+        # comportamento dei reader su dict vuoti è undefined (PDF spec) e in
+        # ogni caso il documento "anonimizzato" continuerebbe ad annunciare
+        # che conteneva JS. Strippiamo i riferimenti dal catalog.
         try:
-            js_count = doc.get_js()
-            if js_count:
-                # Cerca e rimuove ogni JS azione
-                for xref in range(1, doc.xref_length()):
-                    try:
-                        obj = doc.xref_object(xref)
-                        if "/JavaScript" in obj or "/JS" in obj:
-                            # Sostituisce il contenuto con vuoto
-                            doc.update_object(xref, "<< >>")
-                            js_removed += 1
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+            catalog_xref = doc.pdf_catalog()
+            for catalog_key in ("OpenAction", "AA"):
+                try:
+                    doc.xref_set_key(catalog_xref, catalog_key, "null")
+                except Exception as e:
+                    logger.debug("Catalog /%s cleanup skipped: %s", catalog_key, e)
+            # Per /Names rimuoviamo solo la subkey JavaScript (altri /Names
+            # possono essere legittimi per dest, EmbeddedFiles ecc.).
+            try:
+                names_obj = doc.xref_get_key(catalog_xref, "Names")
+                # xref_get_key restituisce ("xref","<xref> 0 R") oppure
+                # ("dict","<< ... >>"); in entrambi i casi usiamo set_key
+                # per rimuovere la subkey JavaScript se presente.
+                if names_obj and len(names_obj) >= 2 and "JavaScript" in str(names_obj[1]):
+                    doc.xref_set_key(catalog_xref, "Names", "null")
+            except Exception as e:
+                logger.debug("Catalog /Names cleanup skipped: %s", e)
+        except Exception as e:
+            logger.warning("Catalog cleanup fallito: %s", e)
 
         logger.info(
             "Sanitizzazione: %d annotazioni, %d form fields, %d allegati, %d JS rimossi",
@@ -826,7 +859,21 @@ with st.expander("🧪 Test e diagnostica"):
 st.divider()
 
 # --- AZIONE ---
+# N-03 (#7): guard difensivo contro OOM silenzioso su PDF molto grandi.
+# Il limite reale è imposto da .streamlit/config.toml -> server.maxUploadSize
+# (Streamlit blocca prima ancora di raggiungere Python). Questo check protegge
+# il caso in cui qualcuno esegua `streamlit run` senza il config (es. fuori
+# dal repo). Tenere MAX_PDF_BYTES in sync con il valore di config.toml.
+MAX_PDF_BYTES = 100 * 1024 * 1024  # 100 MB
 if uploaded_file is not None:
+    if uploaded_file.size > MAX_PDF_BYTES:
+        st.error(
+            f"⚠️ PDF troppo grande ({uploaded_file.size / 1024**2:.0f} MB). "
+            f"Limite: {MAX_PDF_BYTES // 1024**2} MB. "
+            "Per file più grandi, suddividili o aumenta `maxUploadSize` "
+            "in `.streamlit/config.toml`."
+        )
+        st.stop()
     if not selected_entities and not custom_terms:
         st.error("⚠️ Seleziona almeno una categoria nella sidebar o inserisci un termine specifico.")
     else:

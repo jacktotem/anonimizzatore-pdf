@@ -155,7 +155,7 @@ Mantieni il copyright dei tuoi contributi, ma concedi una licenza perpetua, irre
 ## 🙋 Domande?
 
 - **Issue su GitHub** per domande tecniche pubbliche
-- **Email**: [inserire email] per questioni private o commerciali
+- **Email**: REPLACE-BEFORE-MERGE@example.invalid per questioni private o commerciali
 - **Discussioni**: usa la sezione [Discussions](../../discussions) per chiacchierare
 
 ---

@@ -207,3 +207,33 @@ Ringraziamenti allo sviluppatore esterno (anonimo su richiesta) per
 l'analisi di sicurezza approfondita che ha portato a questa release.
 
 Per segnalare future vulnerabilità: vedi [SECURITY.md](../SECURITY.md).
+
+---
+
+## Nota sull'integrità della supply-chain per piattaforma (v1.1.2)
+
+> Questa nota è stata aggiunta in v1.1.2 in risposta all'audit esterno
+> (issue N-02, #6) che ha rilevato un'asimmetria tra Windows e macOS non
+> documentata nella claim originale di hash pinning.
+
+La postura di hash-pinning differisce per piattaforma — by design:
+
+**Windows.** Ogni binario scaricato dall'installer (Python interpreter,
+Tesseract installer, Tessdata) è verificato contro un SHA256 pinnato in
+`windows/setup-dependencies.ps1`. Da v1.1.2 un hash placeholder o vuoto
+fa fallire l'installer in modo esplicito, a meno di `-DevMode` passato
+deliberatamente.
+
+**macOS.** Lo script `mac/installa.sh` bootstrappa Homebrew con il comando
+ufficiale `curl | bash` da <https://brew.sh>, senza ulteriore controllo
+SHA256. Il modello di trust è "TLS validato da Apple verso
+raw.githubusercontent.com + processo di release di Homebrew", lo stesso che
+ogni utente Homebrew nel mondo accetta. Pinnare lo script Homebrew upstream
+è stato valutato e scartato: vive su un riferimento HEAD mobile e
+richiederebbe una nostra release ad ogni cambiamento dell'installer
+Homebrew, con beneficio marginale rispetto al modello di trust di sistema.
+Le successive `brew install` ereditano la verifica delle firme dei bottle
+fornita da Homebrew stesso.
+
+Il path Windows è l'outlier nel tentare di pinnare installer di terze parti,
+non viceversa.

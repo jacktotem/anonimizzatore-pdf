@@ -234,44 +234,66 @@ def main():
 
 ---
 
-## 🧪 Testing (TODO)
+## 🧪 Testing
 
-Aree dove servono test:
+> Una suite minima di regression test è stata aggiunta in v1.1.2 in
+> risposta alla issue N-04 (#8). Storicamente la directory `tests/` era
+> descritta in questo documento ma non esisteva; uno smoke test minimo
+> avrebbe intercettato la issue #2 (`doc.get_js()` AttributeError) prima
+> di v1.0.0.
 
-### Test unitari
+### Struttura attuale (v1.1.2+)
+
+```
+tests/
+├── conftest.py                        # fixture pytest condivise, autouse fixtures dir
+├── build_fixtures.py                  # genera i PDF di prova riproducibilmente
+├── test_sanitize_javascript.py        # regression guard per #2 e #3
+├── test_sanitize_attachments.py       # regression guard per #4
+├── test_sanitize_metadata.py          # verifica claim azzeramento metadata
+└── fixtures/                          # generate al primo run di pytest
+    ├── plain.pdf
+    ├── with_js_and_openaction.pdf
+    └── with_duplicate_attachments.pdf
+```
+
+### Come eseguirli
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
+Le fixture sono generate dal primo run via `build_fixtures.py` (autouse
+fixture in `conftest.py`), quindi non sono committate come binari opachi.
+
+### Aree ancora da coprire (roadmap)
+
+I test attuali coprono solo il livello di sanitizzazione PDF (l'area in cui
+si concentravano i bug dell'audit). Manca tuttora una suite per:
+
+**Test unitari sui riconoscitori Presidio:**
 
 ```python
-# tests/test_recognizers.py
-
+# Esempio futuro: tests/test_recognizers.py
 def test_fiscal_code_recognition():
     cf = "RSSMRA80A01H501Z"
     results = analyzer.analyze(cf, language="it")
     assert any(r.entity_type == "IT_FISCAL_CODE" for r in results)
-
-def test_vat_code_recognition():
-    piva = "12345678901"
-    # ...
-
-def test_iban_recognition():
-    iban = "IT60X0542811101000000123456"
-    # ...
 ```
 
-### Test di integrazione
+**Test end-to-end sulla pipeline di redazione:**
 
 ```python
-# tests/test_pipeline.py
-
+# Esempio futuro: tests/test_pipeline.py
 def test_full_pdf_anonymization():
     input_pdf = open("tests/fixtures/sample_legal.pdf", "rb").read()
     output_pdf = process_pdf(input_pdf, entities=["PERSON", "IT_FISCAL_CODE"])
-    # Verifica che il PDF risultante non contenga più "Mario Rossi"
-    # Verifica che il CF "RSSMRA80A01H501Z" sia stato oscurato
+    # Verifica che "Mario Rossi" e "RSSMRA80A01H501Z" siano stati oscurati.
 ```
 
-### Test di regressione
-
-Suite di PDF reali (anonimizzati prima del commit) con risultati noti:
+**Test di regressione su PDF reali** (anonimizzati prima del commit) con
+expected output:
 
 ```
 tests/fixtures/
@@ -279,9 +301,10 @@ tests/fixtures/
 ├── sample_legal_scanned.pdf
 ├── sample_with_iban.pdf
 └── expected_outputs/
-    ├── sample_legal_textual_redacted.pdf
-    └── ...
+    └── sample_legal_textual_redacted.pdf
 ```
+
+Contributi benvenuti — vedi `CONTRIBUTING.md`.
 
 ---
 
@@ -332,6 +355,6 @@ tests/fixtures/
 
 - **GitHub Issues** per discussioni pubbliche
 - **GitHub Discussions** per Q&A
-- **Email**: [inserire email] per privato
+- **Email**: REPLACE-BEFORE-MERGE@example.invalid per privato
 
 Buon coding! 🚀

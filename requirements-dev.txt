@@ -1,0 +1,10 @@
+# Dipendenze di sviluppo. Installa con:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Per gli sviluppatori che lavorano sul progetto. Non servono per
+# eseguire l'app — sono per la suite di test (#8) e i pre-commit hooks.
+
+-r requirements.txt
+
+# Test suite
+pytest>=8.0,<9.0

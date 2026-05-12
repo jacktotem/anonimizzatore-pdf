@@ -147,4 +147,4 @@ mac/logs/install-YYYYMMDD-HHMMSS.log
 ## 📞 Supporto
 
 - **Issues GitHub**: per problemi tecnici pubblici
-- **Email commerciale**: [inserire email] per supporto a pagamento
+- **Email commerciale**: REPLACE-BEFORE-MERGE@example.invalid per supporto a pagamento
