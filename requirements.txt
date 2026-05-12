@@ -1,5 +1,5 @@
 # ============================================================
-# Anonimizzatore PDF - Dipendenze Python v1.1.0
+# Anonimizzatore PDF - Dipendenze Python v1.1.2
 # Python 3.12 richiesto
 # ============================================================
 #

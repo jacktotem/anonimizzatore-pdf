@@ -175,7 +175,7 @@ streamlit run src/app.py
 
 ### 📩 Contatti commerciali
 
-**Email**: [inserire email]
+**Email**: REPLACE-BEFORE-MERGE@example.invalid
 **Sito**: [inserire sito]
 **LinkedIn**: [inserire LinkedIn]
 

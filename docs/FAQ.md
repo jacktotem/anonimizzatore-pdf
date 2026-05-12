@@ -211,5 +211,5 @@ Apri manualmente `http://localhost:8501` nel tuo browser.
 ## 📞 Hai altre domande?
 
 - **Issues su GitHub** per domande tecniche pubbliche
-- **Email**: [inserire email] per domande commerciali o private
+- **Email**: REPLACE-BEFORE-MERGE@example.invalid per domande commerciali o private
 - **Discussions**: per chiacchierare con la community

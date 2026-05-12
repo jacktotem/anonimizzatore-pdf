@@ -13,7 +13,7 @@ La sicurezza è critica per uno strumento di anonimizzazione di documenti legali
 
 ### Come segnalare
 
-Manda una email a: **[inserire email security]**
+Manda una email a: **REPLACE-BEFORE-MERGE@example.invalid**
 
 Includi:
 - **Descrizione** della vulnerabilità

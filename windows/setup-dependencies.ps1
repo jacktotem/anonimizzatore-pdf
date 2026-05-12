@@ -1,5 +1,5 @@
 # ============================================================
-# Anonimizzatore PDF - Setup hardenato v1.1.0
+# Anonimizzatore PDF - Setup hardenato v$AppVersion (vedi sotto)
 # Scarica e installa Python, Tesseract, librerie e modelli
 #
 # SICUREZZA:
@@ -11,11 +11,20 @@
 
 param(
     [Parameter(Mandatory=$true)]
-    [string]$InstallPath
+    [string]$InstallPath,
+
+    # H-01-R1 (#1): bypass esplicito per sviluppatori quando gli hash dei
+    # binari di terze parti non sono ancora pinnati. NON usare in produzione.
+    [switch]$DevMode
 )
 
 # I-02: fail-fast. Mai installare con setup parzialmente rotto.
 $ErrorActionPreference = "Stop"
+
+# N-05 (#9): single source of truth per la versione mostrata all'utente.
+# Long-term: leggere da un file VERSION in repo root condiviso con
+# installer.iss e src/app.py.
+$AppVersion = "1.1.2"
 
 # ============================================================
 # CONFIGURAZIONE BINARI CON HASH PINNING
@@ -32,22 +41,25 @@ $ErrorActionPreference = "Stop"
 $Binaries = @{
     Python = @{
         Url = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe"
-        Sha256 = "F1B07B68FB60D4FBB7BDDCBE6BDB5E2AB18519DA17C5E0EBA1F94BC1B5478C9E"
-        # NOTA: hash SHA256 ufficiale del python-3.12.8-amd64.exe pubblicato
-        # su python.org. Verificare prima del rilascio con:
+        # SHA256 ufficiale verificato contro https://www.python.org/downloads/release/python-3128/
+        # (cross-check con MD5 pubblicato 2f2ab2472a6aa29f8755c72c58f58f4b).
+        # Riverificare prima del rilascio con:
         #   certutil -hashfile python-3.12.8-amd64.exe SHA256
+        Sha256 = "71BD44E6B0E91C17558963557E4CDB80B483DE9B0A0A9717F06CF896F95AB598"
     }
     Tesseract = @{
         # URL UFFICIALE GitHub (NON il mirror universitario tedesco!)
         Url = "https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-setup-5.4.0.20240606.exe"
+        # TODO(release): scaricare il file dall'URL sopra e pinnare l'hash con:
+        #   Get-FileHash tesseract-ocr-w64-setup-5.4.0.20240606.exe -Algorithm SHA256
+        # Il setup ora fallisce in produzione finché questo valore è il placeholder.
         Sha256 = "AGGIORNARE_AL_PRIMO_RILASCIO"
-        # Generare con: Get-FileHash tesseract-ocr-w64-setup-5.4.0.20240606.exe -Algorithm SHA256
     }
     TessdataIta = @{
         # Tessdata ufficiale (mantained dal team Tesseract)
         Url = "https://github.com/tesseract-ocr/tessdata/raw/4.1.0/ita.traineddata"
+        # TODO(release): pinnare l'hash del file servito al commit/tag 4.1.0.
         Sha256 = "AGGIORNARE_AL_PRIMO_RILASCIO"
-        # Versione 4.1.0 (stabile, non main/HEAD che può cambiare)
     }
 }
 
@@ -105,12 +117,18 @@ function Download-VerifiedFile {
     Write-Log "Verifica hash SHA256 per $ComponentName"
 
     if ($ExpectedSha256 -eq "AGGIORNARE_AL_PRIMO_RILASCIO" -or [string]::IsNullOrEmpty($ExpectedSha256)) {
-        # Caso development/dev build: avvisa ma non bloccare,
-        # registra il hash effettivo per facilitare il pinning futuro
+        # H-01-R1 (#1): fail-closed se l'hash non è pinnato. In dev mode
+        # logghiamo l'hash effettivo per facilitare il pinning successivo.
+        if (-not $script:DevMode) {
+            $ActualHash = (Get-FileHash -Path $DestinationPath -Algorithm SHA256).Hash
+            Write-Log "Hash placeholder per $ComponentName. Hash effettivo (da pinnare): $ActualHash" "ERROR"
+            Remove-Item $DestinationPath -ErrorAction SilentlyContinue
+            throw "Hash placeholder per $ComponentName. Aggiornare con valore reale prima del rilascio production (usare -DevMode per bypass esplicito in sviluppo)."
+        }
+
         $ActualHash = (Get-FileHash -Path $DestinationPath -Algorithm SHA256).Hash
-        Write-Log "ATTENZIONE: hash non pinnato per $ComponentName. Hash effettivo: $ActualHash" "WARN"
-        Write-Log "Aggiungere questo hash in setup-dependencies.ps1 per il rilascio production" "WARN"
-        # In dev mode permettiamo, in production questo dovrebbe FALLIRE
+        Write-Log "DEV-MODE: hash bypass per $ComponentName. Hash effettivo: $ActualHash" "WARN"
+        Write-Log "DEV-MODE: aggiungere questo hash in setup-dependencies.ps1 per il rilascio production" "WARN"
         return $true
     }
 
@@ -364,7 +382,7 @@ except Exception as e:
 try {
     Add-Type -AssemblyName System.Windows.Forms
 
-    Write-Log "===== INIZIO SETUP ANONIMIZZATORE PDF v1.1.0 ====="
+    Write-Log "===== INIZIO SETUP ANONIMIZZATORE PDF v$AppVersion ====="
     Write-Log "Path installazione: $InstallPath"
 
     # 1. Python
@@ -396,7 +414,7 @@ try {
     Write-Progress -Activity "Installazione" -Completed
 
     [System.Windows.Forms.MessageBox]::Show(
-        "Anonimizzatore PDF v1.1.0 installato correttamente!`n`n" +
+        "Anonimizzatore PDF v$AppVersion installato correttamente!`n`n" +
         "Tutti i componenti sono stati verificati.`n`n" +
         "Avvialo dal collegamento sul Desktop o dal Menu Start.",
         "Installazione completata",
