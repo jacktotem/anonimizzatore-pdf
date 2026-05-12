@@ -18,7 +18,7 @@ DefaultDirName={autopf}\AnonimizzatorePDF
 DefaultGroupName=Anonimizzatore PDF
 DisableProgramGroupPage=yes
 OutputDir=installer
-OutputBaseFilename=AnonimizzatorePDF-Setup-v1.1.0
+OutputBaseFilename=AnonimizzatorePDF-Setup-v{#MyAppVersion}
 ;SetupIconFile=app\icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -61,7 +61,7 @@ Type: filesandordirs; Name: "{app}\__pycache__"
 function InitializeSetup(): Boolean;
 begin
   Result := True;
-  MsgBox('Anonimizzatore PDF v1.1.0' + #13#10 + #13#10 +
+  MsgBox('Anonimizzatore PDF v' + '{#MyAppVersion}' + #13#10 + #13#10 +
          'Questa installazione scaricherà e configurerà:' + #13#10 +
          '- Python 3.12 (se non già presente)' + #13#10 +
          '- Tesseract OCR con supporto italiano (se non già presente)' + #13#10 +
