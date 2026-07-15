@@ -9,11 +9,12 @@ Licenza: GNU AGPL v3.0
 
 import streamlit as st
 import fitz  # PyMuPDF
+import csv
 import os
 import re
 import sys
 import logging
-from io import BytesIO
+from io import BytesIO, StringIO
 from collections import Counter
 from presidio_analyzer import (
     AnalyzerEngine,
@@ -23,7 +24,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -48,7 +49,7 @@ TESSERACT_INIT_ERROR = None
 
 try:
     import pytesseract
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
 
     if sys.platform == "win32":
         # ORDINE IMPORTANTE: prima i path di sistema (richiedono admin per
@@ -229,6 +230,7 @@ def build_word_map(page):
             "end": len(full_text),
             "rect": fitz.Rect(w[0], w[1], w[2], w[3]),
             "text": token,
+            "line": (w[5], w[6]),  # (blocco, riga) — per raggruppare i codici
         })
     return full_text, entries
 
@@ -255,6 +257,166 @@ def shrink_redact_rect(rect):
     v = min(1.0, rect.height * 0.15)
     h = min(0.3, rect.width * 0.05)
     return fitz.Rect(rect.x0 + h, rect.y0 + v, rect.x1 - h, rect.y1 - v)
+
+
+# ============================================================
+# PSEUDONIMIZZAZIONE CON CODICI (R-05)
+# ============================================================
+# In alternativa al rettangolo nero, ogni stringa redatta può essere
+# sostituita da un codice univoco ("[PER-01]"): il testo originale
+# viene comunque RIMOSSO FISICAMENTE dal PDF (stessa garanzia
+# dell'oscuramento), ma il documento resta leggibile e coerente.
+# A parte viene prodotta la tabella di accoppiamento codice↔testo,
+# che è la chiave di re-identificazione e va custodita separatamente.
+
+ENTITY_CODE_PREFIXES = {
+    "PERSON": "PER",
+    "PERSON (propagato)": "PER",
+    "LOCATION": "LOC",
+    "DATE_TIME": "DATA",
+    "NRP": "NRP",
+    "ORGANIZATION": "ORG",
+    "EMAIL_ADDRESS": "EMAIL",
+    "PHONE_NUMBER": "TEL",
+    "IT_FISCAL_CODE": "CF",
+    "IT_VAT_CODE": "PIVA",
+    "IT_IDENTITY_CARD": "CI",
+    "IT_DRIVER_LICENSE": "PAT",
+    "IT_PASSPORT": "PASS",
+    "IBAN_CODE": "IBAN",
+    "CREDIT_CARD": "CARTA",
+    "URL": "URL",
+    "IP_ADDRESS": "IP",
+    "CRYPTO": "CRYPTO",
+    "TERMINE PERSONALIZZATO": "TERM",
+}
+
+
+class CodeAssigner:
+    """
+    Assegna codici univoci e stabili alle stringhe redatte.
+
+    - Stessa stringa (normalizzata: minuscole, punteggiatura ai bordi
+      ignorata) → stesso codice in tutto il documento.
+    - Prefisso per tipo di dato: PER-01, CF-01, IBAN-01, TERM-01...
+    - Un token di nome propagato ("Alonge") riusa il codice della
+      persona già codificata ("Alonge Antonio") se l'attribuzione è
+      univoca; altrimenti riceve un codice proprio.
+    """
+
+    def __init__(self):
+        self._key_to_code = {}
+        self._counters = {}
+        self._entries_by_code = {}
+        self._person_token_codes = {}  # token -> set di codici che lo contengono
+
+    @staticmethod
+    def _normalize(text):
+        tokens = (_clean_token(t) for t in text.split())
+        return " ".join(t for t in tokens if t)
+
+    def assign(self, entity_type, text):
+        """Ritorna il codice per questa occorrenza (creandolo se nuovo)."""
+        prefix = ENTITY_CODE_PREFIXES.get(entity_type, "DATO")
+        norm = self._normalize(text) or text.strip().lower()
+        key = (prefix, norm)
+        code = self._key_to_code.get(key)
+
+        if code is None and prefix == "PER" and " " not in norm:
+            # Token singolo (propagazione): riusa il codice della persona
+            # SOLO se il token appartiene a una sola persona codificata.
+            candidates = self._person_token_codes.get(norm)
+            if candidates and len(candidates) == 1:
+                code = next(iter(candidates))
+                self._key_to_code[key] = code
+
+        if code is None:
+            self._counters[prefix] = self._counters.get(prefix, 0) + 1
+            code = f"{prefix}-{self._counters[prefix]:02d}"
+            self._key_to_code[key] = code
+            self._entries_by_code[code] = {
+                "Codice": code,
+                "Tipo": entity_type.replace(" (propagato)", ""),
+                "Testo originale": text.strip(),
+                "Occorrenze": 0,
+            }
+
+        if prefix == "PER":
+            for token in norm.split():
+                self._person_token_codes.setdefault(token, set()).add(code)
+
+        self._entries_by_code[code]["Occorrenze"] += 1
+        return code
+
+    @property
+    def mapping(self):
+        """Tabella di accoppiamento: lista di dict ordinata per codice."""
+        return sorted(
+            self._entries_by_code.values(),
+            key=lambda e: (e["Codice"].split("-")[0], e["Codice"]),
+        )
+
+
+def group_hits_by_line(entries, word_hits):
+    """Raggruppa i (indice, rect) di un'entità per riga di testo."""
+    groups = []
+    current = []
+    last_line = None
+    for idx, rect in word_hits:
+        line = entries[idx].get("line")
+        if current and line != last_line:
+            groups.append(current)
+            current = []
+        current.append((idx, rect))
+        last_line = line
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _fit_fontsize(text, rect):
+    """Dimensione font massima che fa stare `text` dentro `rect`."""
+    try:
+        unit = fitz.get_text_length(text, fontname="helv", fontsize=1)
+    except Exception:
+        unit = 0.5 * max(1, len(text))
+    if unit <= 0:
+        return 6
+    size = min(rect.height * 0.8, (rect.width * 0.95) / unit)
+    return max(4, size)
+
+
+def add_redaction_for_hits(page, entries, word_hits, mode, code=None):
+    """
+    Aggiunge le redact-annotation per le parole di un'occorrenza.
+
+    - mode "blackout": rettangolo nero per parola (comportamento storico).
+    - mode "codes": il testo viene rimosso e sostituito dal codice
+      "[XXX-nn]" sul primo segmento di riga; gli eventuali segmenti
+      successivi (entità che va a capo) restano vuoti.
+    """
+    if mode != "codes":
+        for _idx, rect in word_hits:
+            page.add_redact_annot(shrink_redact_rect(rect), fill=(0, 0, 0))
+        return
+
+    label = f"[{code}]"
+    for gi, group in enumerate(group_hits_by_line(entries, word_hits)):
+        union = fitz.Rect()
+        for _idx, rect in group:
+            union |= rect
+        union = shrink_redact_rect(union)
+        text = label if gi == 0 else ""
+        page.add_redact_annot(
+            union,
+            text=text,
+            fontname="helv",
+            fontsize=_fit_fontsize(label, union),
+            align=fitz.TEXT_ALIGN_CENTER,
+            fill=(1, 1, 1),
+            text_color=(0, 0, 0),
+            cross_out=False,
+        )
 
 
 def find_custom_term_matches(term, entries):
@@ -691,64 +853,96 @@ def collect_person_tokens(analysis):
 
 
 def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
-                          log, page_num):
-    """Applica le redazioni a una pagina testuale usando le coordinate."""
+                          log, page_num, redaction_mode="blackout",
+                          assigner=None):
+    """
+    Applica le redazioni a una pagina testuale usando le coordinate.
+
+    redaction_mode:
+      - "blackout": rettangoli neri (default storico)
+      - "codes": pseudonimizzazione — il testo è sostituito dal codice
+        univoco assegnato da `assigner` (CodeAssigner)
+    """
     full_text = analysis["full_text"]
     entries = analysis["entries"]
+    use_codes = redaction_mode == "codes" and assigner is not None
     redacted_word_idx = set()
 
-    # 1. Entità rilevate dall'analisi (solo l'occorrenza alle sue coordinate)
-    for result in analysis["results"]:
+    def _log(tipo, testo, confidenza, code):
+        row = {
+            "Pagina": page_num,
+            "Tipo": tipo,
+            "Testo": testo,
+            "Confidenza": confidenza,
+            "Metodo": "Testo",
+        }
+        if use_codes:
+            row["Codice"] = code
+        log.append(row)
+
+    # Ogni parola riceve UNA sola redazione (in modalità codici i label
+    # non devono mai accavallarsi). Ordine di priorità:
+    #   1. termini personalizzati (scelta esplicita dell'utente → codice
+    #      TERM coerente in tutto il documento)
+    #   2. entità deterministiche (CF, IBAN, ...)
+    #   3. entità NER
+    #   4. propagazione nomi
+
+    # 1. Termini personalizzati: match per PAROLE INTERE
+    for term in custom_terms:
+        term = term.strip()
+        if not term:
+            continue
+        for match_indexes in find_custom_term_matches(term, entries):
+            word_hits = [(i, entries[i]["rect"]) for i in match_indexes]
+            code = assigner.assign("TERMINE PERSONALIZZATO", term) if use_codes else None
+            add_redaction_for_hits(page, entries, word_hits, redaction_mode, code)
+            redacted_word_idx.update(match_indexes)
+            _log("TERMINE PERSONALIZZATO", term, "100%", code)
+
+    # 2-3. Entità rilevate dall'analisi (solo l'occorrenza alle sue coordinate)
+    pattern_results = [r for r in analysis["results"]
+                       if r.entity_type not in NER_ENTITY_TYPES]
+    ner_results = [r for r in analysis["results"]
+                   if r.entity_type in NER_ENTITY_TYPES]
+    ordered_results = (
+        sorted(pattern_results, key=lambda r: r.start)
+        + sorted(ner_results, key=lambda r: r.start)
+    )
+
+    for result in ordered_results:
         found_text = full_text[result.start:result.end].strip()
         if not found_text:
             continue
         word_hits = rects_for_span(entries, result.start, result.end)
+        # scarta le parole già redatte da un'entità precedente
+        word_hits = [(i, r) for i, r in word_hits if i not in redacted_word_idx]
         if not word_hits:
             continue
-        for idx, rect in word_hits:
-            page.add_redact_annot(shrink_redact_rect(rect), fill=(0, 0, 0))
-            redacted_word_idx.add(idx)
-        log.append({
-            "Pagina": page_num,
-            "Tipo": result.entity_type,
-            "Testo": found_text,
-            "Confidenza": f"{result.score:.0%}",
-            "Metodo": "Testo",
-        })
+        # se di un'entità NER resta solo un residuo non sostanziale
+        # (es. "(C.F." dopo che il codice fiscale è già stato redatto), salta
+        remaining_text = " ".join(entries[i]["text"] for i, _r in word_hits)
+        if (result.entity_type in NER_ENTITY_TYPES
+                and is_false_positive(result.entity_type, remaining_text)):
+            continue
+        code = assigner.assign(result.entity_type, found_text) if use_codes else None
+        add_redaction_for_hits(page, entries, word_hits, redaction_mode, code)
+        redacted_word_idx.update(idx for idx, _r in word_hits)
+        _log(result.entity_type, found_text, f"{result.score:.0%}", code)
 
-    # 2. R-04: propagazione dei nomi rilevati altrove nel documento
+    # 4. R-04: propagazione dei nomi rilevati altrove nel documento
     #    (solo parole intere con iniziale maiuscola, mai sottostringhe)
     for idx, entry in enumerate(entries):
         if idx in redacted_word_idx:
             continue
         clean = _clean_token(entry["text"])
         if clean in known_person_tokens and entry["text"][:1].isupper():
-            page.add_redact_annot(shrink_redact_rect(entry["rect"]), fill=(0, 0, 0))
+            code = assigner.assign("PERSON (propagato)", entry["text"]) if use_codes else None
+            add_redaction_for_hits(
+                page, entries, [(idx, entry["rect"])], redaction_mode, code
+            )
             redacted_word_idx.add(idx)
-            log.append({
-                "Pagina": page_num,
-                "Tipo": "PERSON (propagato)",
-                "Testo": entry["text"],
-                "Confidenza": "—",
-                "Metodo": "Testo",
-            })
-
-    # 3. Termini personalizzati: match per PAROLE INTERE
-    for term in custom_terms:
-        term = term.strip()
-        if not term:
-            continue
-        for match_indexes in find_custom_term_matches(term, entries):
-            for idx in match_indexes:
-                page.add_redact_annot(shrink_redact_rect(entries[idx]["rect"]), fill=(0, 0, 0))
-                redacted_word_idx.add(idx)
-            log.append({
-                "Pagina": page_num,
-                "Tipo": "TERMINE PERSONALIZZATO",
-                "Testo": term,
-                "Confidenza": "100%",
-                "Metodo": "Testo",
-            })
+            _log("PERSON (propagato)", entry["text"], "—", code)
 
     page.apply_redactions()
 
@@ -759,9 +953,11 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
 
 def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                          analyzer, min_score, dpi, lang, log, page_num,
-                         debug_first=False, known_person_tokens=None):
+                         debug_first=False, known_person_tokens=None,
+                         redaction_mode="blackout", assigner=None):
     """OCR su pagina scansionata + redazione con rettangoli su immagine."""
     known_person_tokens = known_person_tokens or set()
+    use_codes = redaction_mode == "codes" and assigner is not None
     zoom = dpi / 72
     mat = fitz.Matrix(zoom, zoom)
     pix = src_page.get_pixmap(matrix=mat, alpha=False)
@@ -808,6 +1004,37 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
 
     draw = ImageDraw.Draw(img)
 
+    def draw_redaction(matching, code=None):
+        """Rettangolo nero, oppure riquadro bianco col codice (pseudonimizzazione)."""
+        x_min = min(w["x"] for w in matching)
+        y_min = min(w["y"] for w in matching)
+        x_max = max(w["x"] + w["w"] for w in matching)
+        y_max = max(w["y"] + w["h"] for w in matching)
+        pad = 2
+        box = [(x_min - pad, y_min - pad), (x_max + pad, y_max + pad)]
+        if not (use_codes and code):
+            draw.rectangle(box, fill="black")
+            return
+        draw.rectangle(box, fill="white", outline="black")
+        label = f"[{code}]"
+        size = max(10, int((y_max - y_min) * 0.75))
+        while size >= 8:
+            try:
+                font = ImageFont.load_default(size=size)
+            except TypeError:  # Pillow < 10.1: font bitmap a dimensione fissa
+                font = ImageFont.load_default()
+                break
+            bbox = draw.textbbox((0, 0), label, font=font)
+            if bbox[2] - bbox[0] <= (x_max - x_min):
+                break
+            size = int(size * 0.8)
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        draw.text(
+            ((x_min + x_max - tw) / 2, (y_min + y_max - th) / 2),
+            label, fill="black", font=font,
+        )
+
     if words:
         full_text = ""
         word_positions = []
@@ -846,49 +1073,23 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                 # L-03: messaggio sanitizzato
                 st.warning(safe_error_message(f"Presidio OCR pagina {page_num}", e))
 
-        for result in results:
-            matching_idx = [
-                idx for start, end, idx in word_positions
-                if start < result.end and end > result.start
-            ]
-            if matching_idx:
-                matching = [words[i] for i in matching_idx]
-                x_min = min(w["x"] for w in matching)
-                y_min = min(w["y"] for w in matching)
-                x_max = max(w["x"] + w["w"] for w in matching)
-                y_max = max(w["y"] + w["h"] for w in matching)
-                pad = 2
-                draw.rectangle(
-                    [(x_min - pad, y_min - pad), (x_max + pad, y_max + pad)],
-                    fill="black",
-                )
-                log.append({
-                    "Pagina": page_num,
-                    "Tipo": result.entity_type,
-                    "Testo": full_text[result.start:result.end],
-                    "Confidenza": f"{result.score:.0%}",
-                    "Metodo": "OCR",
-                })
+        # Stesso ordine di priorità delle pagine testuali: ogni parola
+        # riceve UNA sola redazione (termini utente → entità → propagazione)
+        drawn_idx = set()
 
-        # R-04: propagazione dei nomi rilevati nelle pagine testuali
-        # (parole intere con iniziale maiuscola, mai sottostringhe)
-        for w in words:
-            clean = _clean_token(w["text"])
-            if clean in known_person_tokens and w["text"][:1].isupper():
-                pad = 2
-                draw.rectangle(
-                    [(w["x"] - pad, w["y"] - pad),
-                     (w["x"] + w["w"] + pad, w["y"] + w["h"] + pad)],
-                    fill="black",
-                )
-                log.append({
-                    "Pagina": page_num,
-                    "Tipo": "PERSON (propagato)",
-                    "Testo": w["text"],
-                    "Confidenza": "—",
-                    "Metodo": "OCR",
-                })
+        def _log_ocr(tipo, testo, confidenza, code):
+            row = {
+                "Pagina": page_num,
+                "Tipo": tipo,
+                "Testo": testo,
+                "Confidenza": confidenza,
+                "Metodo": "OCR",
+            }
+            if use_codes:
+                row["Codice"] = code
+            log.append(row)
 
+        # 1. Termini personalizzati
         for term in custom_terms:
             term = term.strip()
             if not term:
@@ -900,23 +1101,43 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                     for j in range(len(term_words))
                 )
                 if match:
-                    matching = words[i:i + len(term_words)]
-                    x_min = min(w["x"] for w in matching)
-                    y_min = min(w["y"] for w in matching)
-                    x_max = max(w["x"] + w["w"] for w in matching)
-                    y_max = max(w["y"] + w["h"] for w in matching)
-                    pad = 2
-                    draw.rectangle(
-                        [(x_min - pad, y_min - pad), (x_max + pad, y_max + pad)],
-                        fill="black",
-                    )
-                    log.append({
-                        "Pagina": page_num,
-                        "Tipo": "TERMINE PERSONALIZZATO",
-                        "Testo": term,
-                        "Confidenza": "100%",
-                        "Metodo": "OCR",
-                    })
+                    code = assigner.assign("TERMINE PERSONALIZZATO", term) if use_codes else None
+                    draw_redaction(words[i:i + len(term_words)], code)
+                    drawn_idx.update(range(i, i + len(term_words)))
+                    _log_ocr("TERMINE PERSONALIZZATO", term, "100%", code)
+
+        # 2-3. Entità rilevate (prima deterministiche, poi NER)
+        pattern_results = [r for r in results if r.entity_type not in NER_ENTITY_TYPES]
+        ner_results = [r for r in results if r.entity_type in NER_ENTITY_TYPES]
+        for result in (sorted(pattern_results, key=lambda r: r.start)
+                       + sorted(ner_results, key=lambda r: r.start)):
+            matching_idx = [
+                idx for start, end, idx in word_positions
+                if start < result.end and end > result.start
+                and idx not in drawn_idx
+            ]
+            if matching_idx:
+                found_text = full_text[result.start:result.end]
+                remaining_text = " ".join(words[i]["text"] for i in matching_idx)
+                if (result.entity_type in NER_ENTITY_TYPES
+                        and is_false_positive(result.entity_type, remaining_text)):
+                    continue
+                code = assigner.assign(result.entity_type, found_text) if use_codes else None
+                draw_redaction([words[i] for i in matching_idx], code)
+                drawn_idx.update(matching_idx)
+                _log_ocr(result.entity_type, found_text, f"{result.score:.0%}", code)
+
+        # 4. R-04: propagazione dei nomi rilevati nelle pagine testuali
+        # (parole intere con iniziale maiuscola, mai sottostringhe)
+        for idx, w in enumerate(words):
+            if idx in drawn_idx:
+                continue
+            clean = _clean_token(w["text"])
+            if clean in known_person_tokens and w["text"][:1].isupper():
+                code = assigner.assign("PERSON (propagato)", w["text"]) if use_codes else None
+                draw_redaction([w], code)
+                drawn_idx.add(idx)
+                _log_ocr("PERSON (propagato)", w["text"], "—", code)
 
     img_bytes = BytesIO()
     img.save(img_bytes, format="JPEG", quality=85, optimize=True)
@@ -932,14 +1153,20 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
 # ============================================================
 
 def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
-               min_score=0.4, ocr_mode="auto", ocr_dpi=300, ocr_lang="ita"):
+               min_score=0.4, ocr_mode="auto", ocr_dpi=300, ocr_lang="ita",
+               redaction_mode="blackout"):
     """
     Anonimizza un PDF. Gestisce sia pagine testuali che scansionate.
     ocr_mode: 'auto' | 'always' | 'never'
+    redaction_mode: 'blackout' (rettangoli neri) | 'codes' (pseudonimizzazione)
+
+    Ritorna (bytes_pdf, log, mapping) dove mapping è la tabella di
+    accoppiamento codice↔testo (vuota in modalità blackout).
     """
     src_doc = fitz.open(stream=input_bytes, filetype="pdf")
     out_doc = fitz.open()
     log = []
+    assigner = CodeAssigner() if redaction_mode == "codes" else None
 
     st.write(f"📄 Documento: {len(src_doc)} pagine")
     st.write(f"🎯 Entità cercate ({len(selected_entities)}): {', '.join(selected_entities)}")
@@ -1017,6 +1244,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                 analyzer, min_score, ocr_dpi, ocr_lang, log, page_num,
                 debug_first=(page_num == 1),
                 known_person_tokens=known_person_tokens,
+                redaction_mode=redaction_mode,
+                assigner=assigner,
             )
             total_raw += raw
             total_filtered += filtered
@@ -1034,6 +1263,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             apply_text_redactions(
                 new_page, plan["analysis"], custom_terms,
                 known_person_tokens, log, page_num,
+                redaction_mode=redaction_mode,
+                assigner=assigner,
             )
             pages_text += 1
 
@@ -1082,7 +1313,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     out_doc.close()
     src_doc.close()
     output_bytes.seek(0)
-    return output_bytes.getvalue(), log
+    mapping = assigner.mapping if assigner else []
+    return output_bytes.getvalue(), log, mapping
 
 
 # ============================================================
@@ -1130,6 +1362,26 @@ with st.sidebar:
     use_url = st.checkbox("URL", value=False)
     use_ip = st.checkbox("Indirizzi IP", value=False)
     use_crypto = st.checkbox("Wallet crypto", value=False)
+
+    st.divider()
+
+    st.subheader("🖊️ Modalità redazione")
+    redaction_mode = st.radio(
+        "Come sostituire i dati sensibili",
+        options=["blackout", "codes"],
+        format_func=lambda x: {
+            "blackout": "⬛ Oscuramento (rettangoli neri)",
+            "codes": "🔖 Pseudonimizzazione con codici",
+        }[x],
+        help=(
+            "Oscuramento: il testo viene rimosso e coperto da un rettangolo nero. "
+            "Pseudonimizzazione: il testo viene rimosso e sostituito da un codice "
+            "univoco (es. [PER-01]) — stessa stringa, stesso codice in tutto il "
+            "documento. Viene generata a parte la tabella di accoppiamento "
+            "codice↔testo originale. ATTENZIONE: il documento con i codici resta "
+            "un dato personale ai sensi del GDPR finché esiste la tabella."
+        ),
+    )
 
     st.divider()
 
@@ -1301,7 +1553,7 @@ if uploaded_file is not None:
                 status.update(label="✅ Motore pronto", state="complete")
 
             input_bytes = uploaded_file.read()
-            output_bytes, log = redact_pdf(
+            output_bytes, log, mapping = redact_pdf(
                 input_bytes,
                 selected_entities,
                 custom_terms,
@@ -1310,23 +1562,49 @@ if uploaded_file is not None:
                 ocr_mode=ocr_mode,
                 ocr_dpi=ocr_dpi,
                 ocr_lang="ita" if ITALIAN_AVAILABLE else "eng",
+                redaction_mode=redaction_mode,
             )
 
             if log:
-                st.success(f"✅ Anonimizzazione completata: **{len(log)} elementi oscurati**")
+                if redaction_mode == "codes":
+                    st.success(
+                        f"✅ Pseudonimizzazione completata: **{len(log)} elementi "
+                        f"sostituiti** con **{len(mapping)} codici univoci**"
+                    )
+                else:
+                    st.success(f"✅ Anonimizzazione completata: **{len(log)} elementi oscurati**")
 
                 col_a, col_b = st.columns([1, 2])
 
                 with col_a:
-                    output_filename = f"anonimizzato_{uploaded_file.name}"
+                    prefix = "pseudonimizzato" if redaction_mode == "codes" else "anonimizzato"
+                    output_filename = f"{prefix}_{uploaded_file.name}"
                     st.download_button(
-                        label="📥 Scarica PDF anonimizzato",
+                        label="📥 Scarica PDF",
                         data=output_bytes,
                         file_name=output_filename,
                         mime="application/pdf",
                         type="primary",
                         use_container_width=True,
                     )
+                    if mapping:
+                        # CSV con BOM utf-8 così Excel lo apre correttamente
+                        csv_buf = StringIO()
+                        writer = csv.DictWriter(
+                            csv_buf,
+                            fieldnames=["Codice", "Tipo", "Testo originale", "Occorrenze"],
+                            delimiter=";",
+                        )
+                        writer.writeheader()
+                        writer.writerows(mapping)
+                        base_name = os.path.splitext(uploaded_file.name)[0]
+                        st.download_button(
+                            label="🔑 Scarica tabella di accoppiamento (CSV)",
+                            data=csv_buf.getvalue().encode("utf-8-sig"),
+                            file_name=f"accoppiamento_{base_name}.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
 
                 with col_b:
                     types_count = Counter(item["Tipo"] for item in log)
@@ -1334,6 +1612,17 @@ if uploaded_file is not None:
                     summary = " · ".join([f"{count} {tipo}" for tipo, count in types_count.most_common()])
                     st.caption(f"**Tipi:** {summary}")
                     st.caption(f"**Metodi:** {dict(method_count)}")
+
+                if mapping:
+                    st.warning(
+                        "🔑 **La tabella di accoppiamento è la chiave di re-identificazione.** "
+                        "Conservala separatamente dal documento e **non inviarla mai** insieme "
+                        "al PDF pseudonimizzato. Ai sensi del GDPR, il documento con i codici "
+                        "resta un dato personale finché la tabella esiste: per depositi o "
+                        "pubblicazioni usa la modalità Oscuramento."
+                    )
+                    with st.expander(f"🔑 Tabella di accoppiamento ({len(mapping)} codici)"):
+                        st.dataframe(mapping, use_container_width=True, hide_index=True)
 
                 with st.expander(f"📊 Report completo ({len(log)} redazioni)"):
                     st.dataframe(log, use_container_width=True, hide_index=True)
@@ -1348,6 +1637,14 @@ with st.expander("ℹ️ Informazioni e avvertenze"):
     **Privacy:** tutti i file sono elaborati in locale. Nessun dato esce dal computer.
 
     **Redazione testo:** rimozione fisica del testo + rettangolo nero (irreversibile).
+
+    **Pseudonimizzazione (v1.3+):** in alternativa all'oscuramento, ogni stringa
+    rilevata può essere sostituita da un codice univoco (es. `[PER-01]`): stessa
+    stringa → stesso codice in tutto il documento, così il testo resta leggibile.
+    Il testo originale viene comunque rimosso fisicamente. La tabella di
+    accoppiamento codice↔testo va scaricata e custodita **separatamente**: è la
+    chiave di re-identificazione. Il documento pseudonimizzato resta un dato
+    personale ai sensi del GDPR finché la tabella esiste.
 
     **Redazione scansioni (OCR):** il PDF viene rasterizzato e ricostruito come immagine con rettangoli neri (la pagina diventa solo immagine, non selezionabile).
 

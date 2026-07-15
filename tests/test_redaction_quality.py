@@ -122,19 +122,35 @@ def test_word_map_offsets_coerenti(pagina_sintetica):
 
 
 def test_redazione_non_tocca_altre_parole(pagina_sintetica):
-    """Redigere l'entità "SE’" non deve mutilare sentenza/spese/base."""
+    """La redazione posizionale oscura solo la parola bersaglio."""
     page = pagina_sintetica[0]
     full_text, entries = build_word_map(page)
-    start = full_text.index("SE'")
-    result = RecognizerResult("LOCATION", start, start + len("SE'"), 0.85)
+    start = full_text.index("imputabile")
+    result = RecognizerResult("LOCATION", start, start + len("imputabile"), 0.85)
     analysis = {"full_text": full_text, "entries": entries, "results": [result]}
 
     apply_text_redactions(page, analysis, [], set(), [], 1)
 
     text_dopo = page.get_text()
-    assert "SE'" not in text_dopo
+    assert "imputabile" not in text_dopo
     for parola in ("sentenza", "spese", "base", "resta"):
         assert parola in text_dopo, f"parola mutilata: {parola}"
+
+
+def test_falso_positivo_scartato_anche_in_applicazione(pagina_sintetica):
+    """Difesa in profondità: un'entità FP ("SE'") che arrivasse fino
+    alla fase di applicazione viene comunque saltata, non redatta."""
+    page = pagina_sintetica[0]
+    full_text, entries = build_word_map(page)
+    start = full_text.index("SE'")
+    result = RecognizerResult("LOCATION", start, start + len("SE'"), 0.85)
+    analysis = {"full_text": full_text, "entries": entries, "results": [result]}
+    log = []
+
+    apply_text_redactions(page, analysis, [], set(), log, 1)
+
+    assert "SE'" in page.get_text()   # non redatto: è un falso positivo
+    assert log == []
 
 
 def test_propagazione_nomi(pagina_sintetica):
@@ -181,3 +197,85 @@ def test_shrink_redact_rect_resta_dentro():
     shrunk = shrink_redact_rect(rect)
     assert rect.contains(shrunk)
     assert not shrunk.is_empty
+
+
+# ------------------------------------------------------------
+# R-05: pseudonimizzazione con codici
+# ------------------------------------------------------------
+
+from app import CodeAssigner, apply_text_redactions as _apply  # noqa: E402
+
+
+def test_codici_stessa_stringa_stesso_codice():
+    a = CodeAssigner()
+    c1 = a.assign("PERSON", "Alonge Antonio")
+    c2 = a.assign("PERSON", "ALONGE ANTONIO")   # case-insensitive
+    c3 = a.assign("PERSON", "Alonge Antonio,")  # punteggiatura ai bordi
+    assert c1 == c2 == c3 == "PER-01"
+    assert a.mapping[0]["Occorrenze"] == 3
+
+
+def test_codici_stringhe_diverse_codici_diversi():
+    a = CodeAssigner()
+    assert a.assign("PERSON", "Alonge Antonio") == "PER-01"
+    assert a.assign("PERSON", "Scardoni Aldo") == "PER-02"
+    assert a.assign("IT_FISCAL_CODE", "LNGNTN72T09D514W") == "CF-01"
+    assert a.assign("TERMINE PERSONALIZZATO", "ACME S.p.A.") == "TERM-01"
+
+
+def test_codici_token_propagato_riusa_codice_persona():
+    a = CodeAssigner()
+    a.assign("PERSON", "Alonge Antonio")
+    # il solo cognome appartiene a una sola persona -> stesso codice
+    assert a.assign("PERSON (propagato)", "Alonge") == "PER-01"
+
+
+def test_codici_token_ambiguo_codice_nuovo():
+    a = CodeAssigner()
+    a.assign("PERSON", "Criniti Francesco")
+    a.assign("PERSON", "Criniti Luisa")
+    # "Criniti" appartiene a due persone: attribuzione ambigua -> codice nuovo
+    assert a.assign("PERSON (propagato)", "Criniti") == "PER-03"
+
+
+def test_pseudonimizzazione_sostituisce_con_codice(pagina_sintetica):
+    page = pagina_sintetica[0]
+    full_text, entries = build_word_map(page)
+    start = full_text.index("Mario Rossi")
+    result = RecognizerResult("PERSON", start, start + len("Mario Rossi"), 0.85)
+    analysis = {"full_text": full_text, "entries": entries, "results": [result]}
+    assigner = CodeAssigner()
+    log = []
+
+    _apply(page, analysis, [], set(), log, 1,
+           redaction_mode="codes", assigner=assigner)
+
+    text_dopo = page.get_text()
+    assert "Mario" not in text_dopo and "Rossi" not in text_dopo
+    assert "[PER-01]" in text_dopo
+    # il resto della pagina è intatto
+    for parola in ("sentenza", "spese", "base"):
+        assert parola in text_dopo
+    # log e tabella coerenti
+    assert log[0]["Codice"] == "PER-01"
+    assert assigner.mapping == [{
+        "Codice": "PER-01", "Tipo": "PERSON",
+        "Testo originale": "Mario Rossi", "Occorrenze": 1,
+    }]
+
+
+def test_blackout_resta_default(pagina_sintetica):
+    """In modalità blackout nessun codice appare nel PDF né nel log."""
+    page = pagina_sintetica[0]
+    full_text, entries = build_word_map(page)
+    start = full_text.index("Mario Rossi")
+    result = RecognizerResult("PERSON", start, start + len("Mario Rossi"), 0.85)
+    analysis = {"full_text": full_text, "entries": entries, "results": [result]}
+    log = []
+
+    _apply(page, analysis, [], set(), log, 1)
+
+    text_dopo = page.get_text()
+    assert "Mario" not in text_dopo
+    assert "[PER-" not in text_dopo
+    assert "Codice" not in log[0]
