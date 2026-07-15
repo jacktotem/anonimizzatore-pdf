@@ -51,7 +51,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'release' && steps.tag.outputs.tag || github.ref }}
 
-      - name: Sincronizza app.py (fonte di verità: src/)
+      - name: "Sincronizza app.py (fonte di verità: src/)"
         shell: bash
         run: cp src/app.py windows/app/app.py
 
