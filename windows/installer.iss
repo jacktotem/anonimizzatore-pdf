@@ -1,10 +1,15 @@
 ; ========================================
-; Anonimizzatore PDF v1.1.0
+; Anonimizzatore PDF
 ; Installer Inno Setup
 ; ========================================
+; La versione può essere sovrascritta da riga di comando (CI):
+;   ISCC.exe /DMyAppVersion=1.2.0 installer.iss
+; Il default qui sotto serve per la compilazione manuale.
 
 #define MyAppName "Anonimizzatore PDF"
-#define MyAppVersion "1.1.2"
+#ifndef MyAppVersion
+  #define MyAppVersion "1.2.0"
+#endif
 #define MyAppPublisher "Anonimizzatore PDF"
 #define MyAppExeName "AnonimizzatorePDF.bat"
 #define MyAppId "{{B9E4D3F2-5C6D-5E9F-A2B3-3D4E5F6A7B8C}"

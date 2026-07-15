@@ -1,0 +1,73 @@
+# ============================================================
+# Build installer Windows (.exe) e allegalo alla release
+#
+# Si attiva automaticamente quando viene pubblicata una release,
+# oppure manualmente (workflow_dispatch) indicando il tag di una
+# release esistente — utile per release già pubblicate.
+#
+# Inno Setup 6 è preinstallato sui runner windows-latest.
+# La versione dell'app viene derivata dal tag (v1.2.0 → 1.2.0) e
+# passata a ISCC con /DMyAppVersion, che ha la precedenza sul
+# default definito in installer.iss (guard #ifndef).
+# ============================================================
+
+name: Build installer Windows
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag della release a cui allegare l'exe (es. v1.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write   # necessario per caricare l'asset sulla release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Determina il tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # Per l'evento release compiliamo dal tag; per il dispatch
+      # manuale compiliamo dal branch corrente (es. main): serve per
+      # release già pubblicate il cui tag non contiene ancora questo
+      # workflow o il guard #ifndef in installer.iss.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'release' && steps.tag.outputs.tag || github.ref }}
+
+      - name: Sincronizza app.py (fonte di verità: src/)
+        shell: bash
+        run: cp src/app.py windows/app/app.py
+
+      - name: Compila installer con Inno Setup
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=${{ steps.tag.outputs.version }} `
+            windows\installer.iss
+          Get-ChildItem windows\installer
+
+      - name: Allega l'exe alla release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          EXE="windows/installer/AnonimizzatorePDF-Setup-v${{ steps.tag.outputs.version }}.exe"
+          ls -la "$EXE"
+          gh release upload "${{ steps.tag.outputs.tag }}" "$EXE" --clobber
