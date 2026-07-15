@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-15
+
 ### Added
+- **R-05 — Pseudonimizzazione con codici univoci** (selezionabile in
+  sidebar, in alternativa all'oscuramento): ogni stringa rilevata viene
+  sostituita da un codice stabile (`[PER-01]`, `[CF-01]`, `[TERM-01]`...)
+  — stessa stringa → stesso codice in tutto il documento, così il testo
+  resta leggibile e coerente. Il testo originale viene comunque rimosso
+  fisicamente dal PDF. A parte viene generata la **tabella di
+  accoppiamento** codice↔testo (CSV per Excel), con avvertenza: è la
+  chiave di re-identificazione e va custodita separatamente; il
+  documento pseudonimizzato resta un dato personale ai sensi del GDPR
+  finché la tabella esiste. Funziona anche sulle pagine OCR (riquadro
+  bianco con codice). Un token propagato ("Alonge") riusa il codice
+  della persona ("Alonge Antonio") quando l'attribuzione è univoca.
+- **Priorità di redazione senza sovrapposizioni**: ogni parola riceve
+  una sola redazione — termini personalizzati (codice TERM coerente),
+  poi entità deterministiche (CF, IBAN...), poi NER, poi propagazione.
+  Vale in entrambe le modalità e in OCR.
 - **Modalità server condiviso** (`windows/server/`): script PowerShell
   per registrare l'app come istanza unica su server Windows
   multiutente (desktop remoto / RDS). L'app parte all'avvio del
