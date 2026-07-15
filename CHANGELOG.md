@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-07-15
+
+### Fixed
+- **M-03-R2 — Rimozione effettiva di `/OpenAction`, `/AA` e `/Names`
+  JavaScript dal catalog:** `xref_set_key(..., "null")` di PyMuPDF
+  (implementazione rebased, ≥ 1.24) non cancella la chiave ma lascia la
+  coppia `/Chiave null` nel dizionario, che sopravvive anche al
+  salvataggio. Un valore `null` è funzionalmente equivalente a chiave
+  assente (ISO 32000-1 §7.3.7), quindi il JavaScript non veniva comunque
+  eseguito, ma il catalog del documento "anonimizzato" continuava ad
+  annunciare la presenza pregressa di OpenAction/JS. Ora, dopo la
+  normalizzazione a `null`, le coppie annullate vengono rimosse
+  fisicamente riscrivendo il catalog. Ripristina il verde di
+  `test_catalog_no_javascript_or_openaction` (verificato su PyMuPDF
+  1.24.14, 1.26.4 e 1.28.0).
+
 ## [1.3.0] - 2026-07-15
 
 ### Added

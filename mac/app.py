@@ -24,7 +24,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -681,6 +681,24 @@ def sanitize_pdf_objects(doc):
                     doc.xref_set_key(catalog_xref, "Names", "null")
             except Exception as e:
                 logger.debug("Catalog /Names cleanup skipped: %s", e)
+            # xref_set_key(..., "null") NON cancella la chiave: lascia la
+            # coppia "/Chiave null" nel dict (implementazione rebased,
+            # PyMuPDF >= 1.24). Un valore null equivale a chiave assente per
+            # la PDF spec (ISO 32000-1 §7.3.7), ma la coppia sopravvive anche
+            # al save e il catalog continuerebbe ad annunciare che il
+            # documento aveva OpenAction/JS. Il passaggio via set_key però
+            # normalizza qualunque valore (ref indiretto, dict annidato) al
+            # letterale "null", quindi ora possiamo rimuovere le coppie
+            # testualmente in modo sicuro.
+            try:
+                catalog_text = doc.xref_object(catalog_xref, compressed=True)
+                cleaned = re.sub(
+                    r"/(?:OpenAction|AA|Names)\s+null", "", catalog_text
+                )
+                if cleaned != catalog_text:
+                    doc.update_object(catalog_xref, cleaned)
+            except Exception as e:
+                logger.debug("Catalog null-key strip skipped: %s", e)
         except Exception as e:
             logger.warning("Catalog cleanup fallito: %s", e)
 
