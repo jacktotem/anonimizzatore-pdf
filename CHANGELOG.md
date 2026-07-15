@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Modalità server condiviso** (`windows/server/`): script PowerShell
+  per registrare l'app come istanza unica su server Windows
+  multiutente (desktop remoto / RDS). L'app parte all'avvio del
+  server (attività pianificata, account SYSTEM, riavvio automatico),
+  è vincolata a 127.0.0.1 (nessuna esposizione di rete) e viene
+  condivisa da tutte le sessioni utente tramite collegamento sul
+  desktop pubblico. Include `configura-server.ps1`,
+  `rimuovi-server.ps1` e guida `README-SERVER.md` per l'IT.
+- CI: workflow `build-installer.yml` — a ogni release pubblicata
+  l'installer Windows viene compilato con Inno Setup su un runner
+  GitHub e allegato automaticamente alla release. La versione in
+  `installer.iss` è derivata dal tag (guard `#ifndef` per la
+  compilazione manuale).
+
 ## [1.2.0] - 2026-07-15
 
 Release di qualità del rilevamento, in risposta a regressioni osservate
