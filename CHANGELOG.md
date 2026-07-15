@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-15
+
+Release di qualità del rilevamento, in risposta a regressioni osservate
+su provvedimenti reali (sentenze d'appello e ordinanze di Cassazione).
+
+### Fixed
+- **R-02 — Redazione posizionale:** la redazione delle entità non usa
+  più `page.search_for(testo)`, che è case-insensitive e cerca
+  sottostringhe: un falso positivo "SE'" oscurava "se" dentro
+  "**se**ntenza", "spe**se**", "prete**se**" in tutta la pagina. Ora il
+  testo viene analizzato tramite una mappa parola→coordinate e viene
+  oscurata **solo l'occorrenza effettivamente rilevata**, ai suoi
+  rettangoli. Lo stesso vale per i termini personalizzati, che ora
+  corrispondono a parole intere (case-insensitive, ignorando la
+  punteggiatura ai bordi) e mai a frammenti.
+- **R-01 — Filtro falsi positivi NER:** le parole di boilerplate legale
+  scambiate dal modello per nomi ("Firmato Da", "Emesso Da", "Numero",
+  "Data", "CAUSA", "Ordinanza Interlocutoria", ...) vengono scartate
+  prima della redazione. Il filtro si applica solo alle entità NER
+  (PERSON, LOCATION, DATE_TIME, ...) — mai a quelle deterministiche
+  (codice fiscale, IBAN, P.IVA, ...). Scartate anche le entità troppo
+  corte (< 3 caratteri sostanziali).
+
+### Added
+- **R-03 — Recognizer nomi in contesto legale:** nuove regole
+  deterministiche per i nomi che il NER statistico manca (es. cognomi
+  rari come "Cabalisti"): un nome seguito da "(C.F. ...)" o preceduto
+  da un titolo (avv., dott., sig., prof., ing., ...) è una persona.
+- **R-04 — Propagazione dei nomi:** i token dei nomi di persona
+  rilevati in qualunque pagina vengono oscurati in **tutto** il
+  documento (solo parole intere con iniziale maiuscola), coprendo le
+  occorrenze che il modello manca. Funziona anche sulle pagine OCR.
+- Riepilogo arricchito: conteggio dei falsi positivi scartati e dei
+  nomi propagati.
+
+### Known limitations
+- Le filigrane diagonali (es. "copia comunicata ai soli fini dell'art
+  133 cpc") possono perdere i glifi che attraversano fisicamente un
+  rettangolo di redazione: `apply_redactions` rimuove ogni carattere il
+  cui bounding box interseca l'area. Mitigato restringendo leggermente
+  i rettangoli (`shrink_redact_rect`); il danno residuo è
+  over-redaction cosmetica, mai perdita di dati da anonimizzare.
+
 ## [1.1.2] - 2026-05-12
 
 Security release in risposta all'audit esterno post-v1.1.1. Chiude tutte

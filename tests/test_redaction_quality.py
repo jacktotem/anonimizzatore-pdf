@@ -1,0 +1,183 @@
+"""
+Regression guard per la release 1.2.0 (qualità del rilevamento).
+
+Copre i tre bug osservati su provvedimenti reali:
+- R-01: falsi positivi NER ("Firmato Da", "Numero", "SE'") redatti;
+- R-02: search_for oscurava sottostringhe dentro altre parole
+  ("se" → "sentenza", "spese", "pretese");
+- R-03: nomi con cognomi rari ("Cabalisti Marco") mancati dal NER
+  ma riconoscibili dal contesto legale ("(C.F. ...)", titoli).
+
+Nessun test qui richiede spaCy/modello italiano: si testano gli helper
+deterministici e la redazione posizionale con risultati sintetici.
+"""
+import fitz
+import pytest
+from presidio_analyzer import RecognizerResult
+
+from app import (
+    ItLegalNameRecognizer,
+    apply_text_redactions,
+    build_word_map,
+    collect_person_tokens,
+    find_custom_term_matches,
+    is_false_positive,
+    shrink_redact_rect,
+)
+
+
+# ------------------------------------------------------------
+# R-01: filtro falsi positivi
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("entity_type,text", [
+    ("PERSON", "Firmato Da"),
+    ("PERSON", "Emesso Da"),
+    ("PERSON", "Numero"),
+    ("DATE_TIME", "Data"),
+    ("LOCATION", "SE’"),
+    ("LOCATION", "CAUSA"),
+    ("LOCATION", "S"),
+    ("LOCATION", "N T E N Z A"),   # intestazione "S E N T E N Z A" spaziata
+    ("PERSON", "Ordinanza Interlocutoria"),
+    ("PERSON", "R.G."),
+    ("LOCATION", "C.F."),
+])
+def test_falsi_positivi_scartati(entity_type, text):
+    assert is_false_positive(entity_type, text) is True
+
+
+@pytest.mark.parametrize("entity_type,text", [
+    ("PERSON", "Cabalisti Marco"),
+    ("PERSON", "Maria Celeste Arbia"),
+    ("PERSON", "Elena Rossi Consigliere"),  # nome + ruolo: va tenuto
+    ("LOCATION", "Venezia"),
+])
+def test_entita_vere_non_scartate(entity_type, text):
+    assert is_false_positive(entity_type, text) is False
+
+
+def test_entita_pattern_mai_filtrate():
+    # Le entità deterministiche non passano MAI dal filtro,
+    # nemmeno con testi corti o strani.
+    assert is_false_positive("IT_FISCAL_CODE", "SE") is False
+    assert is_false_positive("IBAN_CODE", "IT") is False
+
+
+# ------------------------------------------------------------
+# R-03: recognizer nomi in contesto legale
+# ------------------------------------------------------------
+
+def _person_spans(text):
+    rec = ItLegalNameRecognizer()
+    return {text[r.start:r.end] for r in rec.analyze(text, ["PERSON"])}
+
+
+def test_nome_prima_del_codice_fiscale():
+    text = "e contro Cabalisti Marco (C.F. CBLMRC90L07A459F) appellato"
+    assert "Cabalisti Marco" in _person_spans(text)
+
+
+def test_nome_dopo_titolo_avvocato():
+    text = "rappresentato e difeso dall’avv. Calogera Cusumano contro"
+    assert "Calogera Cusumano" in _person_spans(text)
+
+
+def test_titolo_con_suffisso_e_ruolo_trimmato():
+    # "dott. ssa" e ruolo finale "Presidente" non devono entrare nel nome
+    text = "composta da dott. ssa Clotilde Parise Presidente e altri"
+    spans = _person_spans(text)
+    assert "Clotilde Parise" in spans
+    assert all("Presidente" not in s for s in spans)
+
+
+def test_niente_nome_senza_contesto():
+    # Parole qualsiasi non devono produrre match
+    assert _person_spans("la sentenza del Tribunale di Verona è confermata") == set()
+
+
+# ------------------------------------------------------------
+# R-02: mappa parole e redazione posizionale
+# ------------------------------------------------------------
+
+@pytest.fixture
+def pagina_sintetica(tmp_path):
+    """Pagina con la frase incriminata: entità 'SE’' + parole con 'se'."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 100),
+        "la sentenza sulle spese da CAUSA A SE' imputabile resta base",
+        fontsize=11,
+    )
+    page.insert_text((72, 130), "il sig. Mario Rossi ha vinto", fontsize=11)
+    yield doc
+    doc.close()
+
+
+def test_word_map_offsets_coerenti(pagina_sintetica):
+    full_text, entries = build_word_map(pagina_sintetica[0])
+    for e in entries:
+        assert full_text[e["start"]:e["end"]] == e["text"]
+
+
+def test_redazione_non_tocca_altre_parole(pagina_sintetica):
+    """Redigere l'entità "SE’" non deve mutilare sentenza/spese/base."""
+    page = pagina_sintetica[0]
+    full_text, entries = build_word_map(page)
+    start = full_text.index("SE'")
+    result = RecognizerResult("LOCATION", start, start + len("SE'"), 0.85)
+    analysis = {"full_text": full_text, "entries": entries, "results": [result]}
+
+    apply_text_redactions(page, analysis, [], set(), [], 1)
+
+    text_dopo = page.get_text()
+    assert "SE'" not in text_dopo
+    for parola in ("sentenza", "spese", "base", "resta"):
+        assert parola in text_dopo, f"parola mutilata: {parola}"
+
+
+def test_propagazione_nomi(pagina_sintetica):
+    """Un token nome noto ("Rossi") viene oscurato come parola intera."""
+    page = pagina_sintetica[0]
+    full_text, entries = build_word_map(page)
+    analysis = {"full_text": full_text, "entries": entries, "results": []}
+
+    apply_text_redactions(page, analysis, [], {"mario", "rossi"}, [], 1)
+
+    text_dopo = page.get_text()
+    assert "Mario" not in text_dopo
+    assert "Rossi" not in text_dopo
+    # "resta" contiene "res" ma non è un match di parola intera
+    assert "resta" in text_dopo
+
+
+def test_collect_person_tokens_esclude_stopword():
+    full_text = "Alonge Antonio contro Istituto Nazionale Lavoro"
+    results = [
+        RecognizerResult("PERSON", 0, 14, 0.85),               # Alonge Antonio
+        RecognizerResult("PERSON", 22, len(full_text), 0.85),  # Istituto ... Lavoro
+    ]
+    tokens = collect_person_tokens({"full_text": full_text, "results": results})
+    assert {"alonge", "antonio"} <= tokens
+    assert not {"istituto", "nazionale", "lavoro"} & tokens
+
+
+def test_termini_personalizzati_parole_intere(pagina_sintetica):
+    _, entries = build_word_map(pagina_sintetica[0])
+    # "se" matcha SOLO la parola a sé stante "SE'",
+    # mai i frammenti dentro "sentenza"/"spese"
+    matches = find_custom_term_matches("se", entries)
+    matched_words = {entries[i]["text"] for m in matches for i in m}
+    assert matched_words == {"SE'"}
+    # il nome multi-parola matcha ignorando le maiuscole
+    assert len(find_custom_term_matches("mario rossi", entries)) == 1
+    # nessun match per termini assenti
+    assert find_custom_term_matches("Genertel", entries) == []
+
+
+def test_shrink_redact_rect_resta_dentro():
+    rect = fitz.Rect(10, 10, 60, 22)
+    shrunk = shrink_redact_rect(rect)
+    assert rect.contains(shrunk)
+    assert not shrunk.is_empty

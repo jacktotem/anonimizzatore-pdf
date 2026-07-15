@@ -10,14 +10,20 @@ Licenza: GNU AGPL v3.0
 import streamlit as st
 import fitz  # PyMuPDF
 import os
+import re
 import sys
 import logging
 from io import BytesIO
 from collections import Counter
-from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
+from presidio_analyzer import (
+    AnalyzerEngine,
+    RecognizerRegistry,
+    EntityRecognizer,
+    RecognizerResult,
+)
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -88,6 +94,274 @@ st.set_page_config(
 
 
 # ============================================================
+# FILTRO FALSI POSITIVI (R-01)
+# ============================================================
+# Il NER statistico (spaCy) scambia regolarmente parole di
+# intestazione dei provvedimenti per nomi di persona o luoghi:
+# "Firmato Da", "Emesso Da", "Numero", "Data", "SE'", "CAUSA"...
+# Queste vanno scartate PRIMA della redazione, ma SOLO per le
+# entità NER: le entità a pattern (codice fiscale, IBAN, ecc.)
+# non producono questo tipo di falso positivo e non vanno filtrate.
+
+# Tipi di entità prodotti dal NER statistico (filtrabili)
+NER_ENTITY_TYPES = {"PERSON", "LOCATION", "DATE_TIME", "NRP", "ORGANIZATION"}
+
+# Lunghezza minima di un token perché sia "sostanziale"
+MIN_TOKEN_LEN = 3
+
+# Parole di boilerplate legale/documentale che NON sono mai
+# di per sé un dato personale (tutte minuscole, senza punteggiatura)
+FALSE_POSITIVE_STOPWORDS = {
+    # intestazioni e campi documento
+    "numero", "data", "firmato", "emesso", "serial", "registro",
+    "generale", "sezionale", "raccolta", "pubblicazione", "copia",
+    "originale", "pagina", "oggetto", "conclusioni", "premesso",
+    "rilevato", "ritenuto", "osserva", "letto", "visto",
+    # istituzioni e ruoli
+    "repubblica", "italiana", "italiano", "italia", "popolo",
+    "corte", "appello", "cassazione", "tribunale", "giudice",
+    "presidente", "consigliere", "consiglieri", "estensore",
+    "relatore", "magistrato", "magistrati", "sezione", "sezioni",
+    "civile", "penale", "unite", "collegio", "camera", "consiglio",
+    "cancelliere", "cancelleria", "procura", "procuratore",
+    "ministero", "pubblico",
+    # termini processuali
+    "sentenza", "ordinanza", "decreto", "ricorso", "controricorso",
+    "interlocutoria", "interlocutorio", "appellante", "appellata",
+    "appellato", "appellati", "appellate", "ricorrente", "ricorrenti",
+    "resistente", "resistenti", "controricorrente", "controricorrenti",
+    "convenuto", "convenuta", "attore", "attrice", "contumace",
+    "contumaci", "interveniente", "intervenuta", "intervenuto",
+    "difensore", "difensori", "udienza", "giudizio", "causa",
+    "merito", "istruttoria", "dispositivo", "motivi", "motivazione",
+    "fatto", "fatti", "diritto", "svolgimento", "processo",
+    "procedimento", "legge", "articolo", "artt", "art", "comma",
+    "codice", "fiscale", "spese", "compensi", "interessi",
+    "rivalutazione",
+    # titoli professionali
+    "avv", "avvocato", "avvocati", "dott", "ssa", "sig", "sigra",
+    "prof", "ing", "geom", "rag", "notaio",
+    # enti ricorrenti nei documenti legali
+    "istituto", "nazionale", "assicurazione", "assicurazioni",
+    "infortuni", "lavoro", "inail", "inps", "agenzia", "entrate",
+    "comune", "provincia", "regione", "societa", "società", "soc",
+    "coop", "srl", "spa", "sas", "snc",
+    # preposizioni/congiunzioni che finiscono dentro le entità
+    "da", "di", "del", "della", "dei", "delle", "il", "lo", "la",
+    "le", "ed", "in", "per", "con", "su", "al", "ai", "gia", "già",
+    "nome", "se",
+}
+
+# Punteggiatura da rimuovere ai bordi dei token
+_TOKEN_PUNCT = ".,;:()[]{}'\"«»–—-’‘“”/\\"
+
+
+def _clean_token(token):
+    """Normalizza un token: rimuove punteggiatura ai bordi e minuscolizza."""
+    return token.strip(_TOKEN_PUNCT).lower()
+
+
+def is_false_positive(entity_type, text):
+    """
+    R-01: True se l'entità rilevata è quasi certamente un falso positivo.
+
+    Si applica SOLO alle entità NER (PERSON, LOCATION, ...):
+    - testo troppo corto ("SE'", "S", "Da") → falso positivo
+    - nessun token sostanziale (solo frammenti/numeri) → falso positivo
+    - tutti i token sostanziali sono boilerplate legale
+      ("Firmato Da", "Numero", "Ordinanza Interlocutoria") → falso positivo
+    """
+    if entity_type not in NER_ENTITY_TYPES:
+        return False
+    stripped = text.strip()
+    if len(stripped) < MIN_TOKEN_LEN:
+        return True
+    substantive = []
+    for token in stripped.split():
+        clean = _clean_token(token)
+        # contano solo le LETTERE: "R.G.", "C.F.", "S", "12" non
+        # sono token sostanziali
+        letters = "".join(c for c in clean if c.isalpha())
+        if len(letters) < MIN_TOKEN_LEN:
+            continue
+        substantive.append((clean, letters))
+    if not substantive:
+        return True
+    return all(
+        clean in FALSE_POSITIVE_STOPWORDS or letters in FALSE_POSITIVE_STOPWORDS
+        for clean, letters in substantive
+    )
+
+
+# ============================================================
+# MAPPA PAROLA → COORDINATE (R-02)
+# ============================================================
+# Sostituisce page.search_for(testo_trovato): search_for è
+# case-insensitive e cerca SOTTOSTRINGHE, quindi un'entità "SE'"
+# oscurava "se" dentro "sentenza", "spese", "pretese"...
+# Con la mappa parola→rettangolo oscuriamo SOLO l'occorrenza
+# effettivamente rilevata dall'analisi, alle sue coordinate.
+
+def build_word_map(page):
+    """
+    Estrae le parole della pagina con le loro coordinate.
+
+    Ritorna (full_text, entries) dove full_text è il testo
+    ricostruito (parole separate da spazio) e entries è una lista
+    di dict {start, end, rect, text} con gli offset di ogni parola
+    dentro full_text.
+    """
+    words = page.get_text("words")
+    # Ordine di lettura: blocco, riga, parola
+    words.sort(key=lambda w: (w[5], w[6], w[7]))
+    full_text = ""
+    entries = []
+    for w in words:
+        token = w[4].strip()
+        if not token:
+            continue
+        if full_text:
+            full_text += " "
+        start = len(full_text)
+        full_text += token
+        entries.append({
+            "start": start,
+            "end": len(full_text),
+            "rect": fitz.Rect(w[0], w[1], w[2], w[3]),
+            "text": token,
+        })
+    return full_text, entries
+
+
+def rects_for_span(entries, start, end):
+    """Rettangoli delle parole che si sovrappongono allo span [start, end)."""
+    return [
+        (i, e["rect"]) for i, e in enumerate(entries)
+        if e["start"] < end and e["end"] > start
+    ]
+
+
+def shrink_redact_rect(rect):
+    """
+    Restringe leggermente il rettangolo di redazione.
+
+    apply_redactions() rimuove OGNI carattere il cui bounding box
+    interseca il rettangolo: con interlinee strette o testo ruotato
+    (es. filigrane diagonali "copia comunicata ai soli fini...")
+    un rettangolo a piena altezza mutila anche i caratteri delle
+    righe adiacenti. I caratteri della parola bersaglio attraversano
+    comunque la fascia centrale, quindi vengono sempre rimossi.
+    """
+    v = min(1.0, rect.height * 0.15)
+    h = min(0.3, rect.width * 0.05)
+    return fitz.Rect(rect.x0 + h, rect.y0 + v, rect.x1 - h, rect.y1 - v)
+
+
+def find_custom_term_matches(term, entries):
+    """
+    Cerca un termine personalizzato come sequenza di PAROLE INTERE
+    (case-insensitive, ignorando la punteggiatura ai bordi).
+    Ritorna una lista di gruppi di indici parola corrispondenti.
+    Niente più match di sottostringhe dentro altre parole.
+    """
+    term_tokens = [_clean_token(t) for t in term.split()]
+    term_tokens = [t for t in term_tokens if t]
+    if not term_tokens:
+        return []
+    doc_tokens = [_clean_token(e["text"]) for e in entries]
+    n = len(term_tokens)
+    matches = []
+    for i in range(len(doc_tokens) - n + 1):
+        if doc_tokens[i:i + n] == term_tokens:
+            matches.append(list(range(i, i + n)))
+    return matches
+
+
+# ============================================================
+# RECOGNIZER NOMI IN CONTESTO LEGALE (R-03)
+# ============================================================
+# spaCy manca nomi con cognomi rari (es. "Cabalisti Marco").
+# Nei documenti legali italiani però ci sono contesti deterministici:
+#   1. "Cognome Nome (C.F. XXXXXXXXXXXXXXXX)" — un nome seguito dal
+#      codice fiscale tra parentesi è quasi certamente una persona
+#   2. "avv./dott./sig. Nome Cognome" — titolo professionale
+# Questo recognizer li cattura con regex + trimming degli eventuali
+# ruoli finali ("Presidente", "Consigliere", ...).
+
+# Token "nome proprio": iniziale maiuscola + almeno un altro carattere
+_NAME_TOKEN = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-Þà-öø-ÿ'’\-]+"
+_NAME_SEQ = rf"{_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,3}}"
+
+
+class ItLegalNameRecognizer(EntityRecognizer):
+    """Nomi di persona in contesti tipici dei documenti legali italiani."""
+
+    # "Cabalisti Marco (C.F. CBLMRC90L07A459F)"
+    REGEX_NAME_CF = re.compile(
+        rf"({_NAME_SEQ})\s*\(\s*(?i:c\.?\s?f\.?|cod\.?\s*fisc\.?|codice\s+fiscale)"
+    )
+    # "avv. Calogera Cusumano", "dott. ssa Clotilde Parise"
+    REGEX_TITLE_NAME = re.compile(
+        rf"\b(?i:avv|dott|prof|sig|ing|geom|rag|not)\."
+        rf"\s*(?i:(?:ssa|ra|ri|re|ti)\.?\s+)?({_NAME_SEQ})"
+    )
+
+    SCORE_NAME_CF = 0.9
+    SCORE_TITLE_NAME = 0.85
+
+    def __init__(self):
+        super().__init__(
+            supported_entities=["PERSON"],
+            supported_language="it",
+            name="ItLegalNameRecognizer",
+        )
+
+    def load(self):
+        pass
+
+    def _trim_trailing_stopwords(self, text, start, end):
+        """
+        Rimuove dal fondo i token di ruolo/boilerplate catturati per
+        errore ("Clotilde Parise Presidente" → "Clotilde Parise").
+        Ritorna (start, end) aggiustati oppure None se non resta nulla.
+        """
+        span = text[start:end]
+        tokens = list(re.finditer(r"\S+", span))
+        while tokens and _clean_token(tokens[-1].group()) in FALSE_POSITIVE_STOPWORDS:
+            tokens.pop()
+        if not tokens:
+            return None
+        return start + tokens[0].start(), start + tokens[-1].end()
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        results = []
+        if entities and "PERSON" not in entities:
+            return results
+        for regex, score in (
+            (self.REGEX_NAME_CF, self.SCORE_NAME_CF),
+            (self.REGEX_TITLE_NAME, self.SCORE_TITLE_NAME),
+        ):
+            for match in regex.finditer(text):
+                trimmed = self._trim_trailing_stopwords(
+                    text, match.start(1), match.end(1)
+                )
+                if trimmed is None:
+                    continue
+                start, end = trimmed
+                if is_false_positive("PERSON", text[start:end]):
+                    continue
+                results.append(
+                    RecognizerResult(
+                        entity_type="PERSON",
+                        start=start,
+                        end=end,
+                        score=score,
+                    )
+                )
+        return results
+
+
+# ============================================================
 # INIZIALIZZAZIONE MOTORE DI ANALISI
 # ============================================================
 
@@ -103,6 +377,8 @@ def initialize_analyzer():
 
     registry = RecognizerRegistry(supported_languages=["it"])
     registry.load_predefined_recognizers(languages=["it"])
+    # R-03: nomi in contesti legali che il NER statistico manca
+    registry.add_recognizer(ItLegalNameRecognizer())
 
     analyzer = AnalyzerEngine(
         nlp_engine=nlp_engine,
@@ -330,22 +606,31 @@ def safe_error_message(action, exception):
 # ============================================================
 # REDAZIONE PAGINA TESTUALE (standard)
 # ============================================================
+# R-02: due fasi separate.
+#   1. analyze_text_page  → analizza il testo ricostruito dalla
+#      mappa parole e ritorna i risultati filtrati
+#   2. apply_text_redactions → oscura SOLO le parole alle coordinate
+#      dell'occorrenza rilevata (niente più search_for globale)
 
-def redact_text_page(page, selected_entities, custom_terms, analyzer, min_score,
-                     log, page_num, debug_first=False):
-    """Redazione su pagina con testo selezionabile."""
-    text = page.get_text()
+def analyze_text_page(page, selected_entities, analyzer, min_score,
+                      page_num, debug_first=False):
+    """
+    Analizza una pagina testuale. Ritorna un dict con la mappa parole,
+    i risultati validi e i contatori diagnostici.
+    """
+    full_text, entries = build_word_map(page)
 
     if debug_first:
-        st.write(f"🔍 Pagina {page_num} (testuale) — primi 200 caratteri: `{text[:200]}`")
+        st.write(f"🔍 Pagina {page_num} (testuale) — primi 200 caratteri: `{full_text[:200]}`")
 
     raw_count = 0
-    filtered_count = 0
+    results = []
+    dropped_fp = 0
 
-    if text.strip() and selected_entities:
+    if full_text.strip() and selected_entities:
         try:
             all_results = analyzer.analyze(
-                text=text,
+                text=full_text,
                 entities=selected_entities,
                 language="it",
             )
@@ -353,41 +638,110 @@ def redact_text_page(page, selected_entities, custom_terms, analyzer, min_score,
 
             if debug_first and all_results:
                 debug_sample = [
-                    f"{r.entity_type}={text[r.start:r.end][:25]!r}(s={r.score:.2f})"
+                    f"{r.entity_type}={full_text[r.start:r.end][:25]!r}(s={r.score:.2f})"
                     for r in all_results[:6]
                 ]
                 st.write(f"   Esempi grezzi: {' | '.join(debug_sample)}")
 
-            results = [r for r in all_results if r.score >= min_score]
-            filtered_count = len(results)
+            for r in all_results:
+                if r.score < min_score:
+                    continue
+                # R-01: scarta i falsi positivi del NER
+                if is_false_positive(r.entity_type, full_text[r.start:r.end]):
+                    dropped_fp += 1
+                    continue
+                results.append(r)
 
         except Exception as e:
             # L-03: messaggio sanitizzato, dettagli solo nei log
             st.error(safe_error_message(f"Analisi pagina {page_num}", e))
             results = []
 
-        for result in results:
-            found_text = text[result.start:result.end].strip()
-            if not found_text or len(found_text) < 2:
-                continue
-            areas = page.search_for(found_text)
-            for area in areas:
-                page.add_redact_annot(area, fill=(0, 0, 0))
-                log.append({
-                    "Pagina": page_num,
-                    "Tipo": result.entity_type,
-                    "Testo": found_text,
-                    "Confidenza": f"{result.score:.0%}",
-                    "Metodo": "Testo",
-                })
+    return {
+        "full_text": full_text,
+        "entries": entries,
+        "results": results,
+        "raw": raw_count,
+        "filtered": len(results),
+        "dropped_fp": dropped_fp,
+    }
 
+
+def collect_person_tokens(analysis):
+    """
+    R-04: raccoglie i token dei nomi di persona rilevati, per
+    propagarli a tutto il documento (es. "Cabalisti" rilevato a
+    pagina 1 viene oscurato anche dove il NER lo manca).
+    """
+    tokens = set()
+    full_text = analysis["full_text"]
+    for r in analysis["results"]:
+        if r.entity_type != "PERSON":
+            continue
+        for token in full_text[r.start:r.end].split():
+            clean = _clean_token(token)
+            if (
+                len(clean) >= MIN_TOKEN_LEN
+                and clean not in FALSE_POSITIVE_STOPWORDS
+                and token[:1].isupper()
+                and clean.isalpha()
+            ):
+                tokens.add(clean)
+    return tokens
+
+
+def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
+                          log, page_num):
+    """Applica le redazioni a una pagina testuale usando le coordinate."""
+    full_text = analysis["full_text"]
+    entries = analysis["entries"]
+    redacted_word_idx = set()
+
+    # 1. Entità rilevate dall'analisi (solo l'occorrenza alle sue coordinate)
+    for result in analysis["results"]:
+        found_text = full_text[result.start:result.end].strip()
+        if not found_text:
+            continue
+        word_hits = rects_for_span(entries, result.start, result.end)
+        if not word_hits:
+            continue
+        for idx, rect in word_hits:
+            page.add_redact_annot(shrink_redact_rect(rect), fill=(0, 0, 0))
+            redacted_word_idx.add(idx)
+        log.append({
+            "Pagina": page_num,
+            "Tipo": result.entity_type,
+            "Testo": found_text,
+            "Confidenza": f"{result.score:.0%}",
+            "Metodo": "Testo",
+        })
+
+    # 2. R-04: propagazione dei nomi rilevati altrove nel documento
+    #    (solo parole intere con iniziale maiuscola, mai sottostringhe)
+    for idx, entry in enumerate(entries):
+        if idx in redacted_word_idx:
+            continue
+        clean = _clean_token(entry["text"])
+        if clean in known_person_tokens and entry["text"][:1].isupper():
+            page.add_redact_annot(shrink_redact_rect(entry["rect"]), fill=(0, 0, 0))
+            redacted_word_idx.add(idx)
+            log.append({
+                "Pagina": page_num,
+                "Tipo": "PERSON (propagato)",
+                "Testo": entry["text"],
+                "Confidenza": "—",
+                "Metodo": "Testo",
+            })
+
+    # 3. Termini personalizzati: match per PAROLE INTERE
     for term in custom_terms:
         term = term.strip()
         if not term:
             continue
-        areas = page.search_for(term)
-        for area in areas:
-            page.add_redact_annot(area, fill=(0, 0, 0))
+        for match_indexes in find_custom_term_matches(term, entries):
+            for idx in match_indexes:
+                page.add_redact_annot(shrink_redact_rect(entries[idx]["rect"]), fill=(0, 0, 0))
+                redacted_word_idx.add(idx)
             log.append({
                 "Pagina": page_num,
                 "Tipo": "TERMINE PERSONALIZZATO",
@@ -397,7 +751,6 @@ def redact_text_page(page, selected_entities, custom_terms, analyzer, min_score,
             })
 
     page.apply_redactions()
-    return raw_count, filtered_count
 
 
 # ============================================================
@@ -406,8 +759,9 @@ def redact_text_page(page, selected_entities, custom_terms, analyzer, min_score,
 
 def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                          analyzer, min_score, dpi, lang, log, page_num,
-                         debug_first=False):
+                         debug_first=False, known_person_tokens=None):
     """OCR su pagina scansionata + redazione con rettangoli su immagine."""
+    known_person_tokens = known_person_tokens or set()
     zoom = dpi / 72
     mat = fitz.Matrix(zoom, zoom)
     pix = src_page.get_pixmap(matrix=mat, alpha=False)
@@ -473,7 +827,12 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                     language="it",
                 )
                 raw_count = len(all_results)
-                results = [r for r in all_results if r.score >= min_score]
+                # R-01: soglia + filtro falsi positivi NER
+                results = [
+                    r for r in all_results
+                    if r.score >= min_score
+                    and not is_false_positive(r.entity_type, full_text[r.start:r.end])
+                ]
                 filtered_count = len(results)
 
                 if debug_first and all_results:
@@ -511,6 +870,25 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                     "Metodo": "OCR",
                 })
 
+        # R-04: propagazione dei nomi rilevati nelle pagine testuali
+        # (parole intere con iniziale maiuscola, mai sottostringhe)
+        for w in words:
+            clean = _clean_token(w["text"])
+            if clean in known_person_tokens and w["text"][:1].isupper():
+                pad = 2
+                draw.rectangle(
+                    [(w["x"] - pad, w["y"] - pad),
+                     (w["x"] + w["w"] + pad, w["y"] + w["h"] + pad)],
+                    fill="black",
+                )
+                log.append({
+                    "Pagina": page_num,
+                    "Tipo": "PERSON (propagato)",
+                    "Testo": w["text"],
+                    "Confidenza": "—",
+                    "Metodo": "OCR",
+                })
+
         for term in custom_terms:
             term = term.strip()
             if not term:
@@ -518,7 +896,7 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
             term_words = term.split()
             for i in range(len(words) - len(term_words) + 1):
                 match = all(
-                    words[i + j]["text"].lower() == term_words[j].lower()
+                    _clean_token(words[i + j]["text"]) == _clean_token(term_words[j])
                     for j in range(len(term_words))
                 )
                 if match:
@@ -573,12 +951,22 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 
     total_raw = 0
     total_filtered = 0
+    total_dropped_fp = 0
     pages_ocr = 0
     pages_text = 0
     pages_with_inline_images = 0
 
-    for page_num, src_page in enumerate(src_doc, start=1):
-        progress_bar.progress(page_num / total_pages)
+    # ---------- PASSATA 1: analisi delle pagine testuali ----------
+    # Analizziamo PRIMA tutto il documento per raccogliere i nomi di
+    # persona rilevati (R-04): così "Cabalisti" trovato a pagina 1
+    # viene oscurato anche nelle pagine dove il NER lo manca.
+    page_plans = {}  # page_index -> {"use_ocr": bool, "analysis": dict|None}
+    known_person_tokens = set()
+
+    for page_index, src_page in enumerate(src_doc):
+        page_num = page_index + 1
+        progress_bar.progress((page_index + 1) / (total_pages * 2))
+        status_text.text(f"🧠 Analisi pagina {page_num}/{total_pages}...")
 
         scanned = is_scanned_page(src_page)
 
@@ -595,35 +983,59 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             (ocr_mode == "auto" and scanned and TESSERACT_AVAILABLE)
         )
 
-        is_first_processed_page = (page_num == 1)
+        analysis = None
+        if not use_ocr:
+            analysis = analyze_text_page(
+                src_page, selected_entities, analyzer, min_score,
+                page_num, debug_first=(page_num == 1),
+            )
+            known_person_tokens |= collect_person_tokens(analysis)
+            total_raw += analysis["raw"]
+            total_filtered += analysis["filtered"]
+            total_dropped_fp += analysis["dropped_fp"]
 
-        if use_ocr:
+        page_plans[page_index] = {
+            "use_ocr": use_ocr,
+            "scanned": scanned,
+            "has_images": has_images,
+            "analysis": analysis,
+        }
+
+    # I termini personalizzati non vanno propagati come nomi, ma i
+    # nomi utente sono comunque cercati parola-per-parola (vedi sotto).
+
+    # ---------- PASSATA 2: redazione ----------
+    for page_index, src_page in enumerate(src_doc):
+        page_num = page_index + 1
+        plan = page_plans[page_index]
+        progress_bar.progress(0.5 + (page_index + 1) / (total_pages * 2))
+
+        if plan["use_ocr"]:
             status_text.text(f"🔍 OCR pagina {page_num}/{total_pages}...")
             raw, filtered = process_scanned_page(
                 src_page, out_doc, selected_entities, custom_terms,
                 analyzer, min_score, ocr_dpi, ocr_lang, log, page_num,
-                debug_first=is_first_processed_page,
+                debug_first=(page_num == 1),
+                known_person_tokens=known_person_tokens,
             )
+            total_raw += raw
+            total_filtered += filtered
             pages_ocr += 1
         else:
-            if scanned and not TESSERACT_AVAILABLE:
+            if plan["scanned"] and not TESSERACT_AVAILABLE:
                 status_text.text(f"⚠️ Pagina {page_num}/{total_pages} scansionata ma OCR non disponibile")
-            elif has_images and ocr_mode == "auto":
+            elif plan["has_images"] and ocr_mode == "auto":
                 status_text.text(f"📄 Pagina {page_num}/{total_pages} (⚠️ contiene immagini)")
             else:
                 status_text.text(f"📄 Pagina {page_num}/{total_pages}...")
 
-            out_doc.insert_pdf(src_doc, from_page=page_num - 1, to_page=page_num - 1)
+            out_doc.insert_pdf(src_doc, from_page=page_index, to_page=page_index)
             new_page = out_doc[-1]
-            raw, filtered = redact_text_page(
-                new_page, selected_entities, custom_terms,
-                analyzer, min_score, log, page_num,
-                debug_first=is_first_processed_page,
+            apply_text_redactions(
+                new_page, plan["analysis"], custom_terms,
+                known_person_tokens, log, page_num,
             )
             pages_text += 1
-
-        total_raw += raw
-        total_filtered += filtered
 
     progress_bar.empty()
     status_text.empty()
@@ -645,7 +1057,12 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 
     # Riepilogo
     st.write(f"📈 **Riepilogo:** {pages_text} pagine testuali · {pages_ocr} pagine OCR")
-    st.write(f"   Presidio: {total_raw} risultati grezzi → {total_filtered} dopo filtro soglia ≥{min_score:.0%}")
+    st.write(
+        f"   Presidio: {total_raw} risultati grezzi → {total_filtered} validi "
+        f"(soglia ≥{min_score:.0%}, {total_dropped_fp} falsi positivi scartati)"
+    )
+    if known_person_tokens:
+        st.write(f"   👤 Nomi propagati a tutto il documento: {len(known_person_tokens)} token")
 
     sanitize_total = sum(sanitize_stats.values())
     if sanitize_total > 0:
@@ -936,11 +1353,24 @@ with st.expander("ℹ️ Informazioni e avvertenze"):
 
     **Sanitizzazione automatica (v1.1+):** il PDF di output viene ripulito da metadata (autore, titolo), annotazioni, allegati, campi form e JavaScript.
 
+    **Precisione (v1.2+):**
+    - La redazione avviene alle **coordinate esatte** dell'occorrenza rilevata:
+      mai più sottostringhe oscurate dentro altre parole.
+    - Le parole di intestazione dei provvedimenti (Numero, Data, Firmato, ...)
+      non vengono più scambiate per nomi.
+    - I nomi accanto a un codice fiscale ("Cognome Nome (C.F. ...)") e dopo i
+      titoli (avv., dott., sig., ...) vengono riconosciuti anche quando il
+      modello linguistico li manca, e propagati a tutto il documento.
+    - I termini specifici corrispondono a **parole intere** (ignorando
+      maiuscole e punteggiatura), non a frammenti.
+
     **Limiti:**
     - L'OCR può perdere parole con scansioni di bassa qualità.
     - Nomi inusuali possono sfuggire — usa sempre i "termini specifici" per certezza.
     - Date disabilitate di default perché spesso rilevanti nei documenti legali.
     - Per documenti che contengono firme scansionate, foto di documenti d'identità o timbri all'interno di pagine altrimenti testuali, usa la modalità **"Forza OCR su tutto"**.
+    - Le filigrane diagonali (es. "copia comunicata ai soli fini...") possono
+      perdere le lettere che attraversano fisicamente un'area oscurata.
 
     **Workflow:**
     1. Carica PDF

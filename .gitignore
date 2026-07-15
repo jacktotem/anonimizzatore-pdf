@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Ambienti virtuali
+venv/
+.venv/
+mac/venv/
+windows/app/venv/
+
+# Fixture di test generate (vedi tests/build_fixtures.py)
+tests/fixtures/
+
+# macOS
+.DS_Store
+
+# PDF di lavoro (mai committare documenti reali)
+*.pdf
+!docs/**/*.pdf
