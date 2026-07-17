@@ -24,7 +24,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -1583,29 +1583,58 @@ if uploaded_file is not None:
                 redaction_mode=redaction_mode,
             )
 
-            if log:
-                if redaction_mode == "codes":
+            # FIX rerun: ogni click su un download_button riesegue lo script
+            # da capo, e st.button torna False — se i risultati vivessero solo
+            # dentro questo if, dopo "Scarica PDF" sparirebbe anche il bottone
+            # del CSV di accoppiamento. Li salviamo in session_state e li
+            # renderizziamo SEMPRE (blocco sotto), finché il file non cambia.
+            st.session_state["risultato"] = {
+                "output_bytes": output_bytes,
+                "log": log,
+                "mapping": mapping,
+                "redaction_mode": redaction_mode,
+                "source_name": uploaded_file.name,
+                "source_size": uploaded_file.size,
+            }
+
+        # --- RISULTATI (persistenti tra i rerun dei download) ---
+        risultato = st.session_state.get("risultato")
+        if risultato is not None and (
+            risultato["source_name"] != uploaded_file.name
+            or risultato["source_size"] != uploaded_file.size
+        ):
+            # il file caricato è cambiato: i vecchi risultati non valgono più
+            risultato = None
+            st.session_state.pop("risultato", None)
+
+        if risultato is not None:
+            res_log = risultato["log"]
+            res_mapping = risultato["mapping"]
+            res_mode = risultato["redaction_mode"]
+
+            if res_log:
+                if res_mode == "codes":
                     st.success(
-                        f"✅ Pseudonimizzazione completata: **{len(log)} elementi "
-                        f"sostituiti** con **{len(mapping)} codici univoci**"
+                        f"✅ Pseudonimizzazione completata: **{len(res_log)} elementi "
+                        f"sostituiti** con **{len(res_mapping)} codici univoci**"
                     )
                 else:
-                    st.success(f"✅ Anonimizzazione completata: **{len(log)} elementi oscurati**")
+                    st.success(f"✅ Anonimizzazione completata: **{len(res_log)} elementi oscurati**")
 
                 col_a, col_b = st.columns([1, 2])
 
                 with col_a:
-                    prefix = "pseudonimizzato" if redaction_mode == "codes" else "anonimizzato"
-                    output_filename = f"{prefix}_{uploaded_file.name}"
+                    prefix = "pseudonimizzato" if res_mode == "codes" else "anonimizzato"
+                    output_filename = f"{prefix}_{risultato['source_name']}"
                     st.download_button(
                         label="📥 Scarica PDF",
-                        data=output_bytes,
+                        data=risultato["output_bytes"],
                         file_name=output_filename,
                         mime="application/pdf",
                         type="primary",
                         use_container_width=True,
                     )
-                    if mapping:
+                    if res_mapping:
                         # CSV con BOM utf-8 così Excel lo apre correttamente
                         csv_buf = StringIO()
                         writer = csv.DictWriter(
@@ -1614,8 +1643,8 @@ if uploaded_file is not None:
                             delimiter=";",
                         )
                         writer.writeheader()
-                        writer.writerows(mapping)
-                        base_name = os.path.splitext(uploaded_file.name)[0]
+                        writer.writerows(res_mapping)
+                        base_name = os.path.splitext(risultato["source_name"])[0]
                         st.download_button(
                             label="🔑 Scarica tabella di accoppiamento (CSV)",
                             data=csv_buf.getvalue().encode("utf-8-sig"),
@@ -1625,13 +1654,13 @@ if uploaded_file is not None:
                         )
 
                 with col_b:
-                    types_count = Counter(item["Tipo"] for item in log)
-                    method_count = Counter(item["Metodo"] for item in log)
+                    types_count = Counter(item["Tipo"] for item in res_log)
+                    method_count = Counter(item["Metodo"] for item in res_log)
                     summary = " · ".join([f"{count} {tipo}" for tipo, count in types_count.most_common()])
                     st.caption(f"**Tipi:** {summary}")
                     st.caption(f"**Metodi:** {dict(method_count)}")
 
-                if mapping:
+                if res_mapping:
                     st.warning(
                         "🔑 **La tabella di accoppiamento è la chiave di re-identificazione.** "
                         "Conservala separatamente dal documento e **non inviarla mai** insieme "
@@ -1639,11 +1668,11 @@ if uploaded_file is not None:
                         "resta un dato personale finché la tabella esiste: per depositi o "
                         "pubblicazioni usa la modalità Oscuramento."
                     )
-                    with st.expander(f"🔑 Tabella di accoppiamento ({len(mapping)} codici)"):
-                        st.dataframe(mapping, use_container_width=True, hide_index=True)
+                    with st.expander(f"🔑 Tabella di accoppiamento ({len(res_mapping)} codici)"):
+                        st.dataframe(res_mapping, use_container_width=True, hide_index=True)
 
-                with st.expander(f"📊 Report completo ({len(log)} redazioni)"):
-                    st.dataframe(log, use_container_width=True, hide_index=True)
+                with st.expander(f"📊 Report completo ({len(res_log)} redazioni)"):
+                    st.dataframe(res_log, use_container_width=True, hide_index=True)
             else:
                 st.warning("⚠️ Nessuna entità sensibile rilevata. Controlla il riepilogo Presidio sopra.")
 
