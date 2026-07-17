@@ -279,3 +279,30 @@ def test_blackout_resta_default(pagina_sintetica):
     assert "Mario" not in text_dopo
     assert "[PER-" not in text_dopo
     assert "Codice" not in log[0]
+
+
+# ------------------------------------------------------------
+# R-06: verifica aggiornamenti (parsing versioni)
+# ------------------------------------------------------------
+
+from app import parse_version as _parse_version  # noqa: E402
+
+
+@pytest.mark.parametrize("tag,expected", [
+    ("v1.4.0", (1, 4, 0)),
+    ("1.4.0", (1, 4, 0)),
+    ("v1.3.2", (1, 3, 2)),
+    ("v2.0", (2, 0)),
+    ("1.10.3", (1, 10, 3)),
+    ("", ()),
+    ("beta", ()),
+])
+def test_parse_version(tag, expected):
+    assert _parse_version(tag) == expected
+
+
+def test_parse_version_confronto_numerico():
+    # 1.10.0 > 1.9.0 (confronto numerico, non lessicografico)
+    assert _parse_version("v1.10.0") > _parse_version("v1.9.0")
+    assert _parse_version("v1.4.0") > _parse_version("v1.3.2")
+    assert _parse_version("v1.4.0") == _parse_version("1.4.0")

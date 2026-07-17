@@ -24,7 +24,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -521,6 +521,61 @@ class ItLegalNameRecognizer(EntityRecognizer):
                     )
                 )
         return results
+
+
+# ============================================================
+# VERIFICA AGGIORNAMENTI (R-06)
+# ============================================================
+# SOLO su click esplicito dell'utente: l'app non fa MAI chiamate di
+# rete spontanee (il claim "100% locale" riguarda i documenti, ma
+# vogliamo che anche il resto sia prevedibile). Il controllo contatta
+# esclusivamente api.github.com e non invia alcun dato: confronta la
+# versione locale con l'ultima release e mostra il link al download.
+# Nessun codice viene scaricato o eseguito.
+
+GITHUB_RELEASES_API = "https://api.github.com/repos/jacktotem/anonimizzatore-pdf/releases/latest"
+GITHUB_RELEASES_URL = "https://github.com/jacktotem/anonimizzatore-pdf/releases/latest"
+
+
+def parse_version(tag):
+    """'v1.4.0' / '1.4.0' → (1, 4, 0). Tupla vuota se non parsabile."""
+    numbers = re.findall(r"\d+", tag or "")
+    return tuple(int(n) for n in numbers[:3])
+
+
+def check_for_updates(timeout=6):
+    """
+    Interroga GitHub per l'ultima release. Ritorna un dict:
+      {"status": "latest"}                      → già aggiornato
+      {"status": "update", "tag", "url", "notes"} → nuova versione
+      {"status": "error", "detail"}             → offline / errore
+    """
+    import json
+    from urllib.request import Request, urlopen
+
+    try:
+        req = Request(GITHUB_RELEASES_API, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"anonimizzatore-pdf/{__version__}",
+        })
+        with urlopen(req, timeout=timeout) as resp:
+            data = json.load(resp)
+        latest_tag = data.get("tag_name", "")
+        latest = parse_version(latest_tag)
+        current = parse_version(__version__)
+        if not latest:
+            return {"status": "error", "detail": "risposta inattesa"}
+        if latest > current:
+            return {
+                "status": "update",
+                "tag": latest_tag,
+                "url": data.get("html_url") or GITHUB_RELEASES_URL,
+                "notes": (data.get("body") or "").strip()[:800],
+            }
+        return {"status": "latest", "tag": latest_tag}
+    except Exception as e:
+        logger.warning("Verifica aggiornamenti fallita: %s", e)
+        return {"status": "error", "detail": type(e).__name__}
 
 
 # ============================================================
@@ -1438,6 +1493,30 @@ with st.sidebar:
         ocr_mode = "never"
         ocr_dpi = 300
         st.caption("⚠️ Tesseract non installato — vedi README.md")
+
+    st.divider()
+
+    st.subheader("🔄 Aggiornamenti")
+    st.caption(f"Versione installata: **{__version__}**")
+    if st.button("Verifica aggiornamenti", use_container_width=True):
+        with st.spinner("Controllo l'ultima release su GitHub..."):
+            st.session_state["esito_aggiornamenti"] = check_for_updates()
+    esito_agg = st.session_state.get("esito_aggiornamenti")
+    if esito_agg:
+        if esito_agg["status"] == "latest":
+            st.success(f"✅ Sei già all'ultima versione ({__version__}).")
+        elif esito_agg["status"] == "update":
+            st.warning(f"📦 È disponibile la versione **{esito_agg['tag']}**")
+            st.markdown(f"➡️ [Scarica dalla pagina release]({esito_agg['url']})")
+            if esito_agg.get("notes"):
+                with st.expander("Novità della versione"):
+                    st.markdown(esito_agg["notes"])
+        else:
+            st.info("Impossibile contattare GitHub (sei offline?). Riprova più tardi.")
+    st.caption(
+        "Il controllo contatta api.github.com **solo quando premi il pulsante** "
+        "e non invia alcun dato: i documenti non lasciano mai il computer."
+    )
 
 # Mappa entità - LISTA di tuple (non dict con bool come chiavi!)
 entity_map = [
