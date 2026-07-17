@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-07-17
+
+### Fixed
+- **Download CSV di accoppiamento non più raggiungibile dopo "Scarica
+  PDF":** in Streamlit ogni click su un download button riesegue lo
+  script e `st.button` torna `False`, quindi i risultati (e con loro il
+  bottone del CSV) sparivano dopo il primo download. I risultati ora
+  vengono salvati in `st.session_state` e restano visibili tra i
+  download; vengono invalidati automaticamente quando si carica un file
+  diverso.
+
 ## [1.3.1] - 2026-07-15
 
 ### Fixed
