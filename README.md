@@ -77,6 +77,20 @@ streamlit run src/app.py
 
 ---
 
+## 🔄 Aggiornamento
+
+L'app include un pulsante **"Verifica aggiornamenti"** nella barra laterale: confronta la versione installata con l'ultima release su GitHub e mostra il link al download (contatta `api.github.com` solo su click esplicito, nessun dato viene inviato).
+
+- **Windows**: scarica il nuovo `AnonimizzatorePDF-Setup.exe` ed eseguilo — dalla v1.4.0 l'installer riconosce i componenti già presenti e l'aggiornamento richiede **circa un minuto** (non riscarica Python, Tesseract né il modello linguistico).
+- **macOS**:
+  ```bash
+  cd anonimizzatore-pdf/mac
+  ./aggiorna.sh
+  ```
+- **Server condiviso** (modalità `windows/server/`): l'IT esegue il nuovo Setup.exe e riavvia l'attività pianificata (vedi [`windows/server/README-SERVER.md`](windows/server/README-SERVER.md)).
+
+---
+
 ## 🖱️ Uso
 
 1. **Carica un PDF** dal pulsante centrale

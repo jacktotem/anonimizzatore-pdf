@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-17
+
+### Added
+- **🔄 Verifica aggiornamenti in-app** (`R-06`): pulsante nella barra
+  laterale che confronta la versione installata con l'ultima release su
+  GitHub e mostra le novità + il link diretto al download. Contatta
+  `api.github.com` **solo su click esplicito** e non invia alcun dato —
+  nessun codice viene scaricato o eseguito (nessun self-update: scelta
+  deliberata per non aprire una superficie supply-chain su un'app per
+  studi legali). Usa solo la stdlib (`urllib`), con timeout e gestione
+  offline.
+- **Script `mac/aggiorna.sh`**: aggiorna la copia macOS con `git pull`
+  e reinstalla le librerie **solo se `requirements.txt` è cambiato**.
+  Gestisce il caso di copia non-git rimandando alla pagina release.
+
+### Changed
+- **Installer Windows idempotente** (`UPD-01`): `setup-dependencies.ps1`
+  ora salta i componenti già presenti — Python 3.12, Tesseract, il venv
+  con le librerie (fingerprint della lista pacchetti in
+  `.deps-fingerprint`) e il modello linguistico italiano (~580 MB). Un
+  aggiornamento di versione dell'app passa da ~15 minuti a **circa un
+  minuto**. Il venv viene ricreato solo se le dipendenze sono cambiate o
+  i moduli non sono importabili; il fingerprint è scritto solo a
+  installazione riuscita.
+
 ## [1.3.2] - 2026-07-17
 
 ### Fixed

@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 # N-05 (#9): single source of truth per la versione mostrata all'utente.
 # Long-term: leggere da un file VERSION in repo root condiviso con
 # installer.iss e src/app.py.
-$AppVersion = "1.1.2"
+$AppVersion = "1.4.0"
 
 # ============================================================
 # CONFIGURAZIONE BINARI CON HASH PINNING
@@ -279,6 +279,68 @@ function Install-Tesseract {
 # 3. CREAZIONE VENV E INSTALLAZIONE PACCHETTI
 # ============================================================
 
+# Versioni pinnate con minimum security floor:
+# - Pillow >= 10.2.0: fix CVE-2023-50447 (ImageMath.eval RCE)
+# - streamlit >= 1.37.0: fix CVE-2024-42474 (path traversal Windows)
+# I-01: presidio-anonymizer rimosso (non usato, redazione fatta da PyMuPDF)
+$script:PythonPackages = @(
+    "streamlit>=1.37.0,<2.0.0",
+    "pymupdf>=1.24.0,<2.0.0",
+    "presidio-analyzer>=2.2.0,<3.0.0",
+    "spacy>=3.7.0,<3.8.0",
+    "pytesseract>=0.3.10,<1.0.0",
+    "Pillow>=10.2.0,<12.0.0"
+)
+
+# UPD-01: fingerprint delle dipendenze per aggiornamenti rapidi.
+# Se il venv esiste, importa i moduli chiave e la lista pacchetti non è
+# cambiata dall'ultima installazione, saltiamo la ricreazione: un
+# aggiornamento di versione dell'app passa così da ~15 minuti a ~1.
+function Get-DepsFingerprintPath {
+    return Join-Path $InstallPath ".deps-fingerprint"
+}
+
+# Fingerprint canonico: pacchetti ordinati, join con LF singolo. Rendiamo
+# il confronto insensibile ai fine-riga (Set-Content scrive CRLF su
+# Windows) normalizzando CRLF→LF, altrimenti il fingerprint non
+# combacerebbe mai e il venv verrebbe ricreato a ogni aggiornamento.
+function Get-DepsFingerprint {
+    return (($script:PythonPackages | Sort-Object) -join "`n")
+}
+
+function Normalize-Newlines {
+    param([string]$Text)
+    return ($Text -replace "`r`n", "`n").Trim()
+}
+
+function Test-PythonEnvironmentCurrent {
+    $venvPath = Join-Path $InstallPath "venv"
+    $pythonExe = Join-Path $venvPath "Scripts\python.exe"
+    if (-not (Test-Path $pythonExe)) { return $false }
+
+    $fingerprintFile = Get-DepsFingerprintPath
+    if (-not (Test-Path $fingerprintFile)) {
+        Write-Log "Venv presente ma senza fingerprint (installazione pre-1.4): ricreo"
+        return $false
+    }
+    $stored = Normalize-Newlines (Get-Content $fingerprintFile -Raw)
+    $current = Normalize-Newlines (Get-DepsFingerprint)
+    if ($stored -ne $current) {
+        Write-Log "Le dipendenze sono cambiate rispetto all'installazione precedente: ricreo il venv"
+        return $false
+    }
+
+    # Sanity check: i moduli chiave devono essere importabili
+    & $pythonExe -c "import streamlit, fitz, pytesseract; from presidio_analyzer import AnalyzerEngine" 2>&1 | Out-File -Append $LogFile
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "Venv presente ma moduli non importabili: ricreo" "WARN"
+        return $false
+    }
+
+    Write-Log "Ambiente Python già aggiornato: salto la reinstallazione delle librerie"
+    return $true
+}
+
 function Setup-PythonEnvironment {
     Show-Progress "Creazione ambiente virtuale Python..." 55
 
@@ -287,6 +349,7 @@ function Setup-PythonEnvironment {
     if (Test-Path $venvPath) {
         Remove-Item -Path $venvPath -Recurse -Force
     }
+    Remove-Item (Get-DepsFingerprintPath) -ErrorAction SilentlyContinue
 
     & py -3.12 -m venv $venvPath 2>&1 | Out-File -Append $LogFile
     if ($LASTEXITCODE -ne 0) {
@@ -304,23 +367,13 @@ function Setup-PythonEnvironment {
 
     Show-Progress "Installazione librerie Python..." 65
 
-    # Versioni pinnate con minimum security floor:
-    # - Pillow >= 10.2.0: fix CVE-2023-50447 (ImageMath.eval RCE)
-    # - streamlit >= 1.37.0: fix CVE-2024-42474 (path traversal Windows)
-    # I-01: presidio-anonymizer rimosso (non usato, redazione fatta da PyMuPDF)
-    $packages = @(
-        "streamlit>=1.37.0,<2.0.0",
-        "pymupdf>=1.24.0,<2.0.0",
-        "presidio-analyzer>=2.2.0,<3.0.0",
-        "spacy>=3.7.0,<3.8.0",
-        "pytesseract>=0.3.10,<1.0.0",
-        "Pillow>=10.2.0,<12.0.0"
-    )
-
-    & $pipExe install --only-binary=:all: --no-cache-dir $packages 2>&1 | Out-File -Append $LogFile
+    & $pipExe install --only-binary=:all: --no-cache-dir $script:PythonPackages 2>&1 | Out-File -Append $LogFile
     if ($LASTEXITCODE -ne 0) {
         throw "Installazione pacchetti pip fallita - vedi $LogFile"
     }
+
+    # UPD-01: fingerprint scritto SOLO a installazione riuscita
+    Get-DepsFingerprint | Set-Content -Path (Get-DepsFingerprintPath)
 
     Write-Log "Pacchetti Python installati con successo"
 }
@@ -328,6 +381,18 @@ function Setup-PythonEnvironment {
 # ============================================================
 # 4. DOWNLOAD MODELLO LINGUISTICO ITALIANO
 # ============================================================
+
+function Test-SpacyModelInstalled {
+    # UPD-01: se il modello è già importabile non riscarichiamo 580 MB
+    $pythonExe = Join-Path $InstallPath "venv\Scripts\python.exe"
+    if (-not (Test-Path $pythonExe)) { return $false }
+    & $pythonExe -c "import it_core_news_lg" 2>&1 | Out-File -Append $LogFile
+    if ($LASTEXITCODE -eq 0) {
+        Write-Log "Modello linguistico italiano già presente: salto il download"
+        return $true
+    }
+    return $false
+}
 
 function Install-SpacyModel {
     Show-Progress "Download modello linguistico italiano (~580 MB)..." 80
@@ -398,11 +463,15 @@ try {
         Install-Tesseract
     }
 
-    # 3. Venv + pacchetti
-    Setup-PythonEnvironment
+    # 3. Venv + pacchetti (saltato se già aggiornato — UPD-01)
+    if (-not (Test-PythonEnvironmentCurrent)) {
+        Setup-PythonEnvironment
+    }
 
-    # 4. Modello spaCy
-    Install-SpacyModel
+    # 4. Modello spaCy (saltato se già presente — UPD-01)
+    if (-not (Test-SpacyModelInstalled)) {
+        Install-SpacyModel
+    }
 
     # 5. Verifica finale (NUOVA - I-02)
     Verify-Installation
