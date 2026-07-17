@@ -123,7 +123,7 @@ Sì! È open source AGPL v3. Vedi [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 Dipende dalla licenza del tuo software. AGPL v3 è "copyleft forte": se distribuisci o offri come servizio una modifica, devi rendere disponibile il codice sorgente.
 
-Se ti serve una licenza commerciale diversa (es. per software proprietario), [contattami](mailto:[inserire-email]).
+Se ti serve una licenza commerciale diversa (es. per software proprietario), [contattami](mailto:info@jacoporomani.it).
 
 ### Aggiungete altre lingue?
 
