@@ -160,7 +160,7 @@ Se compri un dominio (es. `anonimizzatorepdf.it`):
 
 Nel file `.github/FUNDING.yml`:
 ```yaml
-github: [tuo-username]
+github: jacktotem
 custom: ["https://anonimizzatorepdf.it/dona"]
 ```
 

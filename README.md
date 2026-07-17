@@ -35,7 +35,7 @@
 
 ## 📸 Screenshot
 
-> Aggiungi qui screenshot dell'app dopo il primo deployment in `docs/images/`
+![Interfaccia di Anonimizzatore PDF](docs/images/screenshot-app.png)
 
 ---
 
@@ -56,7 +56,7 @@ Oppure compila tu l'installer — vedi [`windows/COMPILA-INSTALLER.md`](windows/
 ### 🍎 macOS
 
 ```bash
-git clone https://github.com/[tuo-username]/anonimizzatore-pdf.git
+git clone https://github.com/jacktotem/anonimizzatore-pdf.git
 cd anonimizzatore-pdf/mac
 chmod +x installa.sh
 ./installa.sh
@@ -176,8 +176,7 @@ streamlit run src/app.py
 ### 📩 Contatti commerciali
 
 **Email**: info@jacoporomani.it
-**Sito**: [inserire sito]
-**LinkedIn**: [inserire LinkedIn]
+**Sito**: [jacoporomani.it](https://jacoporomani.it)
 
 Richiedi una **demo gratuita** per il tuo studio.
 
@@ -233,7 +232,7 @@ Vedi [LICENSE](LICENSE) per il testo completo.
 - ⚠️ Le modifiche devono essere pubblicate sotto la stessa licenza
 - ⚠️ Se lo offri come servizio in rete, devi rendere disponibile il codice sorgente agli utenti
 
-Se la AGPL non funziona per il tuo caso d'uso (es. integrazione in software proprietario), [contattami](mailto:tua@email.it) per una **licenza commerciale alternativa**.
+Se la AGPL non funziona per il tuo caso d'uso (es. integrazione in software proprietario), [contattami](mailto:info@jacoporomani.it) per una **licenza commerciale alternativa**.
 
 ---
 
