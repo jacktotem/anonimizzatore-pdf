@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-07-20
+
+### Added
+- **R-11 — Targhe di veicoli italiane** (`IT_LICENSE_PLATE`, checkbox
+  "Targhe di veicoli" attiva di default): riconosce il formato auto
+  attuale AA 000 AA — con e senza spazi o trattini — sfruttando
+  l'alfabeto reale delle targhe (che esclude I, O, Q, U) per la
+  precisione. Il contesto ("targa", "autovettura", "veicolo", ...)
+  aumenta la confidenza. In pseudonimizzazione le targhe ricevono
+  codici `[TARGA-nn]`. I numeri di registro ("R.G. 17354/21") e le
+  sigle non compatibili con l'alfabeto targhe non vengono toccati.
+  Il vecchio formato provinciale pre-1994 ("MI 123456") non è coperto
+  deliberatamente: collide con numeri di registro e protocolli.
+
 ## [1.6.0] - 2026-07-20
 
 ### Added

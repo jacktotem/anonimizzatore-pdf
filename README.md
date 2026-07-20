@@ -170,7 +170,7 @@ L'app include un pulsante **"Verifica aggiornamenti"** nella barra laterale: con
 `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `LOCATION`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`, `URL`, `DATE_TIME`
 
 **Italiane** (Presidio + regex custom):
-`IT_FISCAL_CODE`, `IT_VAT_CODE`, `IT_IDENTITY_CARD`, `IT_DRIVER_LICENSE`, `IT_PASSPORT`
+`IT_FISCAL_CODE`, `IT_VAT_CODE`, `IT_IDENTITY_CARD`, `IT_DRIVER_LICENSE`, `IT_PASSPORT`, `IT_LICENSE_PLATE` (targhe auto formato AA 000 AA)
 
 ---
 
