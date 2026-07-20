@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-07-20
+
+### Fixed
+- **PRM-01 — Messaggio chiaro sui permessi:** se il setup viene
+  eseguito senza privilegi di amministratore (visto sul campo: pip
+  lanciato a mano da un prompt non elevato → "[WinError 5] Accesso
+  negato" in Program Files), lo script ora lo rileva subito e spiega
+  in italiano come rimediare, invece di fallire a metà con un errore
+  criptico.
+- **PRM-02 — Pulizia dei residui del modello:** le installazioni
+  fallite a metà possono lasciare in `site-packages` directory parziali
+  di `it_core_news_lg` (anche read-only) che fanno fallire pure i
+  tentativi successivi. Prima di ogni tentativo di installazione del
+  modello i residui vengono rimossi; `pip install` ora usa
+  `--force-reinstall --no-deps` sul wheel verificato.
+
 ## [1.4.3] - 2026-07-20
 
 ### Fixed

@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 # N-05 (#9): single source of truth per la versione mostrata all'utente.
 # Long-term: leggere da un file VERSION in repo root condiviso con
 # installer.iss e src/app.py.
-$AppVersion = "1.4.3"
+$AppVersion = "1.4.4"
 
 # ============================================================
 # CONFIGURAZIONE BINARI CON HASH PINNING
@@ -81,8 +81,26 @@ $Binaries = @{
 # LOGGING
 # ============================================================
 
+# PRM-01: verifica SUBITO i permessi di scrittura sull'InstallPath.
+# Se lo script viene lanciato a mano da un prompt non elevato (visto
+# succedere sul campo: pip che muore con "[WinError 5] Accesso negato"
+# dentro Program Files), meglio un messaggio chiaro in italiano che un
+# errore criptico a metà installazione.
 $LogDir = Join-Path $InstallPath "logs"
-New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+try {
+    New-Item -ItemType Directory -Force -Path $LogDir -ErrorAction Stop | Out-Null
+    $probe = Join-Path $LogDir ".write-probe"
+    Set-Content -Path $probe -Value "x" -ErrorAction Stop
+    Remove-Item $probe -ErrorAction SilentlyContinue
+} catch {
+    Write-Host ""
+    Write-Host "ERRORE: permessi insufficienti per scrivere in '$InstallPath'." -ForegroundColor Red
+    Write-Host "Questo setup deve essere eseguito COME AMMINISTRATORE:" -ForegroundColor Red
+    Write-Host " - usa l'installer AnonimizzatorePDF-Setup-vX.Y.Z.exe (doppio click, conferma UAC)," -ForegroundColor Red
+    Write-Host " - oppure apri PowerShell con 'Esegui come amministratore' e rilancia lo script." -ForegroundColor Red
+    Write-Host ""
+    exit 1
+}
 $LogFile = Join-Path $LogDir "install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 
 function Write-Log {
@@ -444,6 +462,26 @@ function Test-SpacyModelInstalled {
     return $false
 }
 
+function Remove-SpacyModelLeftovers {
+    # PRM-02: installazioni precedenti fallite a metà (download corrotto,
+    # permessi, antivirus) possono lasciare in site-packages directory
+    # parziali di it_core_news_lg che fanno fallire anche i tentativi
+    # successivi ("[WinError 5] Accesso negato" su file bloccati o
+    # read-only). Le rimuoviamo prima di riprovare.
+    $sitePackages = Join-Path $InstallPath "venv\Lib\site-packages"
+    if (-not (Test-Path $sitePackages)) { return }
+    foreach ($pattern in @("it_core_news_lg", "it_core_news_lg-*")) {
+        Get-ChildItem -Path $sitePackages -Filter $pattern -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Write-Log "Rimuovo residuo di installazione precedente: $($_.FullName)" "WARN"
+                # Toglie eventuali attributi read-only che bloccano la rimozione
+                Get-ChildItem -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.Attributes = "Normal" }
+                Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+    }
+}
+
 function Install-SpacyModel {
     # MDL-01: download diretto del wheel con hash pinning e retry,
     # al posto di "spacy download" (nessuna verifica d'integrità e
@@ -474,7 +512,9 @@ function Install-SpacyModel {
         }
 
         Show-Progress "Installazione modello linguistico..." 90
-        $code = Invoke-Native -Exe $pipExe -Arguments @("install", "--no-cache-dir", $wheelPath)
+        # PRM-02: via i residui di tentativi precedenti prima di installare
+        Remove-SpacyModelLeftovers
+        $code = Invoke-Native -Exe $pipExe -Arguments @("install", "--no-cache-dir", "--force-reinstall", "--no-deps", $wheelPath)
         if ($code -eq 0) {
             Remove-Item $wheelPath -ErrorAction SilentlyContinue
             Write-Log "Modello linguistico italiano installato"
