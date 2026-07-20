@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # Anonimizzatore PDF - Setup hardenato v$AppVersion (vedi sotto)
 # Scarica e installa Python, Tesseract, librerie e modelli
 #
@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 # N-05 (#9): single source of truth per la versione mostrata all'utente.
 # Long-term: leggere da un file VERSION in repo root condiviso con
 # installer.iss e src/app.py.
-$AppVersion = "1.4.1"
+$AppVersion = "1.4.2"
 
 # ============================================================
 # CONFIGURAZIONE BINARI CON HASH PINNING
@@ -60,6 +60,20 @@ $Binaries = @{
         Url = "https://github.com/tesseract-ocr/tessdata/raw/4.1.0/ita.traineddata"
         # TODO(release): pinnare l'hash del file servito al commit/tag 4.1.0.
         Sha256 = "4F7476C611312BEB8F8E182888DA08EA642D9824AE4402CC6235F61AB1406406"
+    }
+    SpacyModel = @{
+        # MDL-01: wheel UFFICIALE del modello italiano (spacy-models su
+        # GitHub). Era l'unico download SENZA hash pinning: passava da
+        # "spacy download", che se il file arriva corrotto (rete
+        # instabile, proxy, antivirus che tocca il temp) fallisce solo a
+        # fine setup con "Wheel ... is invalid". Ora: download diretto,
+        # verifica SHA256, retry, e pip install del file locale.
+        # NB: la versione del modello (3.7.0) deve restare compatibile
+        # col pin di spacy in $PythonPackages (>=3.7.0,<3.8.0).
+        Url = "https://github.com/explosion/spacy-models/releases/download/it_core_news_lg-3.7.0/it_core_news_lg-3.7.0-py3-none-any.whl"
+        # Verificato scaricando il wheel e testando l'archivio (zip integro):
+        #   shasum -a 256 it_core_news_lg-3.7.0-py3-none-any.whl
+        Sha256 = "F48BD152621C872C1F177DBE21929FBB28751E73EB3C61714CF6344C6D582BBF"
     }
 }
 
@@ -395,17 +409,49 @@ function Test-SpacyModelInstalled {
 }
 
 function Install-SpacyModel {
-    Show-Progress "Download modello linguistico italiano (~580 MB)..." 80
+    # MDL-01: download diretto del wheel con hash pinning e retry,
+    # al posto di "spacy download" (nessuna verifica d'integrità e
+    # diagnosi pessima in caso di file corrotto).
+    $pipExe = Join-Path $InstallPath "venv\Scripts\pip.exe"
+    $wheelPath = Join-Path $env:TEMP "it_core_news_lg-3.7.0-py3-none-any.whl"
 
-    $pythonExe = Join-Path $InstallPath "venv\Scripts\python.exe"
-    & $pythonExe -m spacy download it_core_news_lg 2>&1 | Out-File -Append $LogFile
+    $maxAttempts = 3
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        Show-Progress "Download modello linguistico italiano (~580 MB, tentativo $attempt/$maxAttempts)..." 80
 
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "ERRORE download modello spaCy" "ERROR"
-        throw "Download modello italiano fallito - verifica connessione internet"
+        try {
+            # Download-VerifiedFile fallisce (e rimuove il file) se lo
+            # SHA256 non corrisponde: un download troncato/corrotto
+            # viene rilevato QUI, non a fine installazione.
+            Download-VerifiedFile `
+                -Url $Binaries.SpacyModel.Url `
+                -ExpectedSha256 $Binaries.SpacyModel.Sha256 `
+                -DestinationPath $wheelPath `
+                -ComponentName "Modello linguistico it_core_news_lg"
+        } catch {
+            Write-Log "Tentativo $attempt fallito: $_" "WARN"
+            if ($attempt -eq $maxAttempts) {
+                throw "Download modello italiano fallito dopo $maxAttempts tentativi - verifica connessione internet/proxy/antivirus"
+            }
+            Start-Sleep -Seconds 5
+            continue
+        }
+
+        Show-Progress "Installazione modello linguistico..." 90
+        & $pipExe install --no-cache-dir $wheelPath 2>&1 | Out-File -Append $LogFile
+        if ($LASTEXITCODE -eq 0) {
+            Remove-Item $wheelPath -ErrorAction SilentlyContinue
+            Write-Log "Modello linguistico italiano installato"
+            return
+        }
+
+        Write-Log "pip install del modello fallito al tentativo $attempt" "WARN"
+        Remove-Item $wheelPath -ErrorAction SilentlyContinue
+        if ($attempt -eq $maxAttempts) {
+            throw "Installazione modello italiano fallita dopo $maxAttempts tentativi - vedi $LogFile"
+        }
+        Start-Sleep -Seconds 5
     }
-
-    Write-Log "Modello linguistico italiano installato"
 }
 
 # ============================================================

@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # Anonimizzatore PDF — Configurazione modalità SERVER CONDIVISO
 #
 # Per server Windows multiutente (desktop remoto / RDS): registra

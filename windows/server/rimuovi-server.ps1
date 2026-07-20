@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # Anonimizzatore PDF — Rimozione modalità SERVER CONDIVISO
 #
 # Ferma e rimuove l'attività pianificata e il collegamento sul

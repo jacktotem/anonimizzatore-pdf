@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-07-20
+
+### Fixed
+- **MDL-01 — "Wheel 'it-core-news-lg' ... is invalid" a fine setup
+  Windows:** il modello linguistico (~580 MB) era l'unico download
+  dell'installer senza verifica d'integrità (passava dalla scatola nera
+  `spacy download`): se il file arrivava corrotto — rete instabile,
+  proxy, antivirus che tocca il temp — l'errore emergeva solo alla fine
+  dei 15 minuti di setup. Ora il wheel ufficiale viene scaricato
+  direttamente con **SHA256 pinnato** (come Python e Tesseract), fino a
+  3 tentativi automatici in caso di corruzione, e installato con pip
+  dal file locale verificato.
+- **Accenti rotti nei messaggi dell'installer** ("NON Ã¨ andata a buon
+  fine"): gli script PowerShell erano salvati UTF-8 senza BOM e Windows
+  PowerShell li leggeva come ANSI. Aggiunto il BOM a
+  `setup-dependencies.ps1` e agli script server.
+
 ## [1.4.1] - 2026-07-18
 
 Mitigazioni per i falsi positivi di SmartScreen/Defender sull'installer
