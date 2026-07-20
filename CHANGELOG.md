@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-20
+
+Seconda release di qualità del rilevamento, guidata dalla tabella di
+accoppiamento di un'ordinanza di Cassazione reale: da 65 codici con
+~25 falsi positivi a 37 codici senza errori noti.
+
+### Fixed
+- **R-07 — Abbreviazioni e formule di rito:** "Cass", "Sez", "civ",
+  "P.q.m", "Stato", "Vero", "Illustrissimi Signori", "Corte di
+  Lussemburgo" ecc. non vengono più scambiati per nomi o luoghi
+  (stoplist ampliata). I **numeri romani** ("III", "XVI") sono
+  riconosciuti con una regex stretta e mai redatti. Un
+  **PHONE_NUMBER con la forma di una data** ("3.9.2009") viene
+  scartato: è una data, non un telefono.
+- **R-07 — Trim dei bordi delle entità NER:** il boilerplate catturato
+  per errore ai margini viene rimosso prima della redazione: "FRASCA
+  Emesso Da" → "FRASCA", "Marco Rossetti - Consigliere rel" → "Marco
+  Rossetti". Migliora anche la pseudonimizzazione: la stessa persona
+  con e senza ruolo riceve ora lo stesso codice.
+
+### Added
+- **R-08 — Citazioni giurisprudenziali preservate:** i nomi dei
+  precedenti pubblicati (Köbler, Lucchini, Asturcom, "FY c. Profi
+  Credit Polska"...) non sono dati personali da proteggere e
+  anonimizzarli distruggerebbe le citazioni. Vengono riconosciuti dal
+  contesto — numero di causa CGUE anche spezzato dall'a-capo
+  ("C- 869/19", "C-40/"), marcatori "CGUE"/"CEDU"/"in causa"/"cause
+  riunite", formato "X c. Y" — e lasciati intatti. Rete di sicurezza:
+  se il nome di una parte compare per caso vicino a una citazione,
+  quell'occorrenza resta coperta dalla propagazione dei nomi (R-04).
+
 ## [1.4.4] - 2026-07-20
 
 ### Fixed
