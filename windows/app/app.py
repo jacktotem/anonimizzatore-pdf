@@ -24,7 +24,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(

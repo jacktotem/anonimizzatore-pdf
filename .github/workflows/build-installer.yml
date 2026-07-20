@@ -63,11 +63,38 @@ jobs:
             windows\installer.iss
           Get-ChildItem windows\installer
 
-      - name: Allega l'exe alla release
+      # DEF-02: pubblichiamo lo SHA256 accanto all'exe così chi scarica
+      # può verificare l'integrità (utile anche per il ripristino dalla
+      # quarantena antivirus e per la segnalazione dei falsi positivi).
+      - name: Calcola SHA256 dell'installer
+        shell: pwsh
+        run: |
+          $name = "AnonimizzatorePDF-Setup-v${{ steps.tag.outputs.version }}.exe"
+          $exe = "windows/installer/$name"
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Set-Content -NoNewline "$exe.sha256"
+          Get-Content "$exe.sha256"
+
+      - name: Allega exe e SHA256 alla release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          EXE="windows/installer/AnonimizzatorePDF-Setup-v${{ steps.tag.outputs.version }}.exe"
-          ls -la "$EXE"
-          gh release upload "${{ steps.tag.outputs.tag }}" "$EXE" --clobber
+          TAG="${{ steps.tag.outputs.tag }}"
+          NAME="AnonimizzatorePDF-Setup-v${{ steps.tag.outputs.version }}.exe"
+          EXE="windows/installer/$NAME"
+          ls -la "$EXE" "$EXE.sha256"
+          gh release upload "$TAG" "$EXE" "$EXE.sha256" --clobber
+
+          # Aggiunge l'hash alle note della release (se non già presente)
+          HASH=$(cut -d' ' -f1 "$EXE.sha256")
+          BODY=$(gh release view "$TAG" --json body -q .body)
+          if ! grep -q "$HASH" <<<"$BODY"; then
+            {
+              printf '%s\n\n' "$BODY"
+              printf '### 🔐 Verifica integrità\n\n'
+              printf '`SHA256(%s)`\n`%s`\n\n' "$NAME" "$HASH"
+              printf 'Su Windows: `certutil -hashfile %s SHA256` e confronta il risultato.\n' "$NAME"
+            } > release-notes.md
+            gh release edit "$TAG" --notes-file release-notes.md
+          fi
