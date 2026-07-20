@@ -397,3 +397,42 @@ def test_codici_ordine_non_applicato_alle_location():
     c1 = a.assign("LOCATION", "Reggio Calabria")
     c2 = a.assign("LOCATION", "Calabria Reggio")
     assert c1 != c2  # solo le persone sono order-insensitive
+
+
+# ------------------------------------------------------------
+# R-10: esclusione magistrati (opzionale)
+# ------------------------------------------------------------
+
+from app import collect_magistrate_tokens, is_magistrate  # noqa: E402
+
+_EPIGRAFE = (
+    "composta dai magistrati: dott. Raffaele Frasca - Presidente "
+    "dott. Marco Rossetti - Consigliere rel. "
+    "dott. ssa Anna Moscarini - Consigliere "
+    "udita la relazione svolta dal Consigliere relatore dott. Marco Rossetti "
+    "Firmato Da: RAFFAELE GAETANO ANTONIO FRASCA Emesso Da: TRUSTPRO QUALIFIED"
+)
+
+
+def test_collect_magistrate_tokens_dai_contesti():
+    toks = collect_magistrate_tokens(_EPIGRAFE)
+    assert {"frasca", "raffaele", "rossetti", "marco", "moscarini", "anna"} <= toks
+    # i ruoli e l'ente certificatore non entrano nel set
+    assert not {"presidente", "consigliere", "trustpro"} & toks
+
+
+def test_is_magistrate_solo_se_tutti_i_token_sono_noti():
+    toks = collect_magistrate_tokens(_EPIGRAFE)
+    assert is_magistrate("Marco Rossetti", toks) is True
+    assert is_magistrate("RAFFAELE GAETANO ANTONIO FRASCA", toks) is True
+    # una parte non è mai magistrato
+    assert is_magistrate("Criniti Francesco", toks) is False
+    # nome misto (un token ignoto) → si redige: prevale la protezione
+    assert is_magistrate("Marco Bianchi", toks) is False
+    # set vuoto → nessuno è magistrato
+    assert is_magistrate("Marco Rossetti", set()) is False
+
+
+def test_nome_senza_contesto_non_e_magistrato():
+    toks = collect_magistrate_tokens("il sig. Mario Rossi ha depositato ricorso")
+    assert toks == set()
