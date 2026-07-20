@@ -24,7 +24,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -392,6 +392,15 @@ class CodeAssigner:
         """Ritorna il codice per questa occorrenza (creandolo se nuovo)."""
         prefix = ENTITY_CODE_PREFIXES.get(entity_type, "DATO")
         norm = self._normalize(text) or text.strip().lower()
+        if prefix == "PER":
+            # R-09: nei provvedimenti la stessa persona compare sia come
+            # "Cognome Nome" (epigrafe) sia come "Nome Cognome" (corpo).
+            # La chiave è insensibile all'ordine dei token, così
+            # "Criniti Francesco" e "Francesco Criniti" ricevono lo
+            # STESSO codice. (Due persone distinte con le stesse
+            # identiche parole in ordine diverso sono un caso di scuola
+            # che accettiamo di non distinguere.)
+            norm = " ".join(sorted(norm.split()))
         key = (prefix, norm)
         code = self._key_to_code.get(key)
 

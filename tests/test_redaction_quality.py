@@ -364,3 +364,36 @@ def test_citazioni_giurisprudenziali_riconosciute():
     t3 = "il ricorrente Mario Rossi ha depositato memoria"
     s3 = t3.index("Mario")
     assert is_case_citation(t3, s3, s3 + len("Mario Rossi")) is False
+
+
+# ------------------------------------------------------------
+# R-09: stessa persona, ordine nome/cognome diverso → stesso codice
+# ------------------------------------------------------------
+
+def test_codici_ordine_nome_cognome_unificato():
+    a = CodeAssigner()
+    c1 = a.assign("PERSON", "Criniti Francesco")   # epigrafe
+    c2 = a.assign("PERSON", "Francesco Criniti")   # corpo del provvedimento
+    assert c1 == c2 == "PER-01"
+    assert a.mapping[0]["Occorrenze"] == 2
+
+    # anche con tre token
+    c3 = a.assign("PERSON", "Iorno Maria Saletta")
+    c4 = a.assign("PERSON", "Maria Saletta Iorno")
+    assert c3 == c4 == "PER-02"
+
+
+def test_codici_persone_diverse_restano_distinte():
+    a = CodeAssigner()
+    assert a.assign("PERSON", "Criniti Francesco") == "PER-01"
+    assert a.assign("PERSON", "Criniti Luisa") == "PER-02"
+    assert a.assign("PERSON", "Spezzano Francesco") == "PER-03"
+    # il solo "Criniti" è ambiguo tra più persone → codice proprio
+    assert a.assign("PERSON (propagato)", "Criniti") == "PER-04"
+
+
+def test_codici_ordine_non_applicato_alle_location():
+    a = CodeAssigner()
+    c1 = a.assign("LOCATION", "Reggio Calabria")
+    c2 = a.assign("LOCATION", "Calabria Reggio")
+    assert c1 != c2  # solo le persone sono order-insensitive
