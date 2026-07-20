@@ -53,6 +53,20 @@ Scarica l'installer pre-compilato dalla pagina [Releases](../../releases):
 
 Oppure compila tu l'installer — vedi [`windows/COMPILA-INSTALLER.md`](windows/COMPILA-INSTALLER.md).
 
+#### ⚠️ Avviso SmartScreen / Microsoft Defender
+
+L'installer **non è firmato digitalmente** (la firma richiede un certificato commerciale), quindi Windows può mostrare l'avviso "PC protetto da Windows" o, in alcuni casi, **rimuovere il file come falso positivo**. È un limite noto dei binari open source non firmati, non un'infezione: il codice è interamente ispezionabile in questo repository e l'exe è compilato in automatico da GitHub Actions a ogni release.
+
+1. **Verifica l'integrità** del file scaricato: ogni release pubblica lo SHA256 accanto all'exe. In un prompt dei comandi:
+   ```
+   certutil -hashfile AnonimizzatorePDF-Setup-vX.Y.Z.exe SHA256
+   ```
+   e confronta il risultato con quello indicato nella pagina release.
+2. **Avviso SmartScreen**: clicca *Ulteriori informazioni* → *Esegui comunque*.
+3. **File rimosso da Defender**: apri *Sicurezza di Windows → Protezione da virus e minacce → Cronologia protezione*, seleziona l'elemento e scegli *Ripristina* (o *Consenti nel dispositivo*).
+
+Se Defender segnala l'exe, puoi aiutare tutti segnalando il falso positivo a Microsoft — vedi [`docs/FALSI-POSITIVI-ANTIVIRUS.md`](docs/FALSI-POSITIVI-ANTIVIRUS.md).
+
 ### 🍎 macOS
 
 ```bash

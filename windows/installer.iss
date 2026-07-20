@@ -3,12 +3,12 @@
 ; Installer Inno Setup
 ; ========================================
 ; La versione può essere sovrascritta da riga di comando (CI):
-;   ISCC.exe /DMyAppVersion=1.4.0 installer.iss
+;   ISCC.exe /DMyAppVersion=1.4.1 installer.iss
 ; Il default qui sotto serve per la compilazione manuale.
 
 #define MyAppName "Anonimizzatore PDF"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.4.0"
+  #define MyAppVersion "1.4.1"
 #endif
 #define MyAppPublisher "Anonimizzatore PDF"
 #define MyAppExeName "AnonimizzatorePDF.bat"
@@ -52,9 +52,16 @@ Name: "{group}\Disinstalla {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
+; DEF-01: niente più "runhidden" — la finestra PowerShell resta VISIBILE
+; durante il setup. Due motivi:
+; 1. Trasparenza per l'utente: vede cosa viene scaricato/installato
+;    invece di fissare una barra ferma per 15 minuti.
+; 2. Un installer non firmato che lancia PowerShell nascosto, scarica
+;    exe e li esegue in silenzio ha il profilo comportamentale di un
+;    dropper: era uno dei motivi dei falsi positivi di Defender.
 Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -NoProfile -File ""{app}\setup-dependencies.ps1"" -InstallPath ""{app}"""; \
     StatusMsg: "Configurazione di Python, Tesseract e dipendenze (10-15 minuti)..."; \
-    Flags: runhidden waituntilterminated
+    Flags: waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Avvia {#MyAppName} ora"; Flags: postinstall nowait skipifsilent unchecked
 
 [UninstallDelete]

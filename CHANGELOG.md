@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-07-18
+
+Mitigazioni per i falsi positivi di SmartScreen/Defender sull'installer
+non firmato (`DEF-01`/`DEF-02`).
+
+### Changed
+- **Installer trasparente:** rimosso il flag `runhidden` — la finestra
+  PowerShell del setup resta visibile. L'utente vede cosa viene
+  scaricato e installato, e l'installer perde uno dei tratti
+  comportamentali "da dropper" che contribuivano ai falsi positivi.
+- **CI:** ogni release pubblica ora anche il file `.sha256` accanto
+  all'exe e aggiunge l'hash alle note della release, per la verifica
+  d'integrità (`certutil -hashfile ... SHA256`). Hash aggiunto
+  retroattivamente anche alla v1.4.0.
+
+### Added
+- `docs/FALSI-POSITIVI-ANTIVIRUS.md`: perché succede, come verificare
+  l'hash e ripristinare dalla quarantena, come segnalare il falso
+  positivo a Microsoft (con testo pronto), e la roadmap code signing.
+- README: sezione "Avviso SmartScreen / Microsoft Defender" nella
+  guida d'installazione Windows.
+
 ## [1.4.0] - 2026-07-17
 
 ### Added
