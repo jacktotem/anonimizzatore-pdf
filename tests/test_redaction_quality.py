@@ -436,3 +436,44 @@ def test_is_magistrate_solo_se_tutti_i_token_sono_noti():
 def test_nome_senza_contesto_non_e_magistrato():
     toks = collect_magistrate_tokens("il sig. Mario Rossi ha depositato ricorso")
     assert toks == set()
+
+
+# ------------------------------------------------------------
+# R-11: targhe di veicoli italiane
+# ------------------------------------------------------------
+
+from app import build_license_plate_recognizer  # noqa: E402
+
+
+def _plates(text):
+    rec = build_license_plate_recognizer()
+    return {text[r.start:r.end] for r in rec.analyze(text, ["IT_LICENSE_PLATE"])}
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("l'autovettura targata DR 456 EN di proprietà del convenuto", "DR 456 EN"),
+    ("il veicolo DR456EN tamponava", "DR456EN"),
+    ("la vettura DR-456-EN", "DR-456-EN"),
+])
+def test_targa_rilevata(text, expected):
+    assert expected in _plates(text)
+
+
+@pytest.mark.parametrize("text", [
+    "procedimento R.G. 17354/21 pendente",   # numero di registro
+    "iscritta al n. 465 del ruolo generale",  # numeri di ruolo
+    "AI 123 BO",   # lettere fuori alfabeto targhe (I, O)
+    "QU 456 OI",   # idem (Q, U, O, I)
+    "art. 183 c.p.c. comma sesto",
+])
+def test_targa_non_confusa(text):
+    assert _plates(text) == set()
+
+
+def test_targa_codice_pseudonimizzazione():
+    a = CodeAssigner()
+    assert a.assign("IT_LICENSE_PLATE", "DR 456 EN") == "TARGA-01"
+    # normalizzazione: con/senza spazi è la stessa targa? No: token diversi
+    # ("DR 456 EN" vs "DR456EN") — comportamento documentato, occorrenze
+    # separate solo se scritte diversamente nel documento
+    assert a.assign("IT_LICENSE_PLATE", "DR 456 EN") == "TARGA-01"

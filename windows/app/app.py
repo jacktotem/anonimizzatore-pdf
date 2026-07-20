@@ -20,11 +20,13 @@ from presidio_analyzer import (
     AnalyzerEngine,
     RecognizerRegistry,
     EntityRecognizer,
+    Pattern,
+    PatternRecognizer,
     RecognizerResult,
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -430,6 +432,7 @@ ENTITY_CODE_PREFIXES = {
     "IT_IDENTITY_CARD": "CI",
     "IT_DRIVER_LICENSE": "PAT",
     "IT_PASSPORT": "PASS",
+    "IT_LICENSE_PLATE": "TARGA",
     "IBAN_CODE": "IBAN",
     "CREDIT_CARD": "CARTA",
     "URL": "URL",
@@ -733,6 +736,43 @@ def check_for_updates(timeout=6):
 
 
 # ============================================================
+# TARGHE DI VEICOLI ITALIANE (R-11)
+# ============================================================
+# Formato auto dal 1994: due lettere + tre cifre + due lettere
+# ("DR 456 EN", "DR456EN", "DR-456-EN"). L'alfabeto delle targhe
+# esclude I, O, Q, U — il vincolo rende il pattern molto specifico e
+# riduce i falsi positivi. Il contesto ("targa", "autovettura", ...)
+# alza ulteriormente la confidenza quando presente.
+# NON copriamo il vecchio formato provinciale pre-1994 ("MI 123456"):
+# collide con numeri di registro e protocolli.
+
+_PLATE_ALPHABET = "ABCDEFGHJKLMNPRSTVWXYZ"
+
+
+def build_license_plate_recognizer():
+    """Recognizer per targhe auto italiane (entità IT_LICENSE_PLATE)."""
+    plate_pattern = Pattern(
+        name="targa_auto_it",
+        regex=(
+            rf"\b[{_PLATE_ALPHABET}]{{2}}[\s\-]?\d{{3}}[\s\-]?"
+            rf"[{_PLATE_ALPHABET}]{{2}}\b"
+        ),
+        score=0.6,
+    )
+    return PatternRecognizer(
+        supported_entity="IT_LICENSE_PLATE",
+        supported_language="it",
+        name="ItLicensePlateRecognizer",
+        patterns=[plate_pattern],
+        context=[
+            "targa", "targato", "targata", "veicolo", "autovettura",
+            "automobile", "auto", "vettura", "autocarro", "motociclo",
+            "ciclomotore", "rimorchio", "immatricolato", "immatricolata",
+        ],
+    )
+
+
+# ============================================================
 # INIZIALIZZAZIONE MOTORE DI ANALISI
 # ============================================================
 
@@ -750,6 +790,8 @@ def initialize_analyzer():
     registry.load_predefined_recognizers(languages=["it"])
     # R-03: nomi in contesti legali che il NER statistico manca
     registry.add_recognizer(ItLegalNameRecognizer())
+    # R-11: targhe di veicoli italiane
+    registry.add_recognizer(build_license_plate_recognizer())
 
     analyzer = AnalyzerEngine(
         nlp_engine=nlp_engine,
@@ -1659,6 +1701,9 @@ with st.sidebar:
     use_ci = st.checkbox("Carta d'identità", value=True)
     use_patente = st.checkbox("Patente di guida", value=True)
     use_passport = st.checkbox("Passaporto", value=True)
+    use_targa = st.checkbox("Targhe di veicoli", value=True,
+                            help="Formato attuale AA 000 AA (auto, dal 1994). "
+                                 "Il vecchio formato provinciale non è coperto.")
 
     st.subheader("Dati finanziari")
     use_iban = st.checkbox("IBAN", value=True)
@@ -1763,6 +1808,7 @@ entity_map = [
     (use_ci, "IT_IDENTITY_CARD"),
     (use_patente, "IT_DRIVER_LICENSE"),
     (use_passport, "IT_PASSPORT"),
+    (use_targa, "IT_LICENSE_PLATE"),
     (use_iban, "IBAN_CODE"),
     (use_credit_card, "CREDIT_CARD"),
     (use_url, "URL"),
