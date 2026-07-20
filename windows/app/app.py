@@ -24,7 +24,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.4.4"
+__version__ = "1.5.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -126,6 +126,11 @@ FALSE_POSITIVE_STOPWORDS = {
     "civile", "penale", "unite", "collegio", "camera", "consiglio",
     "cancelliere", "cancelleria", "procura", "procuratore",
     "ministero", "pubblico",
+    # abbreviazioni di citazione e formule di rito (R-07)
+    "cass", "cassazione", "sez", "civ", "pen", "pqm", "epigrafe",
+    "vero", "stato", "illustrissimi", "illustrissimo", "signori",
+    "signore", "signora", "lussemburgo", "strasburgo", "giustizia",
+    "cedu", "cgue", "corte", "europea", "unione",
     # termini processuali
     "sentenza", "ordinanza", "decreto", "ricorso", "controricorso",
     "interlocutoria", "interlocutorio", "appellante", "appellata",
@@ -139,9 +144,10 @@ FALSE_POSITIVE_STOPWORDS = {
     "procedimento", "legge", "articolo", "artt", "art", "comma",
     "codice", "fiscale", "spese", "compensi", "interessi",
     "rivalutazione",
-    # titoli professionali
+    # titoli professionali e abbreviazioni di ruolo
     "avv", "avvocato", "avvocati", "dott", "ssa", "sig", "sigra",
-    "prof", "ing", "geom", "rag", "notaio",
+    "prof", "ing", "geom", "rag", "notaio", "rel", "est", "cons",
+    "pres",
     # enti ricorrenti nei documenti legali
     "istituto", "nazionale", "assicurazione", "assicurazioni",
     "infortuni", "lavoro", "inail", "inps", "agenzia", "entrate",
@@ -156,42 +162,109 @@ FALSE_POSITIVE_STOPWORDS = {
 # Punteggiatura da rimuovere ai bordi dei token
 _TOKEN_PUNCT = ".,;:()[]{}'\"«»–—-’‘“”/\\"
 
+# R-07: numeri romani validi (sezioni, capi, articoli: "III", "XVI"...)
+# Regex stretta: accetta solo numeri romani ben formati, non parole
+# che usano per caso solo le lettere I/V/X/L/C/D/M.
+_ROMAN_NUMERAL_RE = re.compile(
+    r"m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})"
+)
+
+# R-07: date italiane scambiate dal pattern PHONE_NUMBER per telefoni
+# (es. "3.9.2009")
+_DATE_LIKE_RE = re.compile(r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}")
+
 
 def _clean_token(token):
     """Normalizza un token: rimuove punteggiatura ai bordi e minuscolizza."""
     return token.strip(_TOKEN_PUNCT).lower()
 
 
+def _is_substantive_token(token):
+    """
+    True se il token "conta" per giudicare un'entità NER: almeno 3
+    lettere, non boilerplate legale, non un numero romano.
+    """
+    clean = _clean_token(token)
+    letters = "".join(c for c in clean if c.isalpha())
+    if len(letters) < MIN_TOKEN_LEN:
+        return False
+    if clean in FALSE_POSITIVE_STOPWORDS or letters in FALSE_POSITIVE_STOPWORDS:
+        return False
+    if _ROMAN_NUMERAL_RE.fullmatch(letters):
+        return False
+    return True
+
+
 def is_false_positive(entity_type, text):
     """
     R-01: True se l'entità rilevata è quasi certamente un falso positivo.
 
-    Si applica SOLO alle entità NER (PERSON, LOCATION, ...):
+    Per le entità NER (PERSON, LOCATION, ...):
     - testo troppo corto ("SE'", "S", "Da") → falso positivo
-    - nessun token sostanziale (solo frammenti/numeri) → falso positivo
-    - tutti i token sostanziali sono boilerplate legale
-      ("Firmato Da", "Numero", "Ordinanza Interlocutoria") → falso positivo
+    - nessun token sostanziale: solo frammenti, numeri, numeri romani
+      ("III") o boilerplate legale ("Firmato Da", "Cass", "Sez",
+      "P.q.m", "Ordinanza Interlocutoria") → falso positivo
+
+    R-07: un PHONE_NUMBER con la forma di una data ("3.9.2009") è una
+    data, non un telefono.
     """
+    stripped = text.strip()
+    if entity_type == "PHONE_NUMBER" and _DATE_LIKE_RE.fullmatch(stripped):
+        return True
     if entity_type not in NER_ENTITY_TYPES:
         return False
-    stripped = text.strip()
     if len(stripped) < MIN_TOKEN_LEN:
         return True
-    substantive = []
-    for token in stripped.split():
-        clean = _clean_token(token)
-        # contano solo le LETTERE: "R.G.", "C.F.", "S", "12" non
-        # sono token sostanziali
-        letters = "".join(c for c in clean if c.isalpha())
-        if len(letters) < MIN_TOKEN_LEN:
-            continue
-        substantive.append((clean, letters))
-    if not substantive:
-        return True
-    return all(
-        clean in FALSE_POSITIVE_STOPWORDS or letters in FALSE_POSITIVE_STOPWORDS
-        for clean, letters in substantive
-    )
+    return not any(_is_substantive_token(t) for t in stripped.split())
+
+
+def trim_ner_span(full_text, start, end):
+    """
+    R-07: restringe un'entità NER ai soli token sostanziali, eliminando
+    dai BORDI il boilerplate catturato per errore dal modello:
+    "FRASCA Emesso Da" → "FRASCA"; "Raffaele Frasca - Presidente dott"
+    → "Raffaele Frasca". (Migliora anche la coerenza dei codici di
+    pseudonimizzazione: "Rossetti - Consigliere" e "Rossetti" diventano
+    la stessa entità.)
+
+    Ritorna (start, end) aggiustati, o None se non resta nulla.
+    """
+    tokens = list(re.finditer(r"\S+", full_text[start:end]))
+    while tokens and not _is_substantive_token(tokens[0].group()):
+        tokens.pop(0)
+    while tokens and not _is_substantive_token(tokens[-1].group()):
+        tokens.pop()
+    if not tokens:
+        return None
+    return start + tokens[0].start(), start + tokens[-1].end()
+
+
+# R-08: citazioni giurisprudenziali — nomi di precedenti pubblicati
+# (Köbler, Lucchini, "FY c. Profi Credit Polska"...), non dati personali
+# da proteggere. Anonimizzarli distruggerebbe le citazioni. Li
+# riconosciamo dal contesto: numero di causa CGUE ("C-224/01", anche
+# spezzato dall'a-capo: "C- 869/19", "C-40/") o marcatori tipici
+# ("CGUE", "in causa", "cause riunite") nelle vicinanze, oppure il
+# formato "X c. Y" tipico delle cause.
+#
+# Rete di sicurezza: se un nome di PARTE compare per caso vicino a una
+# citazione, quell'occorrenza viene comunque coperta dalla propagazione
+# dei nomi (R-04), che lavora su tutte le altre occorrenze rilevate.
+_ECJ_CASE_RE = re.compile(r"\bC\s?[-‑]\s?\d{1,4}\s?/\s?\d{0,4}")
+_CITATION_MARKER_RE = re.compile(
+    r"\b(CGUE|CEDU|Corte\s+giust\w*|in\s+causa|cause\s+riunite)", re.IGNORECASE
+)
+_VERSUS_RE = re.compile(r"\s[cC]\.\s")
+_CITATION_WINDOW = 90
+
+
+def is_case_citation(full_text, start, end):
+    """True se l'entità è (quasi certamente) il nome di un precedente."""
+    span = full_text[start:end]
+    if _VERSUS_RE.search(span):
+        return True  # "Farrell c. Whitty", "FY c. Profi Credit Polska"
+    window = full_text[max(0, start - _CITATION_WINDOW):end + _CITATION_WINDOW]
+    return bool(_ECJ_CASE_RE.search(window) or _CITATION_MARKER_RE.search(window))
 
 
 # ============================================================
@@ -881,8 +954,20 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
             for r in all_results:
                 if r.score < min_score:
                     continue
+                # R-07: restringe l'entità NER ai token sostanziali
+                if r.entity_type in NER_ENTITY_TYPES:
+                    trimmed = trim_ner_span(full_text, r.start, r.end)
+                    if trimmed is None:
+                        dropped_fp += 1
+                        continue
+                    r.start, r.end = trimmed
                 # R-01: scarta i falsi positivi del NER
                 if is_false_positive(r.entity_type, full_text[r.start:r.end]):
+                    dropped_fp += 1
+                    continue
+                # R-08: non redigere le citazioni giurisprudenziali
+                if (r.entity_type in NER_ENTITY_TYPES
+                        and is_case_citation(full_text, r.start, r.end)):
                     dropped_fp += 1
                     continue
                 results.append(r)
@@ -1127,12 +1212,22 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                     language="it",
                 )
                 raw_count = len(all_results)
-                # R-01: soglia + filtro falsi positivi NER
-                results = [
-                    r for r in all_results
-                    if r.score >= min_score
-                    and not is_false_positive(r.entity_type, full_text[r.start:r.end])
-                ]
+                # R-01/R-07/R-08: soglia, trim, falsi positivi, citazioni
+                results = []
+                for r in all_results:
+                    if r.score < min_score:
+                        continue
+                    if r.entity_type in NER_ENTITY_TYPES:
+                        trimmed = trim_ner_span(full_text, r.start, r.end)
+                        if trimmed is None:
+                            continue
+                        r.start, r.end = trimmed
+                    if is_false_positive(r.entity_type, full_text[r.start:r.end]):
+                        continue
+                    if (r.entity_type in NER_ENTITY_TYPES
+                            and is_case_citation(full_text, r.start, r.end)):
+                        continue
+                    results.append(r)
                 filtered_count = len(results)
 
                 if debug_first and all_results:

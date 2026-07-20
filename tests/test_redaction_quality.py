@@ -306,3 +306,61 @@ def test_parse_version_confronto_numerico():
     assert _parse_version("v1.10.0") > _parse_version("v1.9.0")
     assert _parse_version("v1.4.0") > _parse_version("v1.3.2")
     assert _parse_version("v1.4.0") == _parse_version("1.4.0")
+
+
+# ------------------------------------------------------------
+# R-07/R-08: abbreviazioni, romani, date-telefono, trim, citazioni
+# ------------------------------------------------------------
+
+from app import is_case_citation, trim_ner_span  # noqa: E402
+
+
+@pytest.mark.parametrize("entity_type,text", [
+    ("PERSON", "Cass"),
+    ("PERSON", "Sez"),
+    ("PERSON", "III"),                 # numero romano
+    ("PERSON", "XVI"),
+    ("LOCATION", "civ"),
+    ("LOCATION", "P.q.m"),
+    ("LOCATION", "Stato"),
+    ("LOCATION", "Vero"),
+    ("LOCATION", "Corte di Lussemburgo"),
+    ("PERSON", "Illustrissimi Signori Magistrati"),
+    ("PHONE_NUMBER", "3.9.2009"),      # data, non telefono
+    ("PHONE_NUMBER", "03/09/2009"),
+])
+def test_falsi_positivi_r07(entity_type, text):
+    assert is_false_positive(entity_type, text) is True
+
+
+def test_telefono_vero_non_filtrato():
+    assert is_false_positive("PHONE_NUMBER", "+39 3201234567") is False
+
+
+def test_trim_bordi_entita():
+    text = "Firmato Da: FRASCA Emesso Da: TRUSTPRO"
+    start, end = text.index("FRASCA"), text.index("FRASCA") + len("FRASCA Emesso Da:")
+    assert text[slice(*trim_ner_span(text, start, end))] == "FRASCA"
+
+    text2 = "dott. Raffaele Frasca - Presidente dott."
+    s2 = text2.index("Raffaele")
+    assert text2[slice(*trim_ner_span(text2, s2, len(text2)))] == "Raffaele Frasca"
+
+    # entità fatta SOLO di boilerplate → None
+    text3 = "Emesso Da Numero"
+    assert trim_ner_span(text3, 0, len(text3)) is None
+
+
+def test_citazioni_giurisprudenziali_riconosciute():
+    t = "come affermato in sent. 30 settembre 2003, Köbler, C-224/01, punto 3"
+    s = t.index("Köbler")
+    assert is_case_citation(t, s, s + len("Köbler")) is True
+
+    t2 = "nel caso Farrell c. Whitty la Corte ha stabilito"
+    s2 = t2.index("Farrell")
+    assert is_case_citation(t2, s2, s2 + len("Farrell c. Whitty")) is True
+
+    # un nome comune senza contesto di citazione NON è una citazione
+    t3 = "il ricorrente Mario Rossi ha depositato memoria"
+    s3 = t3.index("Mario")
+    assert is_case_citation(t3, s3, s3 + len("Mario Rossi")) is False
