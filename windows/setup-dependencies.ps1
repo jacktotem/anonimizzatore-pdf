@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 # N-05 (#9): single source of truth per la versione mostrata all'utente.
 # Long-term: leggere da un file VERSION in repo root condiviso con
 # installer.iss e src/app.py.
-$AppVersion = "1.4.2"
+$AppVersion = "1.4.3"
 
 # ============================================================
 # CONFIGURAZIONE BINARI CON HASH PINNING
@@ -98,6 +98,35 @@ function Show-Progress {
     Write-Progress -Activity "Installazione Anonimizzatore PDF" `
         -Status $Message -PercentComplete $PercentComplete
     Write-Log $Message
+}
+
+# ============================================================
+# ESECUZIONE COMANDI NATIVI (NAT-01)
+# ============================================================
+# In Windows PowerShell 5.1, con $ErrorActionPreference = "Stop", OGNI
+# riga scritta su stderr da un comando nativo rediretto con 2>&1
+# diventa un errore TERMINANTE (NativeCommandError). Conseguenze reali
+# osservate sul campo:
+#  - un "import" di prova fallito (comportamento atteso e gestito)
+#    abortiva il setup mostrando solo "Traceback (most recent call
+#    last):";
+#  - un errore pip abortiva fuori dai retry con il testo grezzo di pip.
+# Qui i comandi nativi girano con EAP locale "Continue": stdout+stderr
+# finiscono nel log e il successo si giudica SOLO dall'exit code.
+
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory=$true)][string]$Exe,
+        [string[]]$Arguments = @()
+    )
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Exe @Arguments 2>&1 | ForEach-Object { "$_" } | Out-File -Append -FilePath $LogFile
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
 }
 
 # ============================================================
@@ -345,8 +374,11 @@ function Test-PythonEnvironmentCurrent {
     }
 
     # Sanity check: i moduli chiave devono essere importabili
-    & $pythonExe -c "import streamlit, fitz, pytesseract; from presidio_analyzer import AnalyzerEngine" 2>&1 | Out-File -Append $LogFile
-    if ($LASTEXITCODE -ne 0) {
+    # (NAT-01: può legittimamente fallire, non deve abortire il setup)
+    $code = Invoke-Native -Exe $pythonExe -Arguments @(
+        "-c", "import streamlit, fitz, pytesseract; from presidio_analyzer import AnalyzerEngine"
+    )
+    if ($code -ne 0) {
         Write-Log "Venv presente ma moduli non importabili: ricreo" "WARN"
         return $false
     }
@@ -365,8 +397,8 @@ function Setup-PythonEnvironment {
     }
     Remove-Item (Get-DepsFingerprintPath) -ErrorAction SilentlyContinue
 
-    & py -3.12 -m venv $venvPath 2>&1 | Out-File -Append $LogFile
-    if ($LASTEXITCODE -ne 0) {
+    $code = Invoke-Native -Exe "py" -Arguments @("-3.12", "-m", "venv", $venvPath)
+    if ($code -ne 0) {
         throw "Creazione venv fallita"
     }
 
@@ -374,15 +406,16 @@ function Setup-PythonEnvironment {
     $pipExe = Join-Path $venvPath "Scripts\pip.exe"
 
     Show-Progress "Aggiornamento pip..." 60
-    & $pythonExe -m pip install --upgrade pip setuptools wheel 2>&1 | Out-File -Append $LogFile
-    if ($LASTEXITCODE -ne 0) {
+    $code = Invoke-Native -Exe $pythonExe -Arguments @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
+    if ($code -ne 0) {
         throw "Aggiornamento pip fallito"
     }
 
     Show-Progress "Installazione librerie Python..." 65
 
-    & $pipExe install --only-binary=:all: --no-cache-dir $script:PythonPackages 2>&1 | Out-File -Append $LogFile
-    if ($LASTEXITCODE -ne 0) {
+    $pipArgs = @("install", "--only-binary=:all:", "--no-cache-dir") + $script:PythonPackages
+    $code = Invoke-Native -Exe $pipExe -Arguments $pipArgs
+    if ($code -ne 0) {
         throw "Installazione pacchetti pip fallita - vedi $LogFile"
     }
 
@@ -400,8 +433,11 @@ function Test-SpacyModelInstalled {
     # UPD-01: se il modello è già importabile non riscarichiamo 580 MB
     $pythonExe = Join-Path $InstallPath "venv\Scripts\python.exe"
     if (-not (Test-Path $pythonExe)) { return $false }
-    & $pythonExe -c "import it_core_news_lg" 2>&1 | Out-File -Append $LogFile
-    if ($LASTEXITCODE -eq 0) {
+    # NAT-01: questo import DEVE poter fallire senza abortire il setup —
+    # su Windows PowerShell 5.1 il traceback su stderr diventava un
+    # errore fatale ("Traceback (most recent call last):" e stop).
+    $code = Invoke-Native -Exe $pythonExe -Arguments @("-c", "import it_core_news_lg")
+    if ($code -eq 0) {
         Write-Log "Modello linguistico italiano già presente: salto il download"
         return $true
     }
@@ -438,8 +474,8 @@ function Install-SpacyModel {
         }
 
         Show-Progress "Installazione modello linguistico..." 90
-        & $pipExe install --no-cache-dir $wheelPath 2>&1 | Out-File -Append $LogFile
-        if ($LASTEXITCODE -eq 0) {
+        $code = Invoke-Native -Exe $pipExe -Arguments @("install", "--no-cache-dir", $wheelPath)
+        if ($code -eq 0) {
             Remove-Item $wheelPath -ErrorAction SilentlyContinue
             Write-Log "Modello linguistico italiano installato"
             return
@@ -478,12 +514,13 @@ except Exception as e:
     sys.exit(1)
 "@
 
-    $verifyResult = & $pythonExe -c $verifyScript 2>&1
-    Write-Log "Verifica: $verifyResult"
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Verifica installazione fallita. Setup non completato correttamente."
+    # NAT-01: anche qui il giudizio è SOLO sull'exit code; l'output
+    # completo (incluso l'eventuale traceback) finisce nel log.
+    $code = Invoke-Native -Exe $pythonExe -Arguments @("-c", $verifyScript)
+    if ($code -ne 0) {
+        throw "Verifica installazione fallita. Setup non completato correttamente - vedi $LogFile"
     }
+    Write-Log "Verifica finale superata: tutti i componenti caricati"
 }
 
 # ============================================================

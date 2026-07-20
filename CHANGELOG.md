@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-07-20
+
+### Fixed
+- **NAT-01 — Setup abortito da stderr su Windows PowerShell 5.1:** con
+  `$ErrorActionPreference = "Stop"`, ogni riga scritta su stderr da un
+  comando nativo rediretto con `2>&1` diventa un errore terminante.
+  Due conseguenze osservate sul campo: il controllo "modello già
+  installato?" (un `import` che deve poter fallire) abortiva il setup
+  mostrando solo "Traceback (most recent call last):"; e gli errori pip
+  scavalcavano i retry mostrando il testo grezzo. Ora tutti i comandi
+  nativi passano da `Invoke-Native` (EAP locale "Continue", output nel
+  log, esito giudicato solo dall'exit code): i controlli possono
+  fallire senza far esplodere l'installazione e i retry del modello
+  funzionano davvero.
+
 ## [1.4.2] - 2026-07-20
 
 ### Fixed
