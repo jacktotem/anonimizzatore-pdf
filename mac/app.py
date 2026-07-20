@@ -24,7 +24,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.5.1"
+__version__ = "1.6.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -332,6 +332,80 @@ def shrink_redact_rect(rect):
     return fitz.Rect(rect.x0 + h, rect.y0 + v, rect.x1 - h, rect.y1 - v)
 
 
+# Token "nome proprio": iniziale maiuscola + almeno un altro carattere
+# (usato dal recognizer R-03 e dai contesti magistrato R-10)
+_NAME_TOKEN = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-Þà-öø-ÿ'’\-]+"
+_NAME_SEQ = rf"{_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,3}}"
+
+
+# ============================================================
+# ESCLUSIONE MAGISTRATI (R-10, opzionale)
+# ============================================================
+# Nella prassi di anonimizzazione dei provvedimenti (art. 52 d.lgs.
+# 196/2003) si oscurano le PARTI, non i giudici. Con l'opzione attiva,
+# i nomi che compaiono nei contesti tipici del collegio giudicante
+# vengono riconosciuti e NON redatti, in tutto il documento.
+# Default: disattivata (si anonimizza tutto — comportamento prudente).
+
+_MAGISTRATE_CONTEXT_RES = [
+    # epigrafe del collegio: "dott. Marco Rossetti - Consigliere rel."
+    # "dott. ssa Clotilde Parise      Presidente"
+    re.compile(
+        rf"\bdott\.?\s*(?:(?i:ssa)\.?\s*)?({_NAME_SEQ})\s*[-–—]?\s*"
+        rf"(?i:presidente|consigliere|giudice|relatore|estensore|rel\b|est\b)"
+    ),
+    # "udita la relazione ... dal Consigliere relatore dott. Marco Rossetti"
+    re.compile(
+        rf"(?i:presidente|consigliere|giudice|relatore|estensore)"
+        rf"[^A-ZÀ-Ö]{{0,40}}?\bdott\.?\s*(?:(?i:ssa)\.?\s*)?({_NAME_SEQ})"
+    ),
+    # firma digitale a margine: "Firmato Da: RAFFAELE GAETANO ANTONIO FRASCA"
+    re.compile(
+        r"(?i:firmato\s+da)\s*:?\s*((?:[A-ZÀ-Ö']{2,}\s+){0,4}[A-ZÀ-Ö']{2,})"
+    ),
+    # sottoscrizioni finali: "Il Presidente" / "Il Consigliere estensore" + nome
+    re.compile(
+        rf"\bIl\s+(?i:presidente|consigliere(?:\s+estensore)?|giudice)\s*:?\s*"
+        rf"(?:dott\.?\s*(?:(?i:ssa)\.?\s*)?)?({_NAME_SEQ})"
+    ),
+]
+
+
+def collect_magistrate_tokens(full_text):
+    """
+    R-10: raccoglie i token dei nomi che compaiono nei contesti tipici
+    del collegio giudicante. Ritorna un set di token normalizzati.
+    """
+    tokens = set()
+    for regex in _MAGISTRATE_CONTEXT_RES:
+        for match in regex.finditer(full_text):
+            for token in match.group(1).split():
+                clean = _clean_token(token)
+                if (len(clean) >= MIN_TOKEN_LEN
+                        and clean not in FALSE_POSITIVE_STOPWORDS
+                        and clean.isalpha()):
+                    tokens.add(clean)
+    return tokens
+
+
+def is_magistrate(entity_text, magistrate_tokens):
+    """
+    True se TUTTI i token sostanziali dell'entità appartengono a nomi
+    di magistrati raccolti dai contesti del collegio. (Se anche un solo
+    token non è riconducibile a un magistrato, si redige: in dubbio,
+    prevale la protezione del dato.)
+    """
+    if not magistrate_tokens:
+        return False
+    substantive = [
+        _clean_token(t) for t in entity_text.split()
+        if _is_substantive_token(t)
+    ]
+    if not substantive:
+        return False
+    return all(t in magistrate_tokens for t in substantive)
+
+
 # ============================================================
 # PSEUDONIMIZZAZIONE CON CODICI (R-05)
 # ============================================================
@@ -532,9 +606,7 @@ def find_custom_term_matches(term, entries):
 # Questo recognizer li cattura con regex + trimming degli eventuali
 # ruoli finali ("Presidente", "Consigliere", ...).
 
-# Token "nome proprio": iniziale maiuscola + almeno un altro carattere
-_NAME_TOKEN = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-Þà-öø-ÿ'’\-]+"
-_NAME_SEQ = rf"{_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,3}}"
+# (_NAME_TOKEN e _NAME_SEQ sono definiti più in alto, prima di R-10)
 
 
 class ItLegalNameRecognizer(EntityRecognizer):
@@ -1121,7 +1193,8 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
 def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                          analyzer, min_score, dpi, lang, log, page_num,
                          debug_first=False, known_person_tokens=None,
-                         redaction_mode="blackout", assigner=None):
+                         redaction_mode="blackout", assigner=None,
+                         magistrate_tokens=None):
     """OCR su pagina scansionata + redazione con rettangoli su immagine."""
     known_person_tokens = known_person_tokens or set()
     use_codes = redaction_mode == "codes" and assigner is not None
@@ -1221,6 +1294,12 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                     language="it",
                 )
                 raw_count = len(all_results)
+                # R-10: set magistrati doc-wide + contesti di questa pagina
+                local_magistrates = None
+                if magistrate_tokens is not None:
+                    local_magistrates = (
+                        magistrate_tokens | collect_magistrate_tokens(full_text)
+                    )
                 # R-01/R-07/R-08: soglia, trim, falsi positivi, citazioni
                 results = []
                 for r in all_results:
@@ -1235,6 +1314,12 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                         continue
                     if (r.entity_type in NER_ENTITY_TYPES
                             and is_case_citation(full_text, r.start, r.end)):
+                        continue
+                    # R-10: magistrati esclusi (set doc-wide + contesti locali)
+                    if (local_magistrates is not None
+                            and r.entity_type in NER_ENTITY_TYPES
+                            and is_magistrate(full_text[r.start:r.end],
+                                              local_magistrates)):
                         continue
                     results.append(r)
                 filtered_count = len(results)
@@ -1331,11 +1416,12 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
 
 def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                min_score=0.4, ocr_mode="auto", ocr_dpi=300, ocr_lang="ita",
-               redaction_mode="blackout"):
+               redaction_mode="blackout", exclude_magistrates=False):
     """
     Anonimizza un PDF. Gestisce sia pagine testuali che scansionate.
     ocr_mode: 'auto' | 'always' | 'never'
     redaction_mode: 'blackout' (rettangoli neri) | 'codes' (pseudonimizzazione)
+    exclude_magistrates: R-10 — non redigere i nomi del collegio giudicante
 
     Ritorna (bytes_pdf, log, mapping) dove mapping è la tabella di
     accoppiamento codice↔testo (vuota in modalità blackout).
@@ -1366,6 +1452,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     # viene oscurato anche nelle pagine dove il NER lo manca.
     page_plans = {}  # page_index -> {"use_ocr": bool, "analysis": dict|None}
     known_person_tokens = set()
+    magistrate_tokens = set()
 
     for page_index, src_page in enumerate(src_doc):
         page_num = page_index + 1
@@ -1394,6 +1481,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                 page_num, debug_first=(page_num == 1),
             )
             known_person_tokens |= collect_person_tokens(analysis)
+            if exclude_magistrates:
+                magistrate_tokens |= collect_magistrate_tokens(analysis["full_text"])
             total_raw += analysis["raw"]
             total_filtered += analysis["filtered"]
             total_dropped_fp += analysis["dropped_fp"]
@@ -1407,6 +1496,28 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 
     # I termini personalizzati non vanno propagati come nomi, ma i
     # nomi utente sono comunque cercati parola-per-parola (vedi sotto).
+
+    # R-10: con l'opzione attiva, i nomi del collegio giudicante non
+    # vengono redatti. Il filtro avviene QUI, a valle della passata di
+    # analisi: l'epigrafe con i ruoli può stare su una pagina diversa
+    # da quella in cui il nome ricompare, serve il set completo.
+    magistrates_skipped = 0
+    if exclude_magistrates and magistrate_tokens:
+        known_person_tokens -= magistrate_tokens
+        for plan in page_plans.values():
+            analysis = plan.get("analysis")
+            if not analysis:
+                continue
+            kept = []
+            for r in analysis["results"]:
+                if (r.entity_type in NER_ENTITY_TYPES
+                        and is_magistrate(
+                            analysis["full_text"][r.start:r.end],
+                            magistrate_tokens)):
+                    magistrates_skipped += 1
+                    continue
+                kept.append(r)
+            analysis["results"] = kept
 
     # ---------- PASSATA 2: redazione ----------
     for page_index, src_page in enumerate(src_doc):
@@ -1423,6 +1534,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                 known_person_tokens=known_person_tokens,
                 redaction_mode=redaction_mode,
                 assigner=assigner,
+                magistrate_tokens=magistrate_tokens if exclude_magistrates else None,
             )
             total_raw += raw
             total_filtered += filtered
@@ -1471,6 +1583,11 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     )
     if known_person_tokens:
         st.write(f"   👤 Nomi propagati a tutto il documento: {len(known_person_tokens)} token")
+    if exclude_magistrates and magistrate_tokens:
+        st.write(
+            f"   ⚖️ Magistrati esclusi dall'anonimizzazione: "
+            f"{len(magistrate_tokens)} token ({magistrates_skipped} occorrenze risparmiate)"
+        )
 
     sanitize_total = sum(sanitize_stats.values())
     if sanitize_total > 0:
@@ -1519,6 +1636,18 @@ with st.sidebar:
 
     st.subheader("Dati personali")
     use_person = st.checkbox("Nomi di persona", value=True)
+    exclude_magistrates = st.checkbox(
+        "⚖️ Non anonimizzare i magistrati",
+        value=False,
+        help=(
+            "Nella prassi di anonimizzazione dei provvedimenti (art. 52 "
+            "d.lgs. 196/2003) si oscurano le parti, non i giudici. Con "
+            "questa opzione i nomi riconosciuti come componenti del "
+            "collegio (epigrafe 'dott. X - Presidente/Consigliere', "
+            "relatore, firme) restano visibili in tutto il documento. "
+            "Verifica sempre il risultato."
+        ),
+    )
     use_email = st.checkbox("Email", value=True)
     use_phone = st.checkbox("Numeri di telefono", value=True)
     use_location = st.checkbox("Località e indirizzi", value=True)
@@ -1764,6 +1893,7 @@ if uploaded_file is not None:
                 ocr_dpi=ocr_dpi,
                 ocr_lang="ita" if ITALIAN_AVAILABLE else "eng",
                 redaction_mode=redaction_mode,
+                exclude_magistrates=exclude_magistrates,
             )
 
             # FIX rerun: ogni click su un download_button riesegue lo script

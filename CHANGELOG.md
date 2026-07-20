@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-20
+
+### Added
+- **R-10 — Opzione "Non anonimizzare i magistrati"** (checkbox in
+  sidebar, disattivata di default): nella prassi di anonimizzazione
+  dei provvedimenti (art. 52 d.lgs. 196/2003) si oscurano le parti,
+  non i giudici. Con l'opzione attiva, i nomi riconosciuti nei
+  contesti tipici del collegio — epigrafe "dott. X -
+  Presidente/Consigliere", "Consigliere relatore dott. X", firme
+  digitali "Firmato Da: X", sottoscrizioni "Il Presidente" — restano
+  visibili in tutto il documento. Regola prudenziale: un nome è
+  considerato magistrato solo se TUTTI i suoi token provengono da quei
+  contesti; in dubbio si redige. Il riepilogo mostra quanti nomi sono
+  stati esclusi. Vale anche per le pagine OCR.
+
 ## [1.5.1] - 2026-07-20
 
 ### Fixed
