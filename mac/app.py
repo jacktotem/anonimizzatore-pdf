@@ -26,7 +26,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -749,27 +749,127 @@ def check_for_updates(timeout=6):
 _PLATE_ALPHABET = "ABCDEFGHJKLMNPRSTVWXYZ"
 
 
+# R-12: le targhe non italiane e quelle di moto/ciclomotori/rimorchi
+# seguono formati troppo eterogenei per una regex per-formato. La
+# strategia è duplice:
+#   1. formato auto italiano (AA 000 AA) → riconosciuto ANCHE senza
+#      contesto, perché il pattern è di per sé molto specifico;
+#   2. QUALSIASI codice alfanumerico introdotto da "targa/targato/
+#      targata/targhe/..." (o da un veicolo + "immatricolato") →
+#      riconosciuto grazie al CONTESTO, qualunque sia il formato.
+# Il contesto è obbligatorio per i formati ambigui: una targa moto
+# ("AB 12345") è tipograficamente identica a un numero di registro
+# scritto senza punti ("RG 17354"), e senza la parola-spia non c'è modo
+# di distinguerli.
+
+# Parole che introducono una targa
+_PLATE_TRIGGER_RE = re.compile(
+    r"\b(?:targa|targhe|targat[oaie]|"
+    r"immatricolat[oaie]|"
+    r"(?:auto)?veicol[oi]|autovettur[ae]|autocarr[oi]|"
+    r"motociclo|motoveicolo|ciclomotor[ei]|rimorchi[oi])\b"
+    r"[\s:,]*"
+    r"(?:(?:n|nr|num|numero|sigla|con)\.?\s*)?",
+    re.IGNORECASE,
+)
+
+# Un "pezzo" di targa: lettere maiuscole/cifre/trattini (le targhe nei
+# documenti sono scritte in maiuscolo; richiederlo taglia i falsi
+# positivi su parole comuni)
+_PLATE_CHUNK_RE = re.compile(r"[A-Z0-9]+(?:-[A-Z0-9]+)*")
+
+_PLATE_MIN_LEN = 4      # es. "M123"
+_PLATE_MAX_LEN = 10     # oltre non è una targa
+_PLATE_LOOKAHEAD = 42   # caratteri esaminati dopo la parola-spia
+
+
+def _plate_span_after(text, pos):
+    """
+    Cerca una targa a partire da `pos` (subito dopo la parola-spia).
+    Ritorna (start, end) oppure None.
+
+    Accetta la targa spezzata in più gruppi ("DR 456 EN", "M-AB 1234",
+    "AB 12345"), poi accorcia da destra finché la stringa risultante è
+    plausibile: 4-10 caratteri alfanumerici con almeno una lettera E
+    almeno una cifra (esclude sigle tutte-lettere come "PRA" e numeri
+    puri come i protocolli).
+    """
+    window = text[pos:pos + _PLATE_LOOKAHEAD]
+    tokens = []
+    for m in re.finditer(r"\S+", window):
+        chunk = m.group().strip(".,;:()[]«»\"'")
+        if not chunk or not _PLATE_CHUNK_RE.fullmatch(chunk):
+            break  # la sequenza di gruppi "da targa" è finita
+        tokens.append((pos + m.start(), pos + m.start() + len(chunk), chunk))
+        if sum(len(t[2].replace("-", "")) for t in tokens) > _PLATE_MAX_LEN:
+            break
+        if len(tokens) >= 4:
+            break
+
+    while tokens:
+        joined = "".join(t[2] for t in tokens).replace("-", "")
+        if (_PLATE_MIN_LEN <= len(joined) <= _PLATE_MAX_LEN
+                and any(c.isdigit() for c in joined)
+                and any(c.isalpha() for c in joined)):
+            return tokens[0][0], tokens[-1][1]
+        tokens.pop()
+    return None
+
+
+class ItLicensePlateRecognizer(EntityRecognizer):
+    """Targhe di veicoli: formato auto italiano + qualsiasi formato in contesto."""
+
+    # Formato auto italiano post-1994: AA 000 AA (alfabeto senza I/O/Q/U)
+    REGEX_CAR = re.compile(
+        rf"\b[{_PLATE_ALPHABET}]{{2}}[\s\-]?\d{{3}}[\s\-]?[{_PLATE_ALPHABET}]{{2}}\b"
+    )
+
+    SCORE_CAR = 0.6          # pattern autosufficiente
+    SCORE_CONTEXT = 0.85     # introdotta da "targa/targato/..."
+
+    def __init__(self):
+        super().__init__(
+            supported_entities=["IT_LICENSE_PLATE"],
+            supported_language="it",
+            name="ItLicensePlateRecognizer",
+        )
+
+    def load(self):
+        pass
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "IT_LICENSE_PLATE" not in entities:
+            return []
+
+        results = []
+        taken = []  # span già coperti, per non duplicare
+
+        def _add(start, end, score):
+            if any(s < end and e > start for s, e in taken):
+                return
+            taken.append((start, end))
+            results.append(RecognizerResult(
+                entity_type="IT_LICENSE_PLATE",
+                start=start, end=end, score=score,
+            ))
+
+        # 1. Targhe introdotte da una parola-spia: qualsiasi formato
+        #    (moto, ciclomotori, rimorchi, targhe estere).
+        for match in _PLATE_TRIGGER_RE.finditer(text):
+            span = _plate_span_after(text, match.end())
+            if span:
+                _add(span[0], span[1], self.SCORE_CONTEXT)
+
+        # 2. Formato auto italiano, riconoscibile anche da solo.
+        for match in self.REGEX_CAR.finditer(text):
+            _add(match.start(), match.end(), self.SCORE_CAR)
+
+        return results
+
+
 def build_license_plate_recognizer():
-    """Recognizer per targhe auto italiane (entità IT_LICENSE_PLATE)."""
-    plate_pattern = Pattern(
-        name="targa_auto_it",
-        regex=(
-            rf"\b[{_PLATE_ALPHABET}]{{2}}[\s\-]?\d{{3}}[\s\-]?"
-            rf"[{_PLATE_ALPHABET}]{{2}}\b"
-        ),
-        score=0.6,
-    )
-    return PatternRecognizer(
-        supported_entity="IT_LICENSE_PLATE",
-        supported_language="it",
-        name="ItLicensePlateRecognizer",
-        patterns=[plate_pattern],
-        context=[
-            "targa", "targato", "targata", "veicolo", "autovettura",
-            "automobile", "auto", "vettura", "autocarro", "motociclo",
-            "ciclomotore", "rimorchio", "immatricolato", "immatricolata",
-        ],
-    )
+    """Recognizer per targhe di veicoli (entità IT_LICENSE_PLATE)."""
+    return ItLicensePlateRecognizer()
 
 
 # ============================================================

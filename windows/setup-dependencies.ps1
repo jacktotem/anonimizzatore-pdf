@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 # N-05 (#9): single source of truth per la versione mostrata all'utente.
 # Long-term: leggere da un file VERSION in repo root condiviso con
 # installer.iss e src/app.py.
-$AppVersion = "1.7.0"
+$AppVersion = "1.8.0"
 
 # ============================================================
 # CONFIGURAZIONE BINARI CON HASH PINNING

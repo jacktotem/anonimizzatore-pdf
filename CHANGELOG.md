@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-07-21
+
+### Changed
+- **R-12 — Targhe riconosciute dal contesto, non solo dal formato:** le
+  targhe di moto, ciclomotori, rimorchi e veicoli esteri seguono
+  formati troppo eterogenei per una regex per-formato. Ora **qualsiasi
+  codice alfanumerico introdotto da "targa / targato / targata /
+  targati / targate / targhe"** (o da un veicolo + "immatricolato")
+  viene riconosciuto come targa, indipendentemente dal formato:
+  `AB 12345` (moto), `M-AB 1234` (Germania), `AB-123-CD` (Francia),
+  `X9A9B` (ciclomotore). Il formato auto italiano `AA 000 AA` continua
+  a essere riconosciuto **anche senza** parola-spia.
+
+  Il contesto è **obbligatorio** per i formati ambigui: una targa moto
+  ("AB 12345") è tipograficamente identica a un numero di registro
+  scritto senza punti ("RG 17354"), e senza la parola-spia non
+  esisterebbe modo di distinguerli. Il candidato deve inoltre
+  contenere almeno una lettera e almeno una cifra ed essere lungo 4-10
+  caratteri: "targata Fiat Panda" e "iscritto al PRA" non producono
+  redazioni.
+
 ## [1.7.0] - 2026-07-20
 
 ### Added
