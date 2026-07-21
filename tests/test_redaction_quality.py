@@ -477,3 +477,51 @@ def test_targa_codice_pseudonimizzazione():
     # ("DR 456 EN" vs "DR456EN") — comportamento documentato, occorrenze
     # separate solo se scritte diversamente nel documento
     assert a.assign("IT_LICENSE_PLATE", "DR 456 EN") == "TARGA-01"
+
+
+# ------------------------------------------------------------
+# R-12: targhe moto, estere e di qualsiasi formato, via contesto
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text,expected", [
+    # moto e ciclomotori italiani (formati diversi dall'auto)
+    ("il motociclo targato AB 12345 procedeva", "AB 12345"),
+    ("targa AB12345", "AB12345"),
+    ("il ciclomotore targato X9A9B", "X9A9B"),
+    ("il rimorchio targato XA 123 AB", "XA 123 AB"),
+    # targhe estere
+    ("l'autovettura targata M-AB 1234 immatricolata in Germania", "M-AB 1234"),
+    ("il veicolo targato AB-123-CD", "AB-123-CD"),
+    ("auto targata WA 12345", "WA 12345"),
+    # varianti della parola-spia
+    ("targa n. AB 12345 di proprietà", "AB 12345"),
+    ("veicoli targati GG 999 HH nel sinistro", "GG 999 HH"),
+])
+def test_targa_da_contesto(text, expected):
+    assert expected in _plates(text)
+
+
+def test_targa_plurale_due_veicoli():
+    assert _plates("le auto targate DR 456 EN e FK 833 XT") == {"DR 456 EN", "FK 833 XT"}
+
+
+@pytest.mark.parametrize("text", [
+    # la parola-spia c'è ma NON segue una targa
+    "l'autovettura targata Fiat Panda di colore rosso",
+    "il veicolo iscritto al PRA in data odierna",
+    "il veicolo di proprietà del convenuto",
+    # formati ambigui SENZA parola-spia: non si redigono
+    "nel procedimento RG 17354 pendente",
+    "protocollo AB 12345 del registro",
+])
+def test_targa_contesto_niente_falsi_positivi(text):
+    assert _plates(text) == set()
+
+
+def test_targa_non_duplicata_se_doppio_match():
+    """Formato auto + parola-spia non devono produrre due entità sovrapposte."""
+    rec = build_license_plate_recognizer()
+    text = "l'autovettura targata DR 456 EN di proprietà"
+    results = rec.analyze(text, ["IT_LICENSE_PLATE"])
+    assert len(results) == 1
+    assert text[results[0].start:results[0].end] == "DR 456 EN"
