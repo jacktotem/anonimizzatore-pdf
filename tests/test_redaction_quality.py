@@ -702,3 +702,49 @@ def test_propagazione_org_distinta_dalle_persone(pagina_sintetica):
     codici = {r["Testo"]: r["Codice"] for r in log}
     assert codici["Rossi"].startswith("ORG-")
     assert codici["Mario"].startswith("PER-")
+
+
+# ------------------------------------------------------------
+# R-15: lessico medico/assicurativo, ruoli tecnici, intestazioni atto
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("entity_type,text", [
+    ("LOCATION", "FRATTURA"),
+    ("LOCATION", "SCOPPIO"),
+    ("PERSON", "CTU"),
+    ("PERSON", "Lucro"),
+    ("PERSON", "Polizze"),
+    ("PERSON", "Avv.ti"),
+])
+def test_falsi_positivi_r15(entity_type, text):
+    assert is_false_positive(entity_type, text) is True
+
+
+def test_trim_intestazione_comparsa():
+    text = "Giudice Dott. Giulio Scaramuzzino COMPARSA DI COSTITUZIONE"
+    s = text.index("Giulio")
+    span = trim_ner_span(text, s, s + len("Giulio Scaramuzzino COMPARSA"))
+    assert text[slice(*span)] == "Giulio Scaramuzzino"
+
+
+def test_trim_avvti_in_testa():
+    text = "dagli Avv.ti Andrea Girardi (C.F. ..."
+    s = text.index("Avv.ti")
+    span = trim_ner_span(text, s, s + len("Avv.ti Andrea Girardi"))
+    assert text[slice(*span)] == "Andrea Girardi"
+
+
+def test_propagazione_senza_punteggiatura(pagina_sintetica):
+    """'Rossi' propagato da un'occorrenza 'Rossi,' appare pulito nel log."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "il dott. Pieri, accertava i postumi", fontsize=11)
+    full_text, entries = build_word_map(page)
+    analysis = {"full_text": full_text, "entries": entries, "results": []}
+    assigner = CodeAssigner()
+    log = []
+    _apply(page, analysis, [], {"pieri"}, log, 1,
+           redaction_mode="codes", assigner=assigner)
+    doc.close()
+    assert log[0]["Testo"] == "Pieri"
+    assert assigner.mapping[0]["Testo originale"] == "Pieri"

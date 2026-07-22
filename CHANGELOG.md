@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-07-22
+
+Quinta iterazione di qualità, dal CSV di una comparsa di costituzione
+(4/4 rilievi dell'utente risolti, R-15).
+
+### Fixed
+- **Lessico medico e assicurativo:** le diagnosi in maiuscolo
+  ("FRATTURA A SCOPPIO DI D12") e i termini di polizza (Lucro
+  cessante, Polizze, indennizzo, massimale, franchigia) non vengono
+  più scambiati per luoghi o persone.
+- **Ruoli tecnici:** "CTU", "CTP" non sono persone — il consulente
+  (es. "Dott. Silvio Pieri") resta ovviamente redatto.
+- **Intestazioni d'atto incollate ai nomi:** "Giulio Scaramuzzino
+  COMPARSA [DI COSTITUZIONE]" → "Giulio Scaramuzzino"; "Avv.ti Andrea
+  Girardi" → "Andrea Girardi" (che ora si unifica con le altre
+  occorrenze in un solo codice).
+- **Punteggiatura nelle propagazioni:** "Pieri," → "Pieri" nella
+  tabella di accoppiamento.
+
 ## [1.9.0] - 2026-07-22
 
 Quarta iterazione di qualità, dal CSV di una comparsa di risposta:
