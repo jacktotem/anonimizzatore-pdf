@@ -525,3 +525,73 @@ def test_targa_non_duplicata_se_doppio_match():
     results = rec.analyze(text, ["IT_LICENSE_PLATE"])
     assert len(results) == 1
     assert text[results[0].start:results[0].end] == "DR 456 EN"
+
+
+# ------------------------------------------------------------
+# R-13: fix dal CSV del ricorso (contatti, ruolo/anno, città, trim)
+# ------------------------------------------------------------
+
+from app import retype_city_as_location  # noqa: E402
+
+
+@pytest.mark.parametrize("entity_type,text", [
+    ("LOCATION", "Tel"),
+    ("LOCATION", "P.IVA"),
+    ("LOCATION", "Trib"),
+    ("LOCATION", "Autorità Giudiziaria"),
+    ("LOCATION", "Foro"),
+    ("PHONE_NUMBER", "3 26972/2008"),   # numero di ruolo, non telefono
+    ("PHONE_NUMBER", "12908/2004"),
+])
+def test_falsi_positivi_r13(entity_type, text):
+    assert is_false_positive(entity_type, text) is True
+
+
+def test_telefono_vecchio_stile_con_slash_resta_valido():
+    # "02/3288652" è un telefono: lo slash non è seguito da un anno
+    assert is_false_positive("PHONE_NUMBER", "02/3288652") is False
+    assert is_false_positive("PHONE_NUMBER", "02.3288652") is False
+
+
+def test_trim_rimuove_punteggiatura_ai_bordi():
+    text = "residente in Milano, dal 2010"
+    s = text.index("Milano,")
+    span = trim_ner_span(text, s, s + len("Milano,"))
+    assert text[slice(*span)] == "Milano"
+
+
+def test_trim_ruolo_patrocinante():
+    text = "C.F.: FRRSFN65B10F205X Patrocinante in Cassazione"
+    s = text.index("FRRSFN65B10F205X")
+    span = trim_ner_span(text, s, s + len("FRRSFN65B10F205X Patrocinante"))
+    assert text[slice(*span)] == "FRRSFN65B10F205X"
+
+
+def test_trim_nome_con_via_appiccicata():
+    text = "Studio Legale Avv. Stefano Carlo Ferrari Via Stelvio 19"
+    s = text.index("Stefano")
+    span = trim_ner_span(text, s, s + len("Stefano Carlo Ferrari Via"))
+    assert text[slice(*span)] == "Stefano Carlo Ferrari"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Milano", "LOCATION"),
+    ("San Martino", "LOCATION"),
+    ("Reggio Calabria", "LOCATION"),
+    ("Sant'Angelo", "LOCATION"),
+    ("Mario Rossi", "PERSON"),          # una persona resta persona
+    ("Milano Rossi", "PERSON"),         # cognome+nome ambiguo: prudenza
+])
+def test_retype_citta(text, expected):
+    assert retype_city_as_location("PERSON", text) == expected
+
+
+def test_citazioni_nazionali_riconosciute():
+    t = "Cass., n. 12908/2004; Trib. Bari, 25.05.2005; Trib. Pordenone, n. 806"
+    for nome in ("Bari", "Pordenone"):
+        s = t.index(nome)
+        assert is_case_citation(t, s, s + len(nome)) is True
+    # una residenza non è una citazione
+    t2 = "il convenuto, residente in Bari alla via Roma 1, ha eccepito"
+    s2 = t2.index("Bari")
+    assert is_case_citation(t2, s2, s2 + len("Bari")) is False
