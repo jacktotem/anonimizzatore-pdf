@@ -26,7 +26,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -145,6 +145,13 @@ FALSE_POSITIVE_STOPWORDS = {
     "ill", "illmo", "illma", "lillmo", "lillma", "illmi",
     "spett", "spettle", "spettabile", "onorevole", "sigg",
     "targa", "targhe", "targato", "targata", "targati", "targate",
+    # atti, ruoli tecnici e lessico assicurativo/medico (R-15)
+    "comparsa", "comparse", "costituzione", "citazione", "memoria",
+    "conclusionale", "ctu", "ctp", "ausiliario", "avvti", "dottssa",
+    "lucro", "cessante", "polizza", "polizze", "indennizzo",
+    "massimale", "franchigia", "frattura", "fratture", "scoppio",
+    "lesione", "lesioni", "postumi", "invalidita", "invalidità",
+    "inabilita", "inabilità",
     # prefissi di indirizzo: l'odonimo resta protetto, il prefisso no
     "via", "viale", "piazza", "piazzale", "corso", "largo", "vicolo",
     "strada", "località", "localita", "frazione", "contrada",
@@ -1541,12 +1548,14 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
             prop_type = "PERSON (propagato)"
         else:
             continue
-        code = assigner.assign(prop_type, entry["text"]) if use_codes else None
+        # R-15: nel log/tabella niente punteggiatura appiccicata ("Pieri," → "Pieri")
+        display = entry["text"].strip(_TOKEN_PUNCT)
+        code = assigner.assign(prop_type, display) if use_codes else None
         add_redaction_for_hits(
             page, entries, [(idx, entry["rect"])], redaction_mode, code
         )
         redacted_word_idx.add(idx)
-        _log(prop_type, entry["text"], "—", code)
+        _log(prop_type, display, "—", code)
 
     page.apply_redactions()
 
@@ -1779,10 +1788,11 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                 prop_type = "PERSON (propagato)"
             else:
                 continue
-            code = assigner.assign(prop_type, w["text"]) if use_codes else None
+            display = w["text"].strip(_TOKEN_PUNCT)
+            code = assigner.assign(prop_type, display) if use_codes else None
             draw_redaction([w], code)
             drawn_idx.add(idx)
-            _log_ocr(prop_type, w["text"], "—", code)
+            _log_ocr(prop_type, display, "—", code)
 
     img_bytes = BytesIO()
     img.save(img_bytes, format="JPEG", quality=85, optimize=True)
