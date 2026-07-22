@@ -595,3 +595,110 @@ def test_citazioni_nazionali_riconosciute():
     t2 = "il convenuto, residente in Bari alla via Roma 1, ha eccepito"
     s2 = t2.index("Bari")
     assert is_case_citation(t2, s2, s2 + len("Bari")) is False
+
+
+# ------------------------------------------------------------
+# R-14: fix dal CSV della comparsa (società, veicoli, onorifici)
+# ------------------------------------------------------------
+
+from app import (  # noqa: E402
+    is_vehicle_description,
+    retype_company_as_org,
+)
+
+
+@pytest.mark.parametrize("entity_type,text", [
+    ("PERSON", "l'Ill.mo"),
+    ("PERSON", "Premessa"),
+    ("PERSON", "Assicurato"),
+    ("LOCATION", "targata"),
+    ("PHONE_NUMBER", "16990"),          # massima di Cassazione, non telefono
+])
+def test_falsi_positivi_r14(entity_type, text):
+    assert is_false_positive(entity_type, text) is True
+
+
+def test_telefono_lungo_senza_separatori_resta_valido():
+    assert is_false_positive("PHONE_NUMBER", "3201234567") is False
+
+
+def test_trim_contro_in_testa():
+    text = "Contro RONCHETTI ELENA rappresentata"
+    span = trim_ner_span(text, 0, len("Contro RONCHETTI ELENA"))
+    assert text[slice(*span)] == "RONCHETTI ELENA"
+
+
+def test_trim_conserva_piazza_in_testa():
+    text = "con sede in Trento, Piazza delle Donne Lavoratrici n. 2"
+    s = text.index("Piazza")
+    span = trim_ner_span(text, s, s + len("Piazza delle Donne Lavoratrici"))
+    assert text[slice(*span)] == "Piazza delle Donne Lavoratrici"
+    # ...ma "Via" in coda a un nome viene ancora rimossa
+    t2 = "Avv. Stefano Carlo Ferrari Via Stelvio"
+    s2 = t2.index("Stefano")
+    span2 = trim_ner_span(t2, s2, s2 + len("Stefano Carlo Ferrari Via"))
+    assert t2[slice(*span2)] == "Stefano Carlo Ferrari"
+
+
+@pytest.mark.parametrize("text,following,expected", [
+    ("ITAS", "Mutua per ivi sentir", "ORGANIZATION"),
+    ("CARROZZERIA MODERNA", "S.N.C. (P.IVA", "ORGANIZATION"),
+    ("MODERNA", "S.N.C.", "ORGANIZATION"),
+    ("Genertel s.p.a.", "", "ORGANIZATION"),
+    ("Ronchetti Elena", "ed ITAS Mutua", "PERSON"),   # una persona resta tale
+])
+def test_retype_societa(text, following, expected):
+    assert retype_company_as_org("PERSON", text, following) == expected
+
+
+def test_veicolo_descrizione_non_redatta():
+    t = "danni causati all'automezzo Jeep Compass in sosta"
+    s = t.index("Jeep")
+    assert is_vehicle_description(t, s) is True
+    # ma il proprietario NON è una descrizione di veicolo
+    t2 = "la vettura del sig. Ciullo Fabio parcheggiata"
+    s2 = t2.index("Ciullo")
+    assert is_vehicle_description(t2, s2) is False
+
+
+def test_targa_congiunzione_vagante():
+    # "targate X e FP185GN": la "e" non entra nella targa
+    assert "FP185GN" in _plates("le vetture targate e FP185GN in colonna")
+    assert "EFP185GN" not in _plates("le vetture targate e FP185GN in colonna")
+
+
+def test_collect_org_tokens_da_coppie_di_parole():
+    """La coppia "ITAS Mutua" nel testo semplice basta a identificare
+    la società, anche senza entità NER."""
+    from app import collect_org_tokens
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "conveniva in giudizio ITAS Mutua e la", fontsize=11)
+    page.insert_text((72, 120), "CARROZZERIA MODERNA S.N.C. nonche' detta societa'", fontsize=11)
+    full_text, entries = build_word_map(page)
+    doc.close()
+    toks = collect_org_tokens({"full_text": full_text, "entries": entries, "results": []})
+    assert "itas" in toks
+    assert "moderna" in toks
+    # "detta" (davanti a "società") non è un nome di società
+    assert "detta" not in toks
+
+
+def test_propagazione_org_distinta_dalle_persone(pagina_sintetica):
+    """Un token di società propagato riceve tipo e codice ORG."""
+    page = pagina_sintetica[0]
+    full_text, entries = build_word_map(page)
+    analysis = {"full_text": full_text, "entries": entries, "results": []}
+    assigner = CodeAssigner()
+    log = []
+
+    _apply(page, analysis, [], {"mario"}, log, 1,
+           redaction_mode="codes", assigner=assigner,
+           known_org_tokens={"rossi"})   # fingiamo che "Rossi" sia una srl
+
+    tipi = {r["Testo"]: r["Tipo"] for r in log}
+    assert tipi["Rossi"] == "ORGANIZATION (propagato)"
+    assert tipi["Mario"] == "PERSON (propagato)"
+    codici = {r["Testo"]: r["Codice"] for r in log}
+    assert codici["Rossi"].startswith("ORG-")
+    assert codici["Mario"].startswith("PER-")
