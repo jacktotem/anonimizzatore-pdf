@@ -26,7 +26,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.8.1"
+__version__ = "1.9.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -138,6 +138,13 @@ FALSE_POSITIVE_STOPWORDS = {
     # intestazioni di contatto e fiscali (R-13)
     "tel", "fax", "cell", "cellulare", "pec", "mail", "email", "web",
     "piva", "iva",
+    # formule di rito, ruoli e onorifici degli atti di parte (R-14)
+    "contro", "premessa", "premesse", "codesto", "codesta",
+    "assicurato", "assicurata", "assicurati", "assicurate",
+    "contraente", "danneggiato", "danneggiata", "danneggiati",
+    "ill", "illmo", "illma", "lillmo", "lillma", "illmi",
+    "spett", "spettle", "spettabile", "onorevole", "sigg",
+    "targa", "targhe", "targato", "targata", "targati", "targate",
     # prefissi di indirizzo: l'odonimo resta protetto, il prefisso no
     "via", "viale", "piazza", "piazzale", "corso", "largo", "vicolo",
     "strada", "località", "localita", "frazione", "contrada",
@@ -225,13 +232,27 @@ def is_false_positive(entity_type, text):
     stripped = text.strip()
     if entity_type == "PHONE_NUMBER" and (
             _DATE_LIKE_RE.fullmatch(stripped)
-            or _DOCKET_LIKE_RE.fullmatch(stripped)):
+            or _DOCKET_LIKE_RE.fullmatch(stripped)
+            # R-14: un numero nudo di ≤7 cifre senza separatori né
+            # prefisso non è un telefono italiano ("n. 16990" è una
+            # massima di Cassazione)
+            or re.fullmatch(r"\d{1,7}", stripped)):
         return True
     if entity_type not in NER_ENTITY_TYPES:
         return False
     if len(stripped) < MIN_TOKEN_LEN:
         return True
     return not any(_is_substantive_token(t) for t in stripped.split())
+
+
+# R-14: i prefissi di indirizzo restano nell'entità quando sono in
+# TESTA ("Piazza delle Donne Lavoratrici" non deve diventare "Donne
+# Lavoratrici"), ma vengono trimmati quando sono in CODA, incollati a
+# un nome ("Stefano Carlo Ferrari Via" → "Stefano Carlo Ferrari").
+_STREET_PREFIXES = {
+    "via", "viale", "piazza", "piazzale", "corso", "largo", "vicolo",
+    "strada", "località", "localita", "frazione", "contrada",
+}
 
 
 def trim_ner_span(full_text, start, end):
@@ -247,6 +268,9 @@ def trim_ner_span(full_text, start, end):
     """
     tokens = list(re.finditer(r"\S+", full_text[start:end]))
     while tokens and not _is_substantive_token(tokens[0].group()):
+        # R-14: "Piazza/Via/..." in testa apre un indirizzo: si tiene
+        if _clean_token(tokens[0].group()) in _STREET_PREFIXES:
+            break
         tokens.pop(0)
     while tokens and not _is_substantive_token(tokens[-1].group()):
         tokens.pop()
@@ -326,6 +350,107 @@ _CAPOLUOGHI = {
 }
 
 _SAN_PREFIXES = {"san", "santa", "santo", "sant"}
+
+
+# R-14: società etichettate come persone ("ITAS", "CARROZZERIA
+# MODERNA"). Il marcatore societario può stare dentro l'entità o
+# subito dopo ("ITAS" seguita da "Mutua", "MODERNA" seguita da
+# "S.N.C."): in entrambi i casi il tipo giusto è ORGANIZATION.
+# L'entità resta redatta (codice [ORG-nn]) ma non inquina più la
+# propagazione dei nomi di persona.
+_ORG_MARKERS = {
+    "mutua", "spa", "srl", "srls", "snc", "sas", "sapa", "scarl",
+    "scpa", "coop", "cooperativa", "consorzio", "assicurazione",
+    "assicurazioni", "banca", "carrozzeria", "officina", "impresa",
+    "ditta", "azienda", "gruppo", "holding", "fondazione",
+    "associazione", "condominio", "istituto", "ente", "societa",
+    "società", "compagnia",
+}
+
+
+def _has_org_marker(token):
+    clean = _clean_token(token)
+    letters = "".join(c for c in clean if c.isalpha())
+    return clean in _ORG_MARKERS or letters in _ORG_MARKERS
+
+
+def retype_company_as_org(entity_type, text, following_text=""):
+    """PERSON che è in realtà una società → ORGANIZATION."""
+    if entity_type != "PERSON":
+        return entity_type
+    if any(_has_org_marker(t) for t in text.split()):
+        return "ORGANIZATION"
+    # marcatore subito dopo l'entità ("ITAS ⌇Mutua", "MODERNA ⌇S.N.C.")
+    following = following_text.split()
+    if following and _has_org_marker(following[0]):
+        return "ORGANIZATION"
+    return entity_type
+
+
+# R-14: marca/modello del veicolo non sono dati di persona
+# ("automezzo Jeep Compass"): se l'entità segue DIRETTAMENTE una
+# parola-veicolo, non va redatta (la targa è protetta a parte).
+_VEHICLE_BEFORE_RE = re.compile(
+    r"(automezzo|autovettura|vettura|veicolo|automobile|autocarro"
+    r"|motociclo|ciclomotore|modello|marca)\s+$", re.IGNORECASE
+)
+
+
+def is_vehicle_description(full_text, start):
+    """True se l'entità è preceduta direttamente da una parola-veicolo."""
+    return bool(_VEHICLE_BEFORE_RE.search(full_text[max(0, start - 25):start]))
+
+
+# Parole che precedono un marcatore societario senza essere il nome
+# della società ("detta società", "la compagnia")
+_ORG_TOKEN_EXCLUDE = {
+    "detta", "predetta", "suddetta", "tale", "altra", "stessa",
+    "medesima", "citata", "propria", "nostra", "vostra", "loro",
+}
+
+
+def collect_org_tokens(analysis):
+    """
+    R-14: token delle società, per la propagazione doc-wide
+    ("ITAS Mutua" a pag. 1 rende ORGANIZATION anche la "ITAS" nuda a
+    pag. 3). Due fonti:
+    1. entità già ri-tipizzate ORGANIZATION;
+    2. scansione del testo semplice: parola maiuscola seguita da un
+       marcatore societario ("ITAS ⌇Mutua", "MODERNA ⌇S.N.C.") — copre
+       i casi in cui il NER non ha prodotto alcuna entità lì.
+    """
+    tokens = set()
+    full_text = analysis["full_text"]
+    for r in analysis["results"]:
+        if r.entity_type != "ORGANIZATION":
+            continue
+        for token in full_text[r.start:r.end].split():
+            clean = _clean_token(token)
+            if len(clean) >= MIN_TOKEN_LEN and clean not in _ORG_MARKERS:
+                tokens.add(clean)
+    entries = analysis["entries"]
+    for prev, cur in zip(entries, entries[1:]):
+        if not _has_org_marker(cur["text"]):
+            continue
+        clean = _clean_token(prev["text"])
+        if (len(clean) >= MIN_TOKEN_LEN
+                and prev["text"][:1].isupper()
+                and clean not in _ORG_MARKERS
+                and clean not in _ORG_TOKEN_EXCLUDE
+                and clean not in FALSE_POSITIVE_STOPWORDS):
+            tokens.add(clean)
+    return tokens
+
+
+def is_known_org(entity_text, org_tokens):
+    """True se TUTTI i token sostanziali dell'entità sono di società note."""
+    if not org_tokens:
+        return False
+    substantive = [
+        _clean_token(t) for t in entity_text.split()
+        if _is_substantive_token(t)
+    ]
+    return bool(substantive) and all(t in org_tokens for t in substantive)
 
 
 def retype_city_as_location(entity_type, text):
@@ -497,6 +622,7 @@ ENTITY_CODE_PREFIXES = {
     "DATE_TIME": "DATA",
     "NRP": "NRP",
     "ORGANIZATION": "ORG",
+    "ORGANIZATION (propagato)": "ORG",
     "EMAIL_ADDRESS": "EMAIL",
     "PHONE_NUMBER": "TEL",
     "IT_FISCAL_CODE": "CF",
@@ -867,6 +993,12 @@ def _plate_span_after(text, pos):
     puri come i protocolli).
     """
     window = text[pos:pos + _PLATE_LOOKAHEAD]
+    # R-14: salta una congiunzione/lettera vagante subito dopo la
+    # parola-spia ("le auto targate X e FP185GN" → non catturare "e")
+    lead = re.match(r"\s*[A-Za-z]\s+", window)
+    if lead:
+        pos += lead.end()
+        window = text[pos:pos + _PLATE_LOOKAHEAD]
     tokens = []
     for m in re.finditer(r"\S+", window):
         chunk = m.group().strip(".,;:()[]«»\"'")
@@ -1265,9 +1397,17 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
                         and is_case_citation(full_text, r.start, r.end)):
                     dropped_fp += 1
                     continue
-                # R-13: città etichettate come persone → LOCATION
+                # R-14: marca/modello dopo "automezzo/vettura/..." non si redige
+                if (r.entity_type in NER_ENTITY_TYPES
+                        and is_vehicle_description(full_text, r.start)):
+                    dropped_fp += 1
+                    continue
+                # R-13/R-14: città → LOCATION, società → ORGANIZATION
                 r.entity_type = retype_city_as_location(
                     r.entity_type, full_text[r.start:r.end])
+                r.entity_type = retype_company_as_org(
+                    r.entity_type, full_text[r.start:r.end],
+                    full_text[r.end:r.end + 25])
                 results.append(r)
 
         except Exception as e:
@@ -1310,7 +1450,7 @@ def collect_person_tokens(analysis):
 
 def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
                           log, page_num, redaction_mode="blackout",
-                          assigner=None):
+                          assigner=None, known_org_tokens=None):
     """
     Applica le redazioni a una pagina testuale usando le coordinate.
 
@@ -1386,19 +1526,27 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
         redacted_word_idx.update(idx for idx, _r in word_hits)
         _log(result.entity_type, found_text, f"{result.score:.0%}", code)
 
-    # 4. R-04: propagazione dei nomi rilevati altrove nel documento
+    # 4. R-04/R-14: propagazione di nomi e società rilevati altrove
     #    (solo parole intere con iniziale maiuscola, mai sottostringhe)
+    known_org_tokens = known_org_tokens or set()
     for idx, entry in enumerate(entries):
         if idx in redacted_word_idx:
             continue
         clean = _clean_token(entry["text"])
-        if clean in known_person_tokens and entry["text"][:1].isupper():
-            code = assigner.assign("PERSON (propagato)", entry["text"]) if use_codes else None
-            add_redaction_for_hits(
-                page, entries, [(idx, entry["rect"])], redaction_mode, code
-            )
-            redacted_word_idx.add(idx)
-            _log("PERSON (propagato)", entry["text"], "—", code)
+        if not entry["text"][:1].isupper():
+            continue
+        if clean in known_org_tokens:
+            prop_type = "ORGANIZATION (propagato)"
+        elif clean in known_person_tokens:
+            prop_type = "PERSON (propagato)"
+        else:
+            continue
+        code = assigner.assign(prop_type, entry["text"]) if use_codes else None
+        add_redaction_for_hits(
+            page, entries, [(idx, entry["rect"])], redaction_mode, code
+        )
+        redacted_word_idx.add(idx)
+        _log(prop_type, entry["text"], "—", code)
 
     page.apply_redactions()
 
@@ -1411,9 +1559,10 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                          analyzer, min_score, dpi, lang, log, page_num,
                          debug_first=False, known_person_tokens=None,
                          redaction_mode="blackout", assigner=None,
-                         magistrate_tokens=None):
+                         magistrate_tokens=None, known_org_tokens=None):
     """OCR su pagina scansionata + redazione con rettangoli su immagine."""
     known_person_tokens = known_person_tokens or set()
+    known_org_tokens = known_org_tokens or set()
     use_codes = redaction_mode == "codes" and assigner is not None
     zoom = dpi / 72
     mat = fitz.Matrix(zoom, zoom)
@@ -1538,9 +1687,16 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                             and is_magistrate(full_text[r.start:r.end],
                                               local_magistrates)):
                         continue
-                    # R-13: città etichettate come persone → LOCATION
+                    # R-14: marca/modello dopo "automezzo/..." non si redige
+                    if (r.entity_type in NER_ENTITY_TYPES
+                            and is_vehicle_description(full_text, r.start)):
+                        continue
+                    # R-13/R-14: città → LOCATION, società → ORGANIZATION
                     r.entity_type = retype_city_as_location(
                         r.entity_type, full_text[r.start:r.end])
+                    r.entity_type = retype_company_as_org(
+                        r.entity_type, full_text[r.start:r.end],
+                        full_text[r.end:r.end + 25])
                     results.append(r)
                 filtered_count = len(results)
 
@@ -1609,17 +1765,24 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                 drawn_idx.update(matching_idx)
                 _log_ocr(result.entity_type, found_text, f"{result.score:.0%}", code)
 
-        # 4. R-04: propagazione dei nomi rilevati nelle pagine testuali
+        # 4. R-04/R-14: propagazione di nomi e società
         # (parole intere con iniziale maiuscola, mai sottostringhe)
         for idx, w in enumerate(words):
             if idx in drawn_idx:
                 continue
             clean = _clean_token(w["text"])
-            if clean in known_person_tokens and w["text"][:1].isupper():
-                code = assigner.assign("PERSON (propagato)", w["text"]) if use_codes else None
-                draw_redaction([w], code)
-                drawn_idx.add(idx)
-                _log_ocr("PERSON (propagato)", w["text"], "—", code)
+            if not w["text"][:1].isupper():
+                continue
+            if clean in known_org_tokens:
+                prop_type = "ORGANIZATION (propagato)"
+            elif clean in known_person_tokens:
+                prop_type = "PERSON (propagato)"
+            else:
+                continue
+            code = assigner.assign(prop_type, w["text"]) if use_codes else None
+            draw_redaction([w], code)
+            drawn_idx.add(idx)
+            _log_ocr(prop_type, w["text"], "—", code)
 
     img_bytes = BytesIO()
     img.save(img_bytes, format="JPEG", quality=85, optimize=True)
@@ -1673,6 +1836,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     page_plans = {}  # page_index -> {"use_ocr": bool, "analysis": dict|None}
     known_person_tokens = set()
     magistrate_tokens = set()
+    org_tokens = set()
 
     for page_index, src_page in enumerate(src_doc):
         page_num = page_index + 1
@@ -1701,6 +1865,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                 page_num, debug_first=(page_num == 1),
             )
             known_person_tokens |= collect_person_tokens(analysis)
+            org_tokens |= collect_org_tokens(analysis)
             if exclude_magistrates:
                 magistrate_tokens |= collect_magistrate_tokens(analysis["full_text"])
             total_raw += analysis["raw"]
@@ -1716,6 +1881,22 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 
     # I termini personalizzati non vanno propagati come nomi, ma i
     # nomi utente sono comunque cercati parola-per-parola (vedi sotto).
+
+    # R-14: propagazione doc-wide del tipo ORGANIZATION — "ITAS Mutua"
+    # a pag. 1 identifica come società anche la "ITAS" nuda a pag. 3
+    # (che altrimenti resterebbe PERSON, con un secondo codice e
+    # l'inquinamento della propagazione dei nomi).
+    if org_tokens:
+        for plan in page_plans.values():
+            analysis = plan.get("analysis")
+            if not analysis:
+                continue
+            for r in analysis["results"]:
+                if (r.entity_type == "PERSON"
+                        and is_known_org(
+                            analysis["full_text"][r.start:r.end], org_tokens)):
+                    r.entity_type = "ORGANIZATION"
+        known_person_tokens -= org_tokens
 
     # R-10: con l'opzione attiva, i nomi del collegio giudicante non
     # vengono redatti. Il filtro avviene QUI, a valle della passata di
@@ -1755,6 +1936,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                 redaction_mode=redaction_mode,
                 assigner=assigner,
                 magistrate_tokens=magistrate_tokens if exclude_magistrates else None,
+                known_org_tokens=org_tokens,
             )
             total_raw += raw
             total_filtered += filtered
@@ -1774,6 +1956,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                 known_person_tokens, log, page_num,
                 redaction_mode=redaction_mode,
                 assigner=assigner,
+                known_org_tokens=org_tokens,
             )
             pages_text += 1
 

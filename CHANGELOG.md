@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-07-22
+
+Quarta iterazione di qualità, dal CSV di una comparsa di risposta:
+tutti i 6 rilievi dell'utente risolti (R-14).
+
+### Added
+- **Società riconosciute e propagate come ORGANIZATION:** "ITAS",
+  "CARROZZERIA MODERNA" ecc. non sono più etichettate come persone. Il
+  riconoscimento usa i marcatori societari (Mutua, S.p.A., S.n.c.,
+  Assicurazioni, Istituto, ...) dentro l'entità, subito dopo, o in una
+  scansione del testo semplice ("ITAS Mutua" a pag. 1 identifica come
+  società anche la "ITAS" nuda a pag. 3). Codici `[ORG-nn]` in
+  pseudonimizzazione; i nomi delle società non inquinano più la
+  propagazione dei nomi di persona.
+
+### Fixed
+- **Onorifici e formule di parte:** "l'Ill.mo", "Spett.le", "Contro",
+  "Premessa", "Assicurato", "danneggiato", "targata" non vengono più
+  scambiati per nomi o luoghi.
+- **Massime scambiate per telefoni:** un numero nudo di ≤7 cifre
+  ("Cass. SS.UU. n. 16990") non è un telefono italiano.
+- **Indirizzi interi:** "Piazza delle Donne Lavoratrici" resta
+  un'unica entità con il prefisso in testa (non più "Donne
+  Lavoratrici"); in coda ai nomi i prefissi di via restano trimmati.
+- **Marca/modello del veicolo:** "automezzo Jeep Compass" non produce
+  una persona "Jeep" (la targa resta protetta a parte).
+- **Targhe con congiunzione vagante:** "targate e FP185GN" cattura
+  "FP185GN", non "EFP185GN".
+
 ## [1.8.1] - 2026-07-21
 
 Terza release di qualità del rilevamento, guidata dal CSV di un
