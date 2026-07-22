@@ -26,7 +26,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -132,7 +132,15 @@ FALSE_POSITIVE_STOPWORDS = {
     "cass", "cassazione", "sez", "civ", "pen", "pqm", "epigrafe",
     "vero", "stato", "illustrissimi", "illustrissimo", "signori",
     "signore", "signora", "lussemburgo", "strasburgo", "giustizia",
-    "cedu", "cgue", "corte", "europea", "unione",
+    "cedu", "cgue", "corte", "europea", "unione", "trib", "app",
+    "autorita", "autorità", "giudiziaria", "giudiziario",
+    "giurisdizioni", "superiori", "foro", "patrocinante", "patrocinio",
+    # intestazioni di contatto e fiscali (R-13)
+    "tel", "fax", "cell", "cellulare", "pec", "mail", "email", "web",
+    "piva", "iva",
+    # prefissi di indirizzo: l'odonimo resta protetto, il prefisso no
+    "via", "viale", "piazza", "piazzale", "corso", "largo", "vicolo",
+    "strada", "località", "localita", "frazione", "contrada",
     # termini processuali
     "sentenza", "ordinanza", "decreto", "ricorso", "controricorso",
     "interlocutoria", "interlocutorio", "appellante", "appellata",
@@ -175,6 +183,10 @@ _ROMAN_NUMERAL_RE = re.compile(
 # (es. "3.9.2009")
 _DATE_LIKE_RE = re.compile(r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}")
 
+# R-13: numeri di ruolo/registro scambiati per telefoni ("3 26972/2008"):
+# qualsiasi cosa che termina con /anno è una citazione, non un telefono
+_DOCKET_LIKE_RE = re.compile(r".*\d\s*/\s*(19|20)\d{2}\b.*")
+
 
 def _clean_token(token):
     """Normalizza un token: rimuove punteggiatura ai bordi e minuscolizza."""
@@ -211,7 +223,9 @@ def is_false_positive(entity_type, text):
     data, non un telefono.
     """
     stripped = text.strip()
-    if entity_type == "PHONE_NUMBER" and _DATE_LIKE_RE.fullmatch(stripped):
+    if entity_type == "PHONE_NUMBER" and (
+            _DATE_LIKE_RE.fullmatch(stripped)
+            or _DOCKET_LIKE_RE.fullmatch(stripped)):
         return True
     if entity_type not in NER_ENTITY_TYPES:
         return False
@@ -238,7 +252,16 @@ def trim_ner_span(full_text, start, end):
         tokens.pop()
     if not tokens:
         return None
-    return start + tokens[0].start(), start + tokens[-1].end()
+    new_start = start + tokens[0].start()
+    new_end = start + tokens[-1].end()
+    # R-13: la punteggiatura ai bordi non entra nell'entità
+    # ("Milano," → "Milano")
+    span = full_text[new_start:new_end]
+    lead = len(span) - len(span.lstrip(_TOKEN_PUNCT))
+    trail = len(span) - len(span.rstrip(_TOKEN_PUNCT))
+    if lead + trail >= len(span):
+        return None
+    return new_start + lead, new_end - trail
 
 
 # R-08: citazioni giurisprudenziali — nomi di precedenti pubblicati
@@ -253,8 +276,12 @@ def trim_ner_span(full_text, start, end):
 # citazione, quell'occorrenza viene comunque coperta dalla propagazione
 # dei nomi (R-04), che lavora su tutte le altre occorrenze rilevate.
 _ECJ_CASE_RE = re.compile(r"\bC\s?[-‑]\s?\d{1,4}\s?/\s?\d{0,4}")
+# R-13: aggiunti i marcatori delle citazioni nazionali — "Cass., n.
+# 12908/2004; Trib. Bari, 25.05.2005" è giurisprudenza, non un luogo
+# da proteggere.
 _CITATION_MARKER_RE = re.compile(
-    r"\b(CGUE|CEDU|Corte\s+giust\w*|in\s+causa|cause\s+riunite)", re.IGNORECASE
+    r"\b(CGUE|CEDU|Corte\s+giust\w*|in\s+causa|cause\s+riunite"
+    r"|Cass\.|Trib\.|Sez\.\s*Un)", re.IGNORECASE
 )
 _VERSUS_RE = re.compile(r"\s[cC]\.\s")
 _CITATION_WINDOW = 90
@@ -267,6 +294,51 @@ def is_case_citation(full_text, start, end):
         return True  # "Farrell c. Whitty", "FY c. Profi Credit Polska"
     window = full_text[max(0, start - _CITATION_WINDOW):end + _CITATION_WINDOW]
     return bool(_ECJ_CASE_RE.search(window) or _CITATION_MARKER_RE.search(window))
+
+
+# ============================================================
+# RI-TIPO CITTÀ (R-13)
+# ============================================================
+# spaCy a volte etichetta le città come PERSON ("Milano", "San
+# Martino"): l'entità viene comunque redatta, ma nella tabella di
+# accoppiamento il tipo (e il prefisso del codice) risultano sbagliati
+# e il token finirebbe nella propagazione dei nomi di persona.
+# Ri-tipizziamo a LOCATION i capoluoghi e i toponimi "San/Santa...".
+
+_CAPOLUOGHI = {
+    "agrigento", "alessandria", "ancona", "aosta", "arezzo", "ascoli piceno",
+    "asti", "avellino", "bari", "barletta", "belluno", "benevento", "bergamo",
+    "biella", "bologna", "bolzano", "brescia", "brindisi", "cagliari",
+    "caltanissetta", "campobasso", "caserta", "catania", "catanzaro", "chieti",
+    "como", "cosenza", "cremona", "crotone", "cuneo", "enna", "fermo",
+    "ferrara", "firenze", "foggia", "forlì", "forli", "frosinone", "genova",
+    "gorizia", "grosseto", "imperia", "isernia", "la spezia", "l'aquila",
+    "laquila", "latina", "lecce", "lecco", "livorno", "lodi", "lucca",
+    "macerata", "mantova", "massa", "matera", "messina", "milano", "modena",
+    "monza", "napoli", "novara", "nuoro", "oristano", "padova", "palermo",
+    "parma", "pavia", "perugia", "pesaro", "pescara", "piacenza", "pisa",
+    "pistoia", "pordenone", "potenza", "prato", "ragusa", "ravenna",
+    "reggio calabria", "reggio emilia", "rieti", "rimini", "roma", "rovigo",
+    "salerno", "sassari", "savona", "siena", "siracusa", "sondrio", "taranto",
+    "teramo", "terni", "torino", "trani", "trapani", "trento", "treviso",
+    "trieste", "udine", "varese", "venezia", "verbania", "vercelli", "verona",
+    "vibo valentia", "vicenza", "viterbo",
+}
+
+_SAN_PREFIXES = {"san", "santa", "santo", "sant"}
+
+
+def retype_city_as_location(entity_type, text):
+    """Ritorna il tipo corretto: PERSON che è in realtà una città → LOCATION."""
+    if entity_type != "PERSON":
+        return entity_type
+    norm = " ".join(t for t in (_clean_token(tok) for tok in text.split()) if t)
+    if norm in _CAPOLUOGHI:
+        return "LOCATION"
+    first = norm.split()[0] if norm else ""
+    if first in _SAN_PREFIXES or first.startswith("sant'"):
+        return "LOCATION"
+    return entity_type
 
 
 # ============================================================
@@ -1193,6 +1265,9 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
                         and is_case_citation(full_text, r.start, r.end)):
                     dropped_fp += 1
                     continue
+                # R-13: città etichettate come persone → LOCATION
+                r.entity_type = retype_city_as_location(
+                    r.entity_type, full_text[r.start:r.end])
                 results.append(r)
 
         except Exception as e:
@@ -1463,6 +1538,9 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                             and is_magistrate(full_text[r.start:r.end],
                                               local_magistrates)):
                         continue
+                    # R-13: città etichettate come persone → LOCATION
+                    r.entity_type = retype_city_as_location(
+                        r.entity_type, full_text[r.start:r.end])
                     results.append(r)
                 filtered_count = len(results)
 

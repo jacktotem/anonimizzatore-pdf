@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-07-21
+
+Terza release di qualità del rilevamento, guidata dal CSV di un
+ricorso reale (tutti i 9 rilievi dell'utente risolti).
+
+### Fixed
+- **R-13 — Intestazioni di contatto e fiscali:** "Tel", "Fax", "PEC",
+  "P.IVA", "Trib", "Foro", "Autorità Giudiziaria", "Patrocinante" non
+  vengono più scambiati per luoghi o persone.
+- **R-13 — Numeri di ruolo scambiati per telefoni:** un numero che
+  termina con /anno ("3 26972/2008", "12908/2004") è una citazione,
+  non un telefono. I telefoni veri, anche vecchio stile con slash
+  ("02/3288652"), restano rilevati.
+- **R-13 — Prefissi di indirizzo:** "Via/Piazza/Corso..." non entrano
+  più nelle entità ("Stefano Carlo Ferrari Via" → "Stefano Carlo
+  Ferrari"); l'odonimo resta protetto, il prefisso resta leggibile.
+- **R-13 — Città etichettate come persone:** "Milano", "San Martino"
+  e i capoluoghi vengono ri-tipizzati a LOCATION (codice [LOC-nn]
+  invece di [PER-nn]) e non inquinano più la propagazione dei nomi.
+- **R-13 — Citazioni nazionali:** "Cass., n. 12908/2004; Trib. Bari,
+  25.05.2005" è giurisprudenza — le sedi giudiziarie citate (Bari,
+  Pordenone) non vengono più redatte, come già i precedenti CGUE.
+- **Punteggiatura ai bordi:** "Milano," → "Milano" nella tabella di
+  accoppiamento.
+
 ## [1.8.0] - 2026-07-21
 
 ### Changed
