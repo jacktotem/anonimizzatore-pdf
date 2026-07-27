@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import logging
+import zipfile
 from io import BytesIO, StringIO
 from collections import Counter
 from presidio_analyzer import (
@@ -26,7 +27,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "1.9.1"
+__version__ = "2.0.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -664,6 +665,10 @@ class CodeAssigner:
         self._counters = {}
         self._entries_by_code = {}
         self._person_token_codes = {}  # token -> set di codici che lo contengono
+        # R-16: con un assigner condiviso tra più documenti, teniamo traccia
+        # di dove ogni codice compare (colonna "Documenti" del CSV).
+        self.current_document = None
+        self._docs_by_code = {}
 
     @staticmethod
     def _normalize(text):
@@ -710,13 +715,23 @@ class CodeAssigner:
                 self._person_token_codes.setdefault(token, set()).add(code)
 
         self._entries_by_code[code]["Occorrenze"] += 1
+        if self.current_document:
+            self._docs_by_code.setdefault(code, []).append(self.current_document)
         return code
 
     @property
     def mapping(self):
         """Tabella di accoppiamento: lista di dict ordinata per codice."""
+        entries = []
+        for code, entry in self._entries_by_code.items():
+            row = dict(entry)
+            docs = self._docs_by_code.get(code)
+            if docs:
+                # ordine di apparizione, senza duplicati
+                row["Documenti"] = " · ".join(dict.fromkeys(docs))
+            entries.append(row)
         return sorted(
-            self._entries_by_code.values(),
+            entries,
             key=lambda e: (e["Codice"].split("-")[0], e["Codice"]),
         )
 
@@ -1809,12 +1824,15 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
 
 def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                min_score=0.4, ocr_mode="auto", ocr_dpi=300, ocr_lang="ita",
-               redaction_mode="blackout", exclude_magistrates=False):
+               redaction_mode="blackout", exclude_magistrates=False,
+               assigner=None):
     """
     Anonimizza un PDF. Gestisce sia pagine testuali che scansionate.
     ocr_mode: 'auto' | 'always' | 'never'
     redaction_mode: 'blackout' (rettangoli neri) | 'codes' (pseudonimizzazione)
     exclude_magistrates: R-10 — non redigere i nomi del collegio giudicante
+    assigner: R-16 — CodeAssigner condiviso, per dare gli STESSI codici a più
+        documenti dello stesso fascicolo (se None ne viene creato uno nuovo).
 
     Ritorna (bytes_pdf, log, mapping) dove mapping è la tabella di
     accoppiamento codice↔testo (vuota in modalità blackout).
@@ -1822,7 +1840,10 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     src_doc = fitz.open(stream=input_bytes, filetype="pdf")
     out_doc = fitz.open()
     log = []
-    assigner = CodeAssigner() if redaction_mode == "codes" else None
+    if redaction_mode == "codes" and assigner is None:
+        assigner = CodeAssigner()
+    elif redaction_mode != "codes":
+        assigner = None
 
     st.write(f"📄 Documento: {len(src_doc)} pagine")
     st.write(f"🎯 Entità cercate ({len(selected_entities)}): {', '.join(selected_entities)}")
@@ -2191,13 +2212,26 @@ selected_entities = [entity for flag, entity in entity_map if flag]
 # --- MAIN ---
 col1, col2 = st.columns([1, 1])
 
+MAX_BATCH_FILES = 5
+
 with col1:
-    st.subheader("📄 Documento")
-    uploaded_file = st.file_uploader(
-        "Carica il PDF da anonimizzare",
+    st.subheader("📄 Documenti")
+    uploaded_files = st.file_uploader(
+        f"Carica fino a {MAX_BATCH_FILES} PDF da anonimizzare",
         type=["pdf"],
+        accept_multiple_files=True,
         label_visibility="collapsed",
     )
+    uploaded_files = uploaded_files or []
+    if len(uploaded_files) > MAX_BATCH_FILES:
+        st.error(
+            f"⚠️ Hai caricato {len(uploaded_files)} file: il massimo è "
+            f"{MAX_BATCH_FILES}. Verranno elaborati solo i primi "
+            f"{MAX_BATCH_FILES}; rimuovi gli altri o falli in un secondo giro."
+        )
+        uploaded_files = uploaded_files[:MAX_BATCH_FILES]
+    elif len(uploaded_files) > 1:
+        st.caption(f"📚 {len(uploaded_files)} documenti in coda")
 
 with col2:
     st.subheader("🎯 Termini specifici")
@@ -2209,6 +2243,22 @@ with col2:
     )
 
 custom_terms = [t for t in custom_terms_text.split("\n") if t.strip()] if custom_terms_text else []
+
+# R-16: con più documenti in modalità codici, l'utente sceglie se i codici
+# valgono per l'intero fascicolo (stessa persona = stesso codice in tutti i
+# file) o se ogni documento è indipendente.
+shared_codes = True
+if len(uploaded_files) > 1 and redaction_mode == "codes":
+    shared_codes = st.checkbox(
+        "🔗 Codici condivisi tra i documenti (stesso fascicolo)",
+        value=True,
+        help=(
+            "Attivo: la stessa persona riceve lo stesso codice in tutti i "
+            "documenti caricati e viene generata un'unica tabella di "
+            "accoppiamento — utile per gli atti della stessa causa. "
+            "Disattivato: ogni documento ha codici e tabella indipendenti."
+        ),
+    )
 
 if selected_entities or custom_terms:
     summary = []
@@ -2281,128 +2331,239 @@ st.divider()
 # il caso in cui qualcuno esegua `streamlit run` senza il config (es. fuori
 # dal repo). Tenere MAX_PDF_BYTES in sync con il valore di config.toml.
 MAX_PDF_BYTES = 100 * 1024 * 1024  # 100 MB
-if uploaded_file is not None:
-    if uploaded_file.size > MAX_PDF_BYTES:
+
+
+def mapping_to_csv_bytes(mapping, with_document=False):
+    """Tabella di accoppiamento in CSV (BOM utf-8, così Excel la apre bene)."""
+    fields = ["Codice", "Tipo", "Testo originale", "Occorrenze"]
+    if with_document:
+        fields.append("Documenti")
+    buf = StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fields, delimiter=";",
+                            extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(mapping)
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def build_results_zip(risultati, shared_mapping=None):
+    """R-16: ZIP con tutti i PDF elaborati (+ tabelle di accoppiamento)."""
+    zip_buf = BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for res in risultati:
+            prefix = "pseudonimizzato" if res["redaction_mode"] == "codes" else "anonimizzato"
+            zf.writestr(f"{prefix}_{res['source_name']}", res["output_bytes"])
+            if shared_mapping is None and res["mapping"]:
+                base = os.path.splitext(res["source_name"])[0]
+                zf.writestr(f"accoppiamento_{base}.csv",
+                            mapping_to_csv_bytes(res["mapping"]))
+        if shared_mapping:
+            zf.writestr("accoppiamento_fascicolo.csv",
+                        mapping_to_csv_bytes(shared_mapping, with_document=True))
+    return zip_buf.getvalue()
+
+
+if uploaded_files:
+    troppo_grandi = [f for f in uploaded_files if f.size > MAX_PDF_BYTES]
+    if troppo_grandi:
         st.error(
-            f"⚠️ PDF troppo grande ({uploaded_file.size / 1024**2:.0f} MB). "
-            f"Limite: {MAX_PDF_BYTES // 1024**2} MB. "
-            "Per file più grandi, suddividili o aumenta `maxUploadSize` "
-            "in `.streamlit/config.toml`."
+            "⚠️ PDF troppo grandi (limite "
+            f"{MAX_PDF_BYTES // 1024**2} MB): "
+            + ", ".join(f"{f.name} ({f.size / 1024**2:.0f} MB)" for f in troppo_grandi)
+            + ". Suddividili o aumenta `maxUploadSize` in `.streamlit/config.toml`."
         )
         st.stop()
     if not selected_entities and not custom_terms:
         st.error("⚠️ Seleziona almeno una categoria nella sidebar o inserisci un termine specifico.")
     else:
-        if st.button("🔒 Anonimizza documento", type="primary", use_container_width=True):
+        n_docs = len(uploaded_files)
+        etichetta = ("🔒 Anonimizza documento" if n_docs == 1
+                     else f"🔒 Anonimizza {n_docs} documenti")
+        # firma del set di file: cambia → i vecchi risultati non valgono più
+        firma_upload = [(f.name, f.size) for f in uploaded_files]
+
+        if st.button(etichetta, type="primary", use_container_width=True):
 
             with st.status("Caricamento motore di analisi...", expanded=False) as status:
                 analyzer = initialize_analyzer()
                 status.update(label="✅ Motore pronto", state="complete")
 
-            input_bytes = uploaded_file.read()
-            output_bytes, log, mapping = redact_pdf(
-                input_bytes,
-                selected_entities,
-                custom_terms,
-                analyzer,
-                min_score=min_score,
-                ocr_mode=ocr_mode,
-                ocr_dpi=ocr_dpi,
-                ocr_lang="ita" if ITALIAN_AVAILABLE else "eng",
-                redaction_mode=redaction_mode,
-                exclude_magistrates=exclude_magistrates,
+            # R-16: un solo CodeAssigner per tutto il fascicolo, se richiesto
+            assigner_condiviso = (
+                CodeAssigner()
+                if (redaction_mode == "codes" and n_docs > 1 and shared_codes)
+                else None
             )
 
+            risultati = []
+            barra_batch = st.progress(0.0) if n_docs > 1 else None
+            for i, f in enumerate(uploaded_files, start=1):
+                if n_docs > 1:
+                    st.markdown(f"##### 📄 {i}/{n_docs} — {f.name}")
+                if assigner_condiviso is not None:
+                    assigner_condiviso.current_document = f.name
+                output_bytes, log, mapping = redact_pdf(
+                    f.read(),
+                    selected_entities,
+                    custom_terms,
+                    analyzer,
+                    min_score=min_score,
+                    ocr_mode=ocr_mode,
+                    ocr_dpi=ocr_dpi,
+                    ocr_lang="ita" if ITALIAN_AVAILABLE else "eng",
+                    redaction_mode=redaction_mode,
+                    exclude_magistrates=exclude_magistrates,
+                    assigner=assigner_condiviso,
+                )
+                # con codici condivisi il mapping cresce a ogni documento:
+                # teniamo traccia di quali codici sono NUOVI in questo file
+                risultati.append({
+                    "output_bytes": output_bytes,
+                    "log": log,
+                    "mapping": mapping,
+                    "redaction_mode": redaction_mode,
+                    "source_name": f.name,
+                })
+                if barra_batch:
+                    barra_batch.progress(i / n_docs)
+            if barra_batch:
+                barra_batch.empty()
+
+            mapping_condiviso = None
+            if assigner_condiviso is not None:
+                mapping_condiviso = assigner_condiviso.mapping
+
             # FIX rerun: ogni click su un download_button riesegue lo script
-            # da capo, e st.button torna False — se i risultati vivessero solo
-            # dentro questo if, dopo "Scarica PDF" sparirebbe anche il bottone
-            # del CSV di accoppiamento. Li salviamo in session_state e li
-            # renderizziamo SEMPRE (blocco sotto), finché il file non cambia.
-            st.session_state["risultato"] = {
-                "output_bytes": output_bytes,
-                "log": log,
-                "mapping": mapping,
-                "redaction_mode": redaction_mode,
-                "source_name": uploaded_file.name,
-                "source_size": uploaded_file.size,
+            # da capo, e st.button torna False — i risultati vivono in
+            # session_state e vengono renderizzati SEMPRE (blocco sotto).
+            st.session_state["risultati"] = {
+                "docs": risultati,
+                "shared_mapping": mapping_condiviso,
+                "firma": firma_upload,
             }
 
         # --- RISULTATI (persistenti tra i rerun dei download) ---
-        risultato = st.session_state.get("risultato")
-        if risultato is not None and (
-            risultato["source_name"] != uploaded_file.name
-            or risultato["source_size"] != uploaded_file.size
-        ):
-            # il file caricato è cambiato: i vecchi risultati non valgono più
-            risultato = None
-            st.session_state.pop("risultato", None)
+        stato = st.session_state.get("risultati")
+        if stato is not None and stato.get("firma") != firma_upload:
+            stato = None  # i file caricati sono cambiati
+            st.session_state.pop("risultati", None)
 
-        if risultato is not None:
-            res_log = risultato["log"]
-            res_mapping = risultato["mapping"]
-            res_mode = risultato["redaction_mode"]
+        if stato is not None:
+            risultati = stato["docs"]
+            mapping_condiviso = stato["shared_mapping"]
+            res_mode = risultati[0]["redaction_mode"]
+            tot_redazioni = sum(len(r["log"]) for r in risultati)
+            docs_con_esito = [r for r in risultati if r["log"]]
 
-            if res_log:
+            if tot_redazioni:
+                n_codici = (len(mapping_condiviso) if mapping_condiviso is not None
+                            else sum(len(r["mapping"]) for r in risultati))
                 if res_mode == "codes":
                     st.success(
-                        f"✅ Pseudonimizzazione completata: **{len(res_log)} elementi "
-                        f"sostituiti** con **{len(res_mapping)} codici univoci**"
+                        f"✅ Pseudonimizzazione completata su **{len(docs_con_esito)}"
+                        f"/{len(risultati)} documenti**: {tot_redazioni} elementi "
+                        f"sostituiti con **{n_codici} codici univoci**"
+                        + (" (condivisi tra i documenti)" if mapping_condiviso is not None else "")
                     )
                 else:
-                    st.success(f"✅ Anonimizzazione completata: **{len(res_log)} elementi oscurati**")
-
-                col_a, col_b = st.columns([1, 2])
-
-                with col_a:
-                    prefix = "pseudonimizzato" if res_mode == "codes" else "anonimizzato"
-                    output_filename = f"{prefix}_{risultato['source_name']}"
-                    st.download_button(
-                        label="📥 Scarica PDF",
-                        data=risultato["output_bytes"],
-                        file_name=output_filename,
-                        mime="application/pdf",
-                        type="primary",
-                        use_container_width=True,
+                    st.success(
+                        f"✅ Anonimizzazione completata su **{len(docs_con_esito)}"
+                        f"/{len(risultati)} documenti**: {tot_redazioni} elementi oscurati"
                     )
-                    if res_mapping:
-                        # CSV con BOM utf-8 così Excel lo apre correttamente
-                        csv_buf = StringIO()
-                        writer = csv.DictWriter(
-                            csv_buf,
-                            fieldnames=["Codice", "Tipo", "Testo originale", "Occorrenze"],
-                            delimiter=";",
-                        )
-                        writer.writeheader()
-                        writer.writerows(res_mapping)
-                        base_name = os.path.splitext(risultato["source_name"])[0]
+
+                # --- DOWNLOAD ---
+                prefix = "pseudonimizzato" if res_mode == "codes" else "anonimizzato"
+                if len(risultati) > 1:
+                    col_z1, col_z2 = st.columns([1, 1])
+                    with col_z1:
                         st.download_button(
-                            label="🔑 Scarica tabella di accoppiamento (CSV)",
-                            data=csv_buf.getvalue().encode("utf-8-sig"),
-                            file_name=f"accoppiamento_{base_name}.csv",
-                            mime="text/csv",
+                            label=f"📦 Scarica tutto ({len(risultati)} PDF, ZIP)",
+                            data=build_results_zip(risultati, mapping_condiviso),
+                            file_name="documenti_anonimizzati.zip",
+                            mime="application/zip",
+                            type="primary",
                             use_container_width=True,
                         )
+                    with col_z2:
+                        if mapping_condiviso:
+                            st.download_button(
+                                label="🔑 Tabella di accoppiamento del fascicolo (CSV)",
+                                data=mapping_to_csv_bytes(mapping_condiviso, with_document=True),
+                                file_name="accoppiamento_fascicolo.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                            )
+                    st.caption("Oppure scarica i singoli documenti qui sotto.")
 
-                with col_b:
-                    types_count = Counter(item["Tipo"] for item in res_log)
-                    method_count = Counter(item["Metodo"] for item in res_log)
-                    summary = " · ".join([f"{count} {tipo}" for tipo, count in types_count.most_common()])
-                    st.caption(f"**Tipi:** {summary}")
-                    st.caption(f"**Metodi:** {dict(method_count)}")
+                for res in risultati:
+                    res_log = res["log"]
+                    res_mapping = res["mapping"]
+                    base_name = os.path.splitext(res["source_name"])[0]
+                    if not res_log:
+                        st.warning(
+                            f"⚠️ **{res['source_name']}**: nessuna entità sensibile "
+                            "rilevata. Controlla il riepilogo sopra."
+                        )
+                        continue
 
-                if res_mapping:
+                    intestazione = (f"📄 {res['source_name']} — {len(res_log)} redazioni"
+                                    if len(risultati) > 1 else None)
+                    contenitore = (st.expander(intestazione, expanded=len(risultati) <= 2)
+                                   if intestazione else st.container())
+                    with contenitore:
+                        col_a, col_b = st.columns([1, 2])
+                        with col_a:
+                            st.download_button(
+                                label="📥 Scarica PDF",
+                                data=res["output_bytes"],
+                                file_name=f"{prefix}_{res['source_name']}",
+                                mime="application/pdf",
+                                type="primary" if len(risultati) == 1 else "secondary",
+                                use_container_width=True,
+                                key=f"dl_pdf_{base_name}",
+                            )
+                            if res_mapping and mapping_condiviso is None:
+                                st.download_button(
+                                    label="🔑 Scarica tabella di accoppiamento (CSV)",
+                                    data=mapping_to_csv_bytes(res_mapping),
+                                    file_name=f"accoppiamento_{base_name}.csv",
+                                    mime="text/csv",
+                                    use_container_width=True,
+                                    key=f"dl_csv_{base_name}",
+                                )
+                        with col_b:
+                            types_count = Counter(item["Tipo"] for item in res_log)
+                            method_count = Counter(item["Metodo"] for item in res_log)
+                            summary = " · ".join(
+                                [f"{count} {tipo}" for tipo, count in types_count.most_common()]
+                            )
+                            st.caption(f"**Tipi:** {summary}")
+                            st.caption(f"**Metodi:** {dict(method_count)}")
+
+                        with st.expander(f"📊 Report ({len(res_log)} redazioni)"):
+                            st.dataframe(res_log, use_container_width=True, hide_index=True)
+
+                # --- TABELLA DI ACCOPPIAMENTO ---
+                mapping_da_mostrare = (
+                    mapping_condiviso if mapping_condiviso is not None
+                    else (risultati[0]["mapping"] if len(risultati) == 1 else None)
+                )
+                if n_codici and res_mode == "codes":
                     st.warning(
                         "🔑 **La tabella di accoppiamento è la chiave di re-identificazione.** "
-                        "Conservala separatamente dal documento e **non inviarla mai** insieme "
-                        "al PDF pseudonimizzato. Ai sensi del GDPR, il documento con i codici "
+                        "Conservala separatamente dai documenti e **non inviarla mai** insieme "
+                        "ai PDF pseudonimizzati. Ai sensi del GDPR, un documento con i codici "
                         "resta un dato personale finché la tabella esiste: per depositi o "
                         "pubblicazioni usa la modalità Oscuramento."
                     )
-                    with st.expander(f"🔑 Tabella di accoppiamento ({len(res_mapping)} codici)"):
-                        st.dataframe(res_mapping, use_container_width=True, hide_index=True)
-
-                with st.expander(f"📊 Report completo ({len(res_log)} redazioni)"):
-                    st.dataframe(res_log, use_container_width=True, hide_index=True)
+                    if mapping_da_mostrare:
+                        titolo = (f"🔑 Tabella di accoppiamento del fascicolo "
+                                  f"({len(mapping_da_mostrare)} codici)"
+                                  if mapping_condiviso is not None
+                                  else f"🔑 Tabella di accoppiamento ({len(mapping_da_mostrare)} codici)")
+                        with st.expander(titolo):
+                            st.dataframe(mapping_da_mostrare, use_container_width=True,
+                                         hide_index=True)
             else:
                 st.warning("⚠️ Nessuna entità sensibile rilevata. Controlla il riepilogo Presidio sopra.")
 
@@ -2445,6 +2606,13 @@ with st.expander("ℹ️ Informazioni e avvertenze"):
     - Per documenti che contengono firme scansionate, foto di documenti d'identità o timbri all'interno di pagine altrimenti testuali, usa la modalità **"Forza OCR su tutto"**.
     - Le filigrane diagonali (es. "copia comunicata ai soli fini...") possono
       perdere le lettere che attraversano fisicamente un'area oscurata.
+
+    **Più documenti insieme (v2.0+):** puoi caricare fino a 5 PDF per volta.
+    In pseudonimizzazione, l'opzione "Codici condivisi" (attiva di default con
+    più file) assegna alla stessa persona lo **stesso codice in tutti gli atti
+    del fascicolo**, con un'unica tabella di accoppiamento che indica in quali
+    documenti compare ogni codice. I risultati si scaricano singolarmente o
+    tutti insieme in un archivio ZIP.
 
     **Workflow:**
     1. Carica PDF

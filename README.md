@@ -107,15 +107,16 @@ L'app include un pulsante **"Verifica aggiornamenti"** nella barra laterale: con
 
 ## 🖱️ Uso
 
-1. **Carica un PDF** dal pulsante centrale
+1. **Carica uno o più PDF** (fino a 5) dal pulsante centrale
 2. **Spunta le categorie** di dati da anonimizzare (sidebar a sinistra)
 3. **Aggiungi termini specifici** (es. nomi clienti, ragioni sociali) — uno per riga
 4. **Modalità OCR**:
    - `Automatica` (consigliata): rileva da solo le pagine scansionate
    - `Forza tutto`: applica OCR a ogni pagina (più lento, più sicuro)
    - `Mai`: solo testo estraibile
-5. Clicca **🔒 Anonimizza documento**
-6. **Scarica** il PDF risultante
+5. Con più documenti in pseudonimizzazione, scegli se usare **codici condivisi** (stessa persona → stesso codice in tutti gli atti del fascicolo, con un'unica tabella di accoppiamento)
+6. Clicca **🔒 Anonimizza**
+7. **Scarica** i PDF risultanti — singolarmente o tutti insieme in ZIP
 
 > ⚠️ **Verifica sempre** il PDF risultante prima dell'invio. L'AI può sbagliare.
 
