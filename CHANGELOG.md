@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-27
+
+### Added
+- **R-16 — Elaborazione di più documenti insieme:** si possono caricare
+  fino a **5 PDF** per volta. Ogni documento viene elaborato con le
+  stesse impostazioni, con avanzamento per file e risultati separati
+  (report, download singolo) più un download **ZIP** con tutto.
+- **Codici condivisi tra i documenti del fascicolo** (in modalità
+  pseudonimizzazione, attivo di default con più file): la stessa
+  persona riceve lo **stesso codice in tutti gli atti** e viene
+  generata un'**unica tabella di accoppiamento**, con la colonna
+  "Documenti" che indica dove compare ciascun codice. Disattivabile per
+  trattare i documenti come indipendenti (tabelle separate).
+
+### Changed
+- `redact_pdf()` accetta un `assigner` esterno (`CodeAssigner`
+  condiviso); senza, il comportamento è identico a prima.
+- L'uploader accetta più file; il limite di 5 è esplicitato in UI e i
+  file oltre il quinto vengono ignorati con avviso.
+
 ## [1.9.1] - 2026-07-22
 
 Quinta iterazione di qualità, dal CSV di una comparsa di costituzione

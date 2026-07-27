@@ -748,3 +748,84 @@ def test_propagazione_senza_punteggiatura(pagina_sintetica):
     doc.close()
     assert log[0]["Testo"] == "Pieri"
     assert assigner.mapping[0]["Testo originale"] == "Pieri"
+
+
+# ------------------------------------------------------------
+# R-16: batch multi-documento (codici condivisi, ZIP)
+# ------------------------------------------------------------
+
+import zipfile  # noqa: E402
+from io import BytesIO  # noqa: E402
+
+from app import build_results_zip, mapping_to_csv_bytes  # noqa: E402
+
+
+def test_assigner_condiviso_stesso_codice_tra_documenti():
+    """La stessa persona in due atti del fascicolo → stesso codice."""
+    a = CodeAssigner()
+    a.current_document = "ricorso.pdf"
+    c1 = a.assign("PERSON", "Mario Rossi")
+    a.current_document = "comparsa.pdf"
+    c2 = a.assign("PERSON", "Rossi Mario")     # ordine invertito, stesso codice
+    c3 = a.assign("PERSON", "Luigi Verdi")
+    assert c1 == c2 == "PER-01"
+    assert c3 == "PER-02"
+    riga = next(r for r in a.mapping if r["Codice"] == "PER-01")
+    assert riga["Occorrenze"] == 2
+    assert riga["Documenti"] == "ricorso.pdf · comparsa.pdf"
+
+
+def test_mapping_senza_documenti_se_singolo():
+    """Senza current_document la colonna Documenti non compare."""
+    a = CodeAssigner()
+    a.assign("PERSON", "Mario Rossi")
+    assert "Documenti" not in a.mapping[0]
+
+
+def test_csv_con_colonna_documenti():
+    a = CodeAssigner()
+    a.current_document = "atto1.pdf"
+    a.assign("PERSON", "Mario Rossi")
+    csv_bytes = mapping_to_csv_bytes(a.mapping, with_document=True)
+    testo = csv_bytes.decode("utf-8-sig")
+    assert testo.splitlines()[0] == "Codice;Tipo;Testo originale;Occorrenze;Documenti"
+    assert "atto1.pdf" in testo
+
+
+def test_zip_contiene_pdf_e_tabelle_per_documento():
+    risultati = [
+        {"output_bytes": b"%PDF-1", "log": [{}], "mapping": [
+            {"Codice": "PER-01", "Tipo": "PERSON", "Testo originale": "X", "Occorrenze": 1}],
+         "redaction_mode": "codes", "source_name": "uno.pdf"},
+        {"output_bytes": b"%PDF-2", "log": [{}], "mapping": [
+            {"Codice": "PER-01", "Tipo": "PERSON", "Testo originale": "Y", "Occorrenze": 1}],
+         "redaction_mode": "codes", "source_name": "due.pdf"},
+    ]
+    zf = zipfile.ZipFile(BytesIO(build_results_zip(risultati)))
+    nomi = set(zf.namelist())
+    assert {"pseudonimizzato_uno.pdf", "pseudonimizzato_due.pdf",
+            "accoppiamento_uno.csv", "accoppiamento_due.csv"} == nomi
+    assert zf.read("pseudonimizzato_due.pdf") == b"%PDF-2"
+
+
+def test_zip_con_tabella_condivisa_unica():
+    risultati = [
+        {"output_bytes": b"%PDF-1", "log": [{}], "mapping": [], "redaction_mode": "codes",
+         "source_name": "uno.pdf"},
+        {"output_bytes": b"%PDF-2", "log": [{}], "mapping": [], "redaction_mode": "codes",
+         "source_name": "due.pdf"},
+    ]
+    shared = [{"Codice": "PER-01", "Tipo": "PERSON", "Testo originale": "X",
+               "Occorrenze": 3, "Documenti": "uno.pdf · due.pdf"}]
+    zf = zipfile.ZipFile(BytesIO(build_results_zip(risultati, shared)))
+    nomi = set(zf.namelist())
+    assert "accoppiamento_fascicolo.csv" in nomi
+    # con la tabella condivisa NON ci sono le tabelle per documento
+    assert not any(n.startswith("accoppiamento_uno") for n in nomi)
+
+
+def test_zip_blackout_senza_csv():
+    risultati = [{"output_bytes": b"%PDF", "log": [{}], "mapping": [],
+                  "redaction_mode": "blackout", "source_name": "atto.pdf"}]
+    zf = zipfile.ZipFile(BytesIO(build_results_zip(risultati)))
+    assert zf.namelist() == ["anonimizzato_atto.pdf"]
