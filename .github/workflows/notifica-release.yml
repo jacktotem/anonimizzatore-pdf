@@ -46,6 +46,12 @@ jobs:
             echo "pronta=si" >> "$GITHUB_OUTPUT"
           fi
 
+      # Serve il codice del repository: senza checkout lo script di invio
+      # non esiste nel runner (il job gira su una macchina vuota).
+      - name: Checkout
+        if: steps.cfg.outputs.pronta == 'si'
+        uses: actions/checkout@v4
+
       - name: Raccogli i dati della release
         if: steps.cfg.outputs.pronta == 'si'
         id: rel
