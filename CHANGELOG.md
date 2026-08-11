@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-08-03
+
+### Fixed
+- **R-17 — Ragioni sociali su più parole non rilevate** (segnalato:
+  "MONDI ITALIA SRL" restava in chiaro). Dalla forma giuridica il
+  sistema risaliva alla sola parola precedente: con "MONDI ITALIA SRL"
+  quella parola era "ITALIA", presente nella stoplist legale
+  (Repubblica Italiana...), quindi veniva scartata e l'intera società
+  non veniva mai rilevata. Ora dalla forma giuridica si risale l'intera
+  catena di parole del nome, saltando i marcatori intermedi
+  ("Findomestic Banca S.p.A." → protetto "Findomestic"). La forma
+  giuridica resta leggibile.
+- **Trim dedicato alle organizzazioni** (`trim_org_span`): sulle
+  ragioni sociali non si applica più la stoplist pensata per le
+  persone, che avrebbe amputato nomi legittimi ("Italia", "Nazionale",
+  "Assicurazioni").
+- **"Sezione Impresa"** dei tribunali non è più scambiata per una
+  società: "impresa" era un marcatore societario troppo debole ed è
+  stato rimosso; la ricostruzione del nome si ferma sulle parole della
+  struttura giudiziaria (sezione, tribunale, corte, procura...).
+
+### Note
+Valutata e **scartata** l'ipotesi di richiedere a Presidio l'entità
+`ORGANIZATION` in generale: sui provvedimenti reali produceva decine di
+falsi positivi gravi (la Corte di giustizia dell'Unione Europea, le
+Direttive CE, i numeri di registro "N.R.G.", i codici normativi
+verrebbero oscurati). Il riconoscimento resta ancorato alla forma
+giuridica, che è un segnale ad alta precisione.
+
 ## [2.0.0] - 2026-07-27
 
 ### Added
