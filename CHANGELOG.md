@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Notifica email a ogni release** (`.github/workflows/notifica-release.yml`):
+  alla pubblicazione di una release parte una mail via Resend con
+  versione, novità dal changelog, elenco dei file pubblicati e link
+  alla pagina. Attivabile anche manualmente su un tag esistente.
+  Configurazione tramite `RESEND_API_KEY` (secret), `NOTIFY_EMAIL` e
+  `NOTIFY_FROM` (variabili di repository): l'indirizzo **non** è scritto
+  nei file, perché il repository è pubblico. Se la configurazione manca,
+  il job avvisa e termina senza far fallire la release.
+
 ## [2.0.1] - 2026-08-03
 
 ### Fixed

@@ -1,0 +1,73 @@
+# ============================================================
+# Notifica email a ogni release pubblicata (via Resend)
+#
+# Manda una mail con versione, novità dal changelog della release e
+# link al download. Si attiva quando una release viene pubblicata,
+# oppure manualmente (utile per provare senza pubblicare nulla).
+#
+# CONFIGURAZIONE (una volta sola, dal proprietario del repository):
+#   gh secret set RESEND_API_KEY          # chiave API Resend
+#   gh variable set NOTIFY_EMAIL          # destinatario
+#   gh variable set NOTIFY_FROM           # mittente (dominio verificato su Resend)
+#
+# L'indirizzo NON è scritto qui dentro di proposito: il repository è
+# pubblico e finirebbe raccolto dagli spambot.
+# ============================================================
+
+name: Notifica release via email
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag della release da notificare (es. v2.0.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  notifica:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verifica configurazione
+        id: cfg
+        env:
+          API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TO: ${{ vars.NOTIFY_EMAIL }}
+        run: |
+          if [ -z "$API_KEY" ] || [ -z "$TO" ]; then
+            echo "::warning::Notifica email non configurata (manca RESEND_API_KEY o NOTIFY_EMAIL). Passo oltre senza fallire la release."
+            echo "pronta=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "pronta=si" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Raccogli i dati della release
+        if: steps.cfg.outputs.pronta == 'si'
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          gh release view "$TAG" -R "$REPO" \
+            --json name,body,url,publishedAt,assets > release.json
+          echo "Dati raccolti per $TAG"
+
+      - name: Componi e invia la mail
+        if: steps.cfg.outputs.pronta == 'si'
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_EMAIL: ${{ vars.NOTIFY_EMAIL }}
+          NOTIFY_FROM: ${{ vars.NOTIFY_FROM }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: python3 .github/scripts/notifica_release.py
