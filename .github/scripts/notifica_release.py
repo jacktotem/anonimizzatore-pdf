@@ -141,6 +141,11 @@ def main():
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            # Senza uno User-Agent esplicito, Cloudflare (davanti all'API
+            # di Resend) blocca la richiesta con "error code: 1010":
+            # il default di urllib ("Python-urllib/3.x") è in blacklist.
+            "User-Agent": "anonimizzatore-pdf-notifier/1.0 (+https://github.com/jacktotem/anonimizzatore-pdf)",
+            "Accept": "application/json",
         },
         method="POST",
     )
