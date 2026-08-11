@@ -142,7 +142,8 @@ def main():
     payload = {
         "from": mittente,
         "to": [destinatario],
-        "subject": f"Anonimizzatore PDF {versione} — aggiornamento da installare sul server",
+        "subject": (f"Notifica automatica da Jacopo: Anonimizzatore PDF "
+                    f"{versione} — aggiornamento da installare sul server"),
         "html": costruisci_html(tag, versione, dati.get("url", ""), exe, impronta),
     }
 
