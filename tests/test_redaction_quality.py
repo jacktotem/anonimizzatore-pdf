@@ -829,3 +829,94 @@ def test_zip_blackout_senza_csv():
                   "redaction_mode": "blackout", "source_name": "atto.pdf"}]
     zf = zipfile.ZipFile(BytesIO(build_results_zip(risultati)))
     assert zf.namelist() == ["anonimizzato_atto.pdf"]
+
+
+# ------------------------------------------------------------
+# R-17: entità ORGANIZATION richiesta a Presidio + trim dedicato
+# ------------------------------------------------------------
+
+from app import trim_org_span  # noqa: E402
+
+
+@pytest.mark.parametrize("text,atteso", [
+    # la forma giuridica esce, il nome distintivo resta INTERO
+    ("Società MONDI ITALIA SRL", "MONDI ITALIA"),
+    ("MONDI ITALIA S.r.l.", "MONDI ITALIA"),
+    ("Assicurazioni Esempio S.p.A.", "Esempio"),
+    ("CARROZZERIA MODERNA S.N.C.", "MODERNA"),
+    ("Banca Findomestic S.p.A.", "Findomestic"),
+])
+def test_trim_org_conserva_il_nome(text, atteso):
+    span = trim_org_span(text, 0, len(text))
+    assert text[slice(*span)] == atteso
+
+
+def test_trim_org_scarta_le_sole_forme_giuridiche():
+    """Una forma giuridica senza nome non è un dato da proteggere."""
+    for solo_forma in ["Società", "S.r.l.", "S.p.A."]:
+        assert trim_org_span(solo_forma, 0, len(solo_forma)) is None
+    # "la società": il trim lascia l'articolo, che viene però scartato
+    # subito dopo dal filtro falsi positivi (nessun token sostanziale)
+    span = trim_org_span("la società", 0, len("la società"))
+    residuo = "la società"[slice(*span)] if span else ""
+    assert is_false_positive("ORGANIZATION", residuo) is True
+
+
+def test_trim_org_non_usa_la_stoplist_delle_persone():
+    """'Italia' è in stoplist per le persone ma è parte del nome sociale:
+    il trim generico lo toglierebbe, quello per le organizzazioni no."""
+    t = "Società MONDI ITALIA SRL"
+    generico = t[slice(*trim_ner_span(t, 0, len(t)))]
+    org = t[slice(*trim_org_span(t, 0, len(t)))]
+    assert generico == "MONDI"          # comportamento del trim persone
+    assert org == "MONDI ITALIA"        # trim organizzazioni: nome intero
+
+
+def _org_tokens_da_testo(testo):
+    """Esegue collect_org_tokens su una pagina con questo testo."""
+    from app import collect_org_tokens
+    doc = fitz.open()
+    page = doc.new_page()
+    for i, riga in enumerate(testo.split("\n")):
+        page.insert_text((50, 80 + i * 20), riga, fontsize=10)
+    full_text, entries = build_word_map(page)
+    doc.close()
+    return collect_org_tokens(
+        {"full_text": full_text, "entries": entries, "results": []})
+
+
+def test_ragione_sociale_intera_dalla_forma_giuridica():
+    """Il bug segnalato: 'MONDI ITALIA SRL' perdeva 'MONDI' perché il
+    vicino di 'SRL' era 'ITALIA', che è in stoplist."""
+    toks = _org_tokens_da_testo("nella qualita' di legale rappresentante\n"
+                                "della Societa' MONDI ITALIA SRL, con sede")
+    assert "mondi" in toks
+    assert "italia" in toks
+
+
+@pytest.mark.parametrize("testo,attesi", [
+    ("il contratto con Findomestic Banca S.p.A. del 2018", {"findomestic"}),
+    # "Carrozzeria" è genere merceologico (come "Banca"): resta leggibile,
+    # viene protetto il nome distintivo
+    ("la CARROZZERIA MODERNA S.N.C. ha riparato", {"moderna"}),
+    ("conveniva in giudizio ITAS Mutua per sentir", {"itas"}),
+])
+def test_ragioni_sociali_varie(testo, attesi):
+    assert attesi <= _org_tokens_da_testo(testo)
+
+
+@pytest.mark.parametrize("testo", [
+    # senza forma giuridica non si attiva: corti e norme restano intatte
+    "la Corte di giustizia dell'Unione Europea ha affermato",
+    "come previsto dalla Direttiva 2009/103/CE del Parlamento europeo",
+    "il Tribunale di Milano, Sezione Impresa, ha disposto",
+    "visto il Codice delle Assicurazioni Private",
+])
+def test_nessuna_societa_senza_forma_giuridica(testo):
+    assert _org_tokens_da_testo(testo) == set()
+
+
+def test_articoli_e_ruoli_non_entrano_nel_nome():
+    toks = _org_tokens_da_testo("citava in giudizio la Spett.le ESEMPIO S.r.l.")
+    assert "esempio" in toks
+    assert not {"spett", "spettle", "citava"} & toks

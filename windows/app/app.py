@@ -27,7 +27,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -369,7 +369,7 @@ _SAN_PREFIXES = {"san", "santa", "santo", "sant"}
 _ORG_MARKERS = {
     "mutua", "spa", "srl", "srls", "snc", "sas", "sapa", "scarl",
     "scpa", "coop", "cooperativa", "consorzio", "assicurazione",
-    "assicurazioni", "banca", "carrozzeria", "officina", "impresa",
+    "assicurazioni", "banca", "carrozzeria", "officina",
     "ditta", "azienda", "gruppo", "holding", "fondazione",
     "associazione", "condominio", "istituto", "ente", "societa",
     "società", "compagnia",
@@ -416,6 +416,56 @@ _ORG_TOKEN_EXCLUDE = {
     "medesima", "citata", "propria", "nostra", "vostra", "loro",
 }
 
+# R-17: parole che possono precedere una forma giuridica senza far parte
+# della ragione sociale. NB: NON si usa qui l'intera stoplist legale,
+# perché contiene parole che nei nomi societari sono legittime
+# ("Italia", "Nazionale", "Assicurazioni"): scartarle spezzerebbe il nome.
+_ORG_NAME_BOILERPLATE = {
+    "spett", "spettle", "spettabile", "signori", "signora", "signor",
+    "contro", "presso", "sede", "cliente", "controparte", "convenuta",
+    "attrice", "ricorrente", "resistente", "terza", "terzo",
+    "creditrice", "debitrice", "cedente", "cessionaria",
+    # struttura giudiziaria: mai parte di una ragione sociale
+    "sezione", "sezioni", "tribunale", "corte", "procura", "ufficio",
+    "camera", "collegio", "giudice", "cancelleria",
+}
+
+# Quanti token risalire al massimo per ricostruire la ragione sociale
+_ORG_NAME_MAX_TOKENS = 4
+
+
+def trim_org_span(full_text, start, end):
+    """
+    R-17: trim dedicato alle ORGANIZZAZIONI.
+
+    Il trim generico (trim_ner_span) toglie dai bordi tutto ciò che è
+    nella stoplist legale: su una ragione sociale distruggerebbe il
+    nome ("Società MONDI ITALIA SRL" → "MONDI", perché "italia" è in
+    stoplist). Qui togliamo SOLO la forma giuridica e i generici
+    ("Società", "S.r.l.", "Banca", "Carrozzeria"...), preservando
+    intatto il nome distintivo — che è il dato da proteggere.
+    """
+    tokens = list(re.finditer(r"\S+", full_text[start:end]))
+    while tokens and _has_org_marker(tokens[0].group()):
+        tokens.pop(0)
+    while tokens and _has_org_marker(tokens[-1].group()):
+        tokens.pop()
+    # via la punteggiatura ai bordi e i token senza lettere
+    while tokens and not any(c.isalnum() for c in tokens[0].group()):
+        tokens.pop(0)
+    while tokens and not any(c.isalnum() for c in tokens[-1].group()):
+        tokens.pop()
+    if not tokens:
+        return None
+    new_start = start + tokens[0].start()
+    new_end = start + tokens[-1].end()
+    span = full_text[new_start:new_end]
+    lead = len(span) - len(span.lstrip(_TOKEN_PUNCT))
+    trail = len(span) - len(span.rstrip(_TOKEN_PUNCT))
+    if lead + trail >= len(span):
+        return None
+    return new_start + lead, new_end - trail
+
 
 def collect_org_tokens(analysis):
     """
@@ -437,16 +487,34 @@ def collect_org_tokens(analysis):
             if len(clean) >= MIN_TOKEN_LEN and clean not in _ORG_MARKERS:
                 tokens.add(clean)
     entries = analysis["entries"]
-    for prev, cur in zip(entries, entries[1:]):
-        if not _has_org_marker(cur["text"]):
+    # R-17: dalla forma giuridica si risale all'INTERA ragione sociale.
+    # Prima si guardava solo la parola immediatamente precedente al
+    # marcatore: "MONDI ITALIA SRL" perdeva "MONDI", perché il vicino di
+    # "SRL" era "ITALIA" — che è in stoplist (Repubblica Italiana...) e
+    # veniva scartato, azzerando il rilevamento dell'intera società.
+    # Ora si risale la catena di token con iniziale maiuscola, saltando i
+    # marcatori intermedi ("Findomestic Banca S.p.A." → "Findomestic").
+    for i, entry in enumerate(entries):
+        if not _has_org_marker(entry["text"]):
             continue
-        clean = _clean_token(prev["text"])
-        if (len(clean) >= MIN_TOKEN_LEN
-                and prev["text"][:1].isupper()
-                and clean not in _ORG_MARKERS
-                and clean not in _ORG_TOKEN_EXCLUDE
-                and clean not in FALSE_POSITIVE_STOPWORDS):
-            tokens.add(clean)
+        nome = []
+        j = i - 1
+        while j >= 0 and len(nome) < _ORG_NAME_MAX_TOKENS:
+            testo = entries[j]["text"]
+            clean = _clean_token(testo)
+            if _has_org_marker(testo):
+                j -= 1          # altro pezzo della forma giuridica: prosegui
+                continue
+            if (testo[:1].isupper()
+                    and len(clean) >= MIN_TOKEN_LEN
+                    and clean.replace("'", "").isalpha()
+                    and clean not in _ORG_TOKEN_EXCLUDE
+                    and clean not in _ORG_NAME_BOILERPLATE):
+                nome.append(clean)
+                j -= 1
+                continue
+            break
+        tokens.update(nome)
     return tokens
 
 
@@ -1405,7 +1473,10 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
                     continue
                 # R-07: restringe l'entità NER ai token sostanziali
                 if r.entity_type in NER_ENTITY_TYPES:
-                    trimmed = trim_ner_span(full_text, r.start, r.end)
+                    # R-17: le ragioni sociali usano un trim dedicato
+                    trimmed = (trim_org_span(full_text, r.start, r.end)
+                               if r.entity_type == "ORGANIZATION"
+                               else trim_ner_span(full_text, r.start, r.end))
                     if trimmed is None:
                         dropped_fp += 1
                         continue
@@ -1696,7 +1767,9 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                     if r.score < min_score:
                         continue
                     if r.entity_type in NER_ENTITY_TYPES:
-                        trimmed = trim_ner_span(full_text, r.start, r.end)
+                        trimmed = (trim_org_span(full_text, r.start, r.end)
+                                   if r.entity_type == "ORGANIZATION"
+                                   else trim_ner_span(full_text, r.start, r.end))
                         if trimmed is None:
                             continue
                         r.start, r.end = trimmed
