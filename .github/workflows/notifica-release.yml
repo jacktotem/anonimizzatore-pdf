@@ -25,6 +25,10 @@ on:
         description: "Tag della release da notificare (es. v2.0.1)"
         required: true
         type: string
+      destinatario:
+        description: "Invia a questo indirizzo invece che a NOTIFY_EMAIL (invio una tantum)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -37,7 +41,7 @@ jobs:
         id: cfg
         env:
           API_KEY: ${{ secrets.RESEND_API_KEY }}
-          TO: ${{ vars.NOTIFY_EMAIL }}
+          TO: ${{ inputs.destinatario || vars.NOTIFY_EMAIL }}
         run: |
           if [ -z "$API_KEY" ] || [ -z "$TO" ]; then
             echo "::warning::Notifica email non configurata (manca RESEND_API_KEY o NOTIFY_EMAIL). Passo oltre senza fallire la release."
@@ -73,7 +77,9 @@ jobs:
         if: steps.cfg.outputs.pronta == 'si'
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          NOTIFY_EMAIL: ${{ vars.NOTIFY_EMAIL }}
+          # L'input ha la precedenza: consente un invio una tantum a un
+          # indirizzo diverso senza toccare la configurazione permanente.
+          NOTIFY_EMAIL: ${{ inputs.destinatario || vars.NOTIFY_EMAIL }}
           NOTIFY_FROM: ${{ vars.NOTIFY_FROM }}
           TAG: ${{ steps.rel.outputs.tag }}
         run: python3 .github/scripts/notifica_release.py
