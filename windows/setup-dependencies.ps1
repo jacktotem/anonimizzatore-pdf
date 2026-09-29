@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 # N-05 (#9): single source of truth per la versione mostrata all'utente.
 # Long-term: leggere da un file VERSION in repo root condiviso con
 # installer.iss e src/app.py.
-$AppVersion = "2.0.1"
+$AppVersion = "2.0.2"
 
 # ============================================================
 # CONFIGURAZIONE BINARI CON HASH PINNING
@@ -211,15 +211,122 @@ function Download-VerifiedFile {
 # 1. VERIFICA / INSTALLAZIONE PYTHON 3.12
 # ============================================================
 
-function Test-PythonInstalled {
+# PY-01: la ricerca di Python non può basarsi solo sul launcher "py".
+# Se l'interprete è stato installato a mano, dallo Store o senza il
+# launcher, "py -3.12" non lo trova: il setup credeva che Python
+# mancasse, tentava di reinstallarlo e finiva in conflitto con quello
+# già presente. Qui cerchiamo l'interprete in tutti i posti plausibili
+# e ne restituiamo il PERCORSO, che poi viene usato ovunque.
+
+function Test-PythonExe {
+    param([string]$Percorso)
+    if ([string]::IsNullOrWhiteSpace($Percorso) -or -not (Test-Path $Percorso)) {
+        return $false
+    }
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
-        $version = & py -3.12 --version 2>&1
-        if ($version -match "Python 3\.12") {
-            Write-Log "Python 3.12 già installato: $version"
-            return $true
+        $versione = & $Percorso --version 2>&1 | Out-String
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    return ($versione -match "Python 3\.12")
+}
+
+function Find-Python312 {
+    # 1. Launcher ufficiale
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $percorso = & py -3.12 -c "import sys; print(sys.executable)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and (Test-PythonExe $percorso)) {
+            $ErrorActionPreference = $prevEap
+            Write-Log "Python 3.12 trovato tramite launcher: $percorso"
+            return "$percorso".Trim()
+        }
+    } catch { } finally { $ErrorActionPreference = $prevEap }
+
+    # 2. Registro di sistema (per-macchina e per-utente)
+    foreach ($radice in @("HKLM:\SOFTWARE\Python\PythonCore\3.12\InstallPath",
+                          "HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore\3.12-32\InstallPath",
+                          "HKCU:\SOFTWARE\Python\PythonCore\3.12\InstallPath")) {
+        try {
+            $dir = (Get-ItemProperty -Path $radice -ErrorAction Stop)."(default)"
+            $exe = Join-Path $dir "python.exe"
+            if (Test-PythonExe $exe) {
+                Write-Log "Python 3.12 trovato nel registro: $exe"
+                return $exe
+            }
+        } catch { }
+    }
+
+    # 3. Percorsi d'installazione standard.
+    #    Le basi si filtrano PRIMA di comporre il percorso: una variabile
+    #    d'ambiente vuota (ProgramFiles(x86) su Windows a 32 bit,
+    #    LOCALAPPDATA in certi contesti di servizio) farebbe fallire
+    #    Join-Path e, con il fail-fast attivo, abortirebbe il setup.
+    $candidati = @()
+    foreach ($coppia in @(
+        @($env:ProgramFiles,          "Python312\python.exe"),
+        @(${env:ProgramFiles(x86)},   "Python312\python.exe"),
+        @($env:LOCALAPPDATA,          "Programs\Python\Python312\python.exe")
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace($coppia[0])) {
+            $candidati += (Join-Path $coppia[0] $coppia[1])
+        }
+    }
+    $candidati += "C:\Python312\python.exe"
+
+    foreach ($exe in $candidati) {
+        if (Test-PythonExe $exe) {
+            Write-Log "Python 3.12 trovato in $exe"
+            return $exe
+        }
+    }
+
+    # 4. Un python.exe nel PATH che sia effettivamente 3.12
+    try {
+        foreach ($cmd in (Get-Command python.exe -All -ErrorAction SilentlyContinue)) {
+            if (Test-PythonExe $cmd.Source) {
+                Write-Log "Python 3.12 trovato nel PATH: $($cmd.Source)"
+                return $cmd.Source
+            }
         }
     } catch { }
-    return $false
+
+    # PY-03: nessun 3.12 trovato. Registriamo quali Python esistono sul
+    # sistema: se l'amministratore ne ha installato uno a mano ma di
+    # versione diversa (3.13, 3.14...), il log lo dice esplicitamente
+    # invece di lasciare intendere che Python manchi del tutto.
+    try {
+        $altri = @()
+        foreach ($cmd in (Get-Command python.exe, python3.exe -All -ErrorAction SilentlyContinue)) {
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try { $v = (& $cmd.Source --version 2>&1 | Out-String).Trim() } catch { $v = "" }
+            finally { $ErrorActionPreference = $prevEap }
+            if ($v) { $altri += "$v ($($cmd.Source))" }
+        }
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $elenco = (& py -0p 2>&1 | Out-String).Trim()
+            if ($elenco) { $altri += "launcher py: $elenco" }
+        } catch { } finally { $ErrorActionPreference = $prevEap }
+
+        if ($altri.Count -gt 0) {
+            Write-Log ("Python 3.12 non trovato. Altre versioni presenti sul sistema: " +
+                       ($altri -join " | ") +
+                       ". Serve specificamente la 3.12: le librerie usate " +
+                       "dall'applicazione non hanno ancora pacchetti per le versioni successive.") "WARN"
+        } else {
+            Write-Log "Nessun interprete Python rilevato sul sistema" "WARN"
+        }
+    } catch { }
+
+    return $null
 }
 
 function Install-Python {
@@ -244,16 +351,39 @@ function Install-Python {
         "InstallLauncherAllUsers=1"
     )
 
+    # PY-02: log dell'installer Python, utile quando fallisce sul campo
+    $logPython = Join-Path $LogDir "python-install.log"
+    $pythonArgs += "/log"
+    $pythonArgs += $logPython
+
     $process = Start-Process -FilePath $pythonInstaller -ArgumentList $pythonArgs -Wait -PassThru
-    if ($process.ExitCode -ne 0) {
-        Write-Log "ERRORE installazione Python (codice $($process.ExitCode))" "ERROR"
-        throw "Installazione Python fallita"
+    $codice = $process.ExitCode
+
+    # PY-02: non tutti i codici diversi da 0 sono errori.
+    #  3010 = riuscito, richiede riavvio (prima faceva fallire il setup!)
+    #  1638 = un'altra versione è già installata: non è un problema,
+    #         basta usare quella (la cerchiamo subito dopo).
+    switch ($codice) {
+        0     { Write-Log "Python 3.12 installato con successo" }
+        3010  { Write-Log "Python 3.12 installato (il sistema richiede un riavvio)" "WARN" }
+        1638  { Write-Log "Una versione di Python 3.12 risulta già installata: uso quella" "WARN" }
+        default {
+            $spiegazione = switch ($codice) {
+                1602 { "installazione annullata dall'utente" }
+                1603 { "errore fatale dell'installer (spesso: Python già presente in una variante diversa, o permessi)" }
+                1618 { "un'altra installazione è già in corso: attendere e riprovare" }
+                default { "codice non documentato" }
+            }
+            Write-Log "ERRORE installazione Python (codice $codice - $spiegazione)" "ERROR"
+            Write-Log "Log dell'installer Python: $logPython" "ERROR"
+            throw ("Installazione Python fallita (codice $codice - $spiegazione). " +
+                   "Dettagli in $logPython")
+        }
     }
 
     # Refresh PATH per la sessione corrente
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
-    Write-Log "Python 3.12 installato con successo"
     Remove-Item $pythonInstaller -ErrorAction SilentlyContinue
 }
 
@@ -415,7 +545,8 @@ function Setup-PythonEnvironment {
     }
     Remove-Item (Get-DepsFingerprintPath) -ErrorAction SilentlyContinue
 
-    $code = Invoke-Native -Exe "py" -Arguments @("-3.12", "-m", "venv", $venvPath)
+    # PY-01: si usa l'interprete individuato da Find-Python312, non "py"
+    $code = Invoke-Native -Exe $script:PythonExe -Arguments @("-m", "venv", $venvPath)
     if ($code -ne 0) {
         throw "Creazione venv fallita"
     }
@@ -573,13 +704,19 @@ try {
     Write-Log "===== INIZIO SETUP ANONIMIZZATORE PDF v$AppVersion ====="
     Write-Log "Path installazione: $InstallPath"
 
-    # 1. Python
-    if (-not (Test-PythonInstalled)) {
+    # 1. Python (PY-01: si cerca ovunque, si installa solo se manca davvero)
+    $script:PythonExe = Find-Python312
+    if (-not $script:PythonExe) {
+        Write-Log "Python 3.12 non presente: procedo con l'installazione"
         Install-Python
-        if (-not (Test-PythonInstalled)) {
-            throw "Python non disponibile dopo l'installazione"
+        $script:PythonExe = Find-Python312
+        if (-not $script:PythonExe) {
+            throw ("Python 3.12 risulta installato ma non è utilizzabile. " +
+                   "Se il sistema ha chiesto un riavvio, riavvia il server e " +
+                   "rilancia il setup. Dettagli nei log in $LogDir")
         }
     }
+    Write-Log "Interprete Python in uso: $script:PythonExe"
 
     # 2. Tesseract
     if (-not (Test-TesseractInstalled)) {

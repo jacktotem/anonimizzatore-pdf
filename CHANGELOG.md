@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-09-29
+
+Correzione dell'installazione su Windows Server, segnalata dal
+responsabile IT: errore "sulla parte Python", persistente anche dopo
+aver installato Python manualmente.
+
+### Fixed
+- **PY-01 — Python già presente non veniva riconosciuto.** Il setup
+  cercava l'interprete solo tramite il launcher `py -3.12`: se Python
+  era stato installato a mano, dal Microsoft Store o senza launcher,
+  risultava assente. Il setup tentava allora di reinstallarlo e finiva
+  in conflitto con quello esistente. Ora l'interprete viene cercato nel
+  launcher, nel registro di sistema (per macchina e per utente), nei
+  percorsi d'installazione standard e nel PATH; il percorso trovato
+  viene poi usato per creare l'ambiente virtuale.
+- **PY-02 — Codici di uscita dell'installer interpretati male.** Il
+  codice `3010` (installazione riuscita, richiede riavvio) e `1638`
+  (versione già presente) facevano fallire il setup pur non essendo
+  errori. Ora sono gestiti correttamente; per gli errori veri il
+  messaggio riporta il codice con la sua spiegazione e il percorso del
+  log dell'installer Python, ora salvato in `logs\python-install.log`.
+- **PY-03 — Versione sbagliata non segnalata.** Se sul sistema c'è
+  Python ma non la 3.12 (per esempio 3.13 o 3.14), il log ora elenca le
+  versioni presenti e spiega che serve specificamente la 3.12.
+- **Variabili d'ambiente vuote non fanno più abortire il setup.** Con
+  `ProgramFiles(x86)` o `LOCALAPPDATA` non valorizzate — possibile su
+  Windows a 32 bit e in contesti di servizio — la composizione dei
+  percorsi generava un'eccezione fatale.
+
 ### Added
 - **Notifica email a ogni release** (`.github/workflows/notifica-release.yml`):
   alla pubblicazione di una release parte una mail via Resend.
