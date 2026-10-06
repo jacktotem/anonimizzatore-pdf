@@ -27,7 +27,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "2.0.2"
+__version__ = "2.1.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -169,6 +169,12 @@ FALSE_POSITIVE_STOPWORDS = {
     "procedimento", "legge", "articolo", "artt", "art", "comma",
     "codice", "fiscale", "spese", "compensi", "interessi",
     "rivalutazione",
+    # R-18: intestazioni dei piani di ammortamento bancari, che il NER
+    # scambia per luoghi ("Rata Importo Quota" → LOCATION)
+    "rata", "rate", "importo", "quota", "residuo", "scadenza",
+    "ammortamento", "rientro", "capitale", "totale", "totali",
+    "mutuo", "mutuataria",
+    "mutuatario", "mutuante", "garante", "ipotecaria", "ipoteca",
     # titoli professionali e abbreviazioni di ruolo
     "avv", "avvocato", "avvocati", "dott", "ssa", "sig", "sigra",
     "prof", "ing", "geom", "rag", "notaio", "rel", "est", "cons",
@@ -201,6 +207,11 @@ _DATE_LIKE_RE = re.compile(r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}")
 # R-13: numeri di ruolo/registro scambiati per telefoni ("3 26972/2008"):
 # qualsiasi cosa che termina con /anno è una citazione, non un telefono
 _DOCKET_LIKE_RE = re.compile(r".*\d\s*/\s*(19|20)\d{2}\b.*")
+
+# R-18: importi in valuta scambiati per telefoni nei piani di
+# ammortamento ("8.765,42", "337,83"). Il discriminante è la virgola
+# decimale: nessun numero di telefono la contiene.
+_AMOUNT_LIKE_RE = re.compile(r"\d{1,3}(?:\.\d{3})*,\d{1,2}")
 
 
 def _clean_token(token):
@@ -244,7 +255,9 @@ def is_false_positive(entity_type, text):
             # R-14: un numero nudo di ≤7 cifre senza separatori né
             # prefisso non è un telefono italiano ("n. 16990" è una
             # massima di Cassazione)
-            or re.fullmatch(r"\d{1,7}", stripped)):
+            or re.fullmatch(r"\d{1,7}", stripped)
+            # R-18: importi in valuta ("8.765,42", "337,83 288,58")
+            or all(_AMOUNT_LIKE_RE.fullmatch(t) for t in stripped.split())):
         return True
     if entity_type not in NER_ENTITY_TYPES:
         return False
@@ -1161,6 +1174,108 @@ class ItLicensePlateRecognizer(EntityRecognizer):
         return results
 
 
+# ============================================================
+# CODICE FISCALE SPEZZATO DA SPAZI (R-18)
+# ============================================================
+# Gli atti notarili e bancari dattiloscritti scrivono il codice
+# fiscale a gruppi: "MNT NMR 41P46 C286B" invece di
+# "MNTNMR41P46C286B". Nei PDF scansionati l'OCR restituisce quei
+# gruppi come parole distinte, quindi il recognizer predefinito di
+# Presidio — che pretende 16 caratteri attaccati — non vede nulla.
+#
+# Qui ricomponiamo i token adiacenti e verifichiamo la struttura del
+# codice; quando torna anche il carattere di controllo lo score è
+# alto, perché un falso positivo diventa statisticamente trascurabile.
+
+_CF_BODY_RE = re.compile(
+    r"^[A-Z]{6}\d{2}[ABCDEHLMPRST]\d{2}[A-Z]\d{3}[A-Z]$"
+)
+# Token candidati: lettere/cifre maiuscole, da soli o a gruppi.
+_CF_TOKEN_RE = re.compile(r"[A-Z0-9]{1,16}")
+_CF_MAX_TOKENS = 6
+
+# Tabella ufficiale per il carattere di controllo (DM 23/12/1976).
+_CF_ODD = {
+    "0": 1, "1": 0, "2": 5, "3": 7, "4": 9, "5": 13, "6": 15, "7": 17,
+    "8": 19, "9": 21, "A": 1, "B": 0, "C": 5, "D": 7, "E": 9, "F": 13,
+    "G": 15, "H": 17, "I": 19, "J": 21, "K": 2, "L": 4, "M": 18, "N": 20,
+    "O": 11, "P": 3, "Q": 6, "R": 8, "S": 12, "T": 14, "U": 16, "V": 10,
+    "W": 22, "X": 25, "Y": 24, "Z": 23,
+}
+_CF_EVEN = {
+    "0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
+    "8": 8, "9": 9, "A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 5,
+    "G": 6, "H": 7, "I": 8, "J": 9, "K": 10, "L": 11, "M": 12, "N": 13,
+    "O": 14, "P": 15, "Q": 16, "R": 17, "S": 18, "T": 19, "U": 20,
+    "V": 21, "W": 22, "X": 23, "Y": 24, "Z": 25,
+}
+
+
+def is_valid_fiscal_code(code):
+    """True se il carattere di controllo del codice fiscale torna."""
+    if not _CF_BODY_RE.match(code):
+        return False
+    total = 0
+    for i, ch in enumerate(code[:15]):
+        total += _CF_ODD[ch] if i % 2 == 0 else _CF_EVEN[ch]
+    return chr(ord("A") + total % 26) == code[15]
+
+
+class ItSpacedFiscalCodeRecognizer(EntityRecognizer):
+    """Codice fiscale anche quando è spezzato in gruppi da spazi."""
+
+    SCORE_VALID = 0.95       # struttura + carattere di controllo
+    SCORE_STRUCTURE = 0.6    # solo struttura (OCR può sbagliare una lettera)
+
+    def __init__(self):
+        super().__init__(
+            supported_entities=["IT_FISCAL_CODE"],
+            supported_language="it",
+            name="ItSpacedFiscalCodeRecognizer",
+        )
+
+    def load(self):
+        pass
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "IT_FISCAL_CODE" not in entities:
+            return []
+
+        tokens = list(_CF_TOKEN_RE.finditer(text))
+        results = []
+        taken = []
+
+        for i, first in enumerate(tokens):
+            joined = ""
+            for j in range(i, min(i + _CF_MAX_TOKENS, len(tokens))):
+                tok = tokens[j]
+                # I token devono essere separati solo da spazi orizzontali
+                # o da un a capo: un punto o una virgola in mezzo
+                # significa che sono due cose diverse.
+                if j > i and text[tokens[j - 1].end():tok.start()].strip():
+                    break
+                joined += tok.group()
+                if len(joined) > 16:
+                    break
+                if len(joined) < 16:
+                    continue
+                start, end = first.start(), tok.end()
+                if any(s < end and e > start for s, e in taken):
+                    break
+                if not _CF_BODY_RE.match(joined):
+                    break
+                score = (self.SCORE_VALID if is_valid_fiscal_code(joined)
+                         else self.SCORE_STRUCTURE)
+                taken.append((start, end))
+                results.append(RecognizerResult(
+                    entity_type="IT_FISCAL_CODE",
+                    start=start, end=end, score=score,
+                ))
+                break
+
+        return results
+
+
 def build_license_plate_recognizer():
     """Recognizer per targhe di veicoli (entità IT_LICENSE_PLATE)."""
     return ItLicensePlateRecognizer()
@@ -1186,6 +1301,8 @@ def initialize_analyzer():
     registry.add_recognizer(ItLegalNameRecognizer())
     # R-11: targhe di veicoli italiane
     registry.add_recognizer(build_license_plate_recognizer())
+    # R-18: codice fiscale scritto a gruppi ("MNT NMR 41P46 C286B")
+    registry.add_recognizer(ItSpacedFiscalCodeRecognizer())
 
     analyzer = AnalyzerEngine(
         nlp_engine=nlp_engine,
@@ -1647,26 +1764,236 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
 
 
 # ============================================================
+# FIRME E SCRITTE A MANO (R-20)
+# ============================================================
+# Una firma autografa è un'immagine, non testo: Tesseract non legge
+# il corsivo e quindi nessuna entità viene mai rilevata lì. In un
+# rogito o in un piano di ammortamento le firme in calce rivelano
+# però esattamente i nomi che il resto del documento ha oscurato.
+#
+# Niente modelli: si lavora sui pixel. L'inchiostro manoscritto ha
+# tre caratteristiche che lo separano dalla stampa:
+#   1. forma componenti connesse GRANDI (una firma è un tratto solo,
+#      una lettera stampata no);
+#   2. è RADO — il tratto riempie poco del proprio rettangolo, al
+#      contrario di un blocco nero pieno o di un logo;
+#   3. non è coperto da parole OCR affidabili.
+# Le componenti superstiti vengono raggruppate per vicinanza, così
+# una firma spezzata in dieci tratti diventa un'area sola.
+#
+# È un'euristica, perciò l'opzione è DISATTIVATA di default e
+# l'interfaccia lo dice: oscura anche timbri e annotazioni a mano.
+
+_HW_SCALE = 6              # analisi a 1/6 della risoluzione di render
+_HW_DARK = 160             # soglia di binarizzazione (0-255)
+_HW_MIN_W_PT = 5.0         # componente più stretta: rumore o lettera
+_HW_MIN_H_PT = 3.5
+_HW_MAX_FILL = 0.80        # oltre: blocco pieno (logo, barra, foto)
+_HW_OCR_COVER = 0.45       # oltre: la componente è testo stampato
+_HW_OCR_CONF = 30          # confidenza minima perché una parola "copra" l'area
+_HW_MERGE_PT = 14.0        # distanza di raggruppamento
+_HW_CLUSTER_MIN_W_PT = 25.0
+_HW_CLUSTER_MIN_H_PT = 9.0
+_HW_CLUSTER_MAX_FILL = 0.45   # un'area densa è stampa o grafica, non un tratto
+_HW_CLUSTER_MIN_INK = 0.012   # sotto: due granelli di sporco della scansione
+_HW_PAD_PT = 3.0
+
+
+def _connected_components(mask):
+    """
+    Componenti connesse (8-vicini) di una maschera booleana HxW.
+    Union-find sulle sequenze di pixel accesi di ogni riga: le
+    sequenze sono poche migliaia, i pixel milioni.
+    Ritorna una lista di [x0, y0, x1, y1, pixel_accesi].
+    """
+    import numpy as np
+
+    parent = []
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    runs = []
+    prev = []
+    for y in range(mask.shape[0]):
+        row = mask[y]
+        if not row.any():
+            prev = []
+            continue
+        delta = np.diff(np.concatenate(([0], row.view(np.int8), [0])))
+        cur = []
+        for s, e in zip(np.flatnonzero(delta == 1), np.flatnonzero(delta == -1)):
+            s, e = int(s), int(e)
+            rid = len(parent)
+            parent.append(rid)
+            runs.append((y, s, e, rid))
+            cur.append((s, e, rid))
+            for ps, pe, pid in prev:
+                if ps <= e and pe >= s:      # 8-connessione
+                    union(rid, pid)
+        prev = cur
+
+    boxes = {}
+    for y, s, e, rid in runs:
+        root = find(rid)
+        box = boxes.get(root)
+        if box is None:
+            boxes[root] = [s, y, e, y + 1, e - s]
+        else:
+            box[0] = min(box[0], s)
+            box[1] = min(box[1], y)
+            box[2] = max(box[2], e)
+            box[3] = max(box[3], y + 1)
+            box[4] += e - s
+    return list(boxes.values())
+
+
+def _overlap_area(a, b):
+    """Area di sovrapposizione fra due rettangoli (x0, y0, x1, y1)."""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    return w * h if w > 0 and h > 0 else 0
+
+
+def _merge_nearby(boxes, gap):
+    """Fonde i rettangoli che distano meno di `gap` su entrambi gli assi."""
+    boxes = [list(b) for b in boxes]
+    changed = True
+    while changed:
+        changed = False
+        out = []
+        for box in boxes:
+            for other in out:
+                near_x = box[0] - gap <= other[2] and other[0] - gap <= box[2]
+                near_y = box[1] - gap <= other[3] and other[1] - gap <= box[3]
+                if near_x and near_y:
+                    other[0] = min(other[0], box[0])
+                    other[1] = min(other[1], box[1])
+                    other[2] = max(other[2], box[2])
+                    other[3] = max(other[3], box[3])
+                    other[4] += box[4]
+                    changed = True
+                    break
+            else:
+                out.append(box)
+        boxes = out
+    return boxes
+
+
+def detect_handwriting_regions(img, words, dpi):
+    """
+    Aree della pagina occupate da inchiostro manoscritto (firme,
+    sigle, timbri, annotazioni a margine).
+
+    img:   immagine della pagina come renderizzata per l'OCR
+    words: parole OCR con le loro coordinate, nella stessa scala
+    dpi:   risoluzione di render, per ragionare in punti tipografici
+
+    Ritorna una lista di rettangoli (x0, y0, x1, y1) in pixel.
+    """
+    try:
+        import numpy as np
+    except ImportError:          # numpy arriva con spaCy, ma non diamolo per scontato
+        return []
+
+    px = dpi / 72.0              # pixel per punto tipografico
+    scale = max(1, int(_HW_SCALE))
+
+    # Riduzione prendendo il pixel PIÙ SCURO di ogni blocco, non la
+    # media: una firma a penna biro è un tratto sottile e una media
+    # bilineare la sbiadisce fino a farla sparire sotto la soglia.
+    gray = np.asarray(img.convert("L"))
+    h = (gray.shape[0] // scale) * scale
+    w = (gray.shape[1] // scale) * scale
+    if h == 0 or w == 0:
+        return []
+    mask = gray[:h, :w].reshape(
+        h // scale, scale, w // scale, scale
+    ).min(axis=(1, 3)) < _HW_DARK
+    if not mask.any():
+        return []
+
+    sh, sw = mask.shape
+    # Parole lette dall'OCR, nella scala ridotta: tutto ciò che vi
+    # ricade dentro è testo stampato, già coperto dalle entità.
+    # La soglia è bassa di proposito — anche una parola letta male è
+    # pur sempre la prova che lì c'è stampa, non inchiostro a mano.
+    ocr_boxes = [
+        (w["x"] / scale, w["y"] / scale,
+         (w["x"] + w["w"]) / scale, (w["y"] + w["h"]) / scale)
+        for w in (words or []) if w.get("conf", 100) >= _HW_OCR_CONF
+    ]
+
+    min_w = _HW_MIN_W_PT * px / scale
+    min_h = _HW_MIN_H_PT * px / scale
+
+    candidates = []
+    for x0, y0, x1, y1, ink in _connected_components(mask):
+        w, h = x1 - x0, y1 - y0
+        if w < min_w or h < min_h:
+            continue                                   # lettera stampata o rumore
+        if w >= sw * 0.9 and h >= sh * 0.9:
+            continue                                   # bordo/cornice della scansione
+        if ink / float(w * h) > _HW_MAX_FILL:
+            continue                                   # blocco pieno, non un tratto
+        box = (x0, y0, x1, y1)
+        covered = sum(_overlap_area(box, o) for o in ocr_boxes)
+        if covered / float(w * h) > _HW_OCR_COVER:
+            continue                                   # è testo stampato
+        candidates.append([x0, y0, x1, y1, ink])
+
+    if not candidates:
+        return []
+
+    regions = []
+    min_cw = _HW_CLUSTER_MIN_W_PT * px / scale
+    min_ch = _HW_CLUSTER_MIN_H_PT * px / scale
+    pad = _HW_PAD_PT * px / scale
+    for x0, y0, x1, y1, ink in _merge_nearby(candidates, _HW_MERGE_PT * px / scale):
+        if (x1 - x0) < min_cw or (y1 - y0) < min_ch:
+            continue
+        density = ink / float((x1 - x0) * (y1 - y0))
+        if density > _HW_CLUSTER_MAX_FILL or density < _HW_CLUSTER_MIN_INK:
+            continue
+        regions.append((
+            max(0, int((x0 - pad) * scale)),
+            max(0, int((y0 - pad) * scale)),
+            min(img.width, int((x1 + pad) * scale)),
+            min(img.height, int((y1 + pad) * scale)),
+        ))
+    return regions
+
+
+# ============================================================
 # REDAZIONE PAGINA SCANSIONATA (OCR)
 # ============================================================
+# Come per le pagine testuali, il lavoro è diviso in due fasi:
+#   analyze_scanned_page()      → OCR + riconoscimento entità
+#   apply_scanned_redactions()  → disegno dei rettangoli
+#
+# R-19: la separazione non è estetica. Prima le pagine OCR venivano
+# analizzate e redatte in un colpo solo, nella seconda passata: non
+# contribuivano quindi alla propagazione dei nomi a livello di
+# documento (R-04). In un PDF interamente scansionato — una scansione
+# notarile, il caso tipico — NESSUNA pagina alimentava quel set e la
+# propagazione era di fatto spenta: un nome letto correttamente a
+# pagina 2 non veniva oscurato a pagina 27, dove compariva in
+# maiuscolo e il NER statistico non lo riconosceva.
 
-def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
-                         analyzer, min_score, dpi, lang, log, page_num,
-                         debug_first=False, known_person_tokens=None,
-                         redaction_mode="blackout", assigner=None,
-                         magistrate_tokens=None, known_org_tokens=None):
-    """OCR su pagina scansionata + redazione con rettangoli su immagine."""
-    known_person_tokens = known_person_tokens or set()
-    known_org_tokens = known_org_tokens or set()
-    use_codes = redaction_mode == "codes" and assigner is not None
+
+def _ocr_page_words(src_page, dpi, lang, page_num):
+    """Renderizza la pagina e restituisce (immagine, parole OCR)."""
     zoom = dpi / 72
-    mat = fitz.Matrix(zoom, zoom)
-    pix = src_page.get_pixmap(matrix=mat, alpha=False)
-    img_data = pix.tobytes("png")
-    img = Image.open(BytesIO(img_data))
-
-    raw_count = 0
-    filtered_count = 0
+    pix = src_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    img = Image.open(BytesIO(pix.tobytes("png")))
 
     try:
         ocr_data = pytesseract.image_to_data(
@@ -1675,11 +2002,7 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
     except Exception as e:
         # L-03: messaggio sanitizzato
         st.warning(safe_error_message(f"OCR pagina {page_num}", e))
-        new_page = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
-        img_bytes = BytesIO()
-        img.save(img_bytes, format="JPEG", quality=85)
-        new_page.insert_image(new_page.rect, stream=img_bytes.getvalue())
-        return 0, 0
+        return img, None
 
     words = []
     for i in range(len(ocr_data["text"])):
@@ -1695,28 +2018,150 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
                 "y": ocr_data["top"][i],
                 "w": ocr_data["width"][i],
                 "h": ocr_data["height"][i],
+                "conf": conf,
             })
+    return img, words
+
+
+def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
+                         dpi, lang, page_num, debug_first=False):
+    """
+    OCR + analisi di una pagina scansionata. Non disegna nulla: serve
+    alla prima passata, così i nomi trovati qui si propagano al resto
+    del documento. Il dict restituito ha le stesse chiavi di
+    analyze_text_page(), per poter riusare i filtri a valle.
+    """
+    _, words = _ocr_page_words(src_page, dpi, lang, page_num)
+
+    empty = {
+        "words": [], "entries": [], "full_text": "", "word_positions": [],
+        "results": [], "raw": 0, "filtered": 0, "dropped_fp": 0,
+        "ocr_failed": words is None,
+    }
+    if not words:
+        return empty
 
     if debug_first:
         st.write(f"🔍 Pagina {page_num} (OCR) — parole rilevate: {len(words)}")
-        if words:
-            sample = " ".join([w["text"] for w in words[:20]])
-            st.write(f"   Estratto OCR: `{sample}...`")
+        sample = " ".join([w["text"] for w in words[:20]])
+        st.write(f"   Estratto OCR: `{sample}...`")
+
+    full_text = ""
+    word_positions = []
+    for idx, w in enumerate(words):
+        start = len(full_text)
+        full_text += w["text"]
+        word_positions.append((start, len(full_text), idx))
+        full_text += " "
+
+    raw_count = 0
+    dropped_fp = 0
+    results = []
+
+    if selected_entities and full_text.strip():
+        try:
+            all_results = analyzer.analyze(
+                text=full_text, entities=selected_entities, language="it",
+            )
+            raw_count = len(all_results)
+
+            for r in all_results:
+                if r.score < min_score:
+                    continue
+                # R-07/R-17: restringe l'entità ai token sostanziali
+                if r.entity_type in NER_ENTITY_TYPES:
+                    trimmed = (trim_org_span(full_text, r.start, r.end)
+                               if r.entity_type == "ORGANIZATION"
+                               else trim_ner_span(full_text, r.start, r.end))
+                    if trimmed is None:
+                        dropped_fp += 1
+                        continue
+                    r.start, r.end = trimmed
+                # R-01: falsi positivi del NER
+                if is_false_positive(r.entity_type, full_text[r.start:r.end]):
+                    dropped_fp += 1
+                    continue
+                # R-08: citazioni giurisprudenziali
+                if (r.entity_type in NER_ENTITY_TYPES
+                        and is_case_citation(full_text, r.start, r.end)):
+                    dropped_fp += 1
+                    continue
+                # R-14: marca/modello dopo "automezzo/vettura/..."
+                if (r.entity_type in NER_ENTITY_TYPES
+                        and is_vehicle_description(full_text, r.start)):
+                    dropped_fp += 1
+                    continue
+                # R-13/R-14: città → LOCATION, società → ORGANIZATION
+                r.entity_type = retype_city_as_location(
+                    r.entity_type, full_text[r.start:r.end])
+                r.entity_type = retype_company_as_org(
+                    r.entity_type, full_text[r.start:r.end],
+                    full_text[r.end:r.end + 25])
+                results.append(r)
+
+            if debug_first and all_results:
+                sample = [
+                    f"{r.entity_type}={full_text[r.start:r.end][:25]!r}(s={r.score:.2f})"
+                    for r in all_results[:6]
+                ]
+                st.write(f"   Entità grezze OCR: {' | '.join(sample)}")
+
+        except Exception as e:
+            # L-03: messaggio sanitizzato
+            st.warning(safe_error_message(f"Presidio OCR pagina {page_num}", e))
+            results = []
+
+    return {
+        "words": words,
+        # Le parole OCR fanno anche da "entries" per collect_org_tokens():
+        # così R-17 (ragione sociale completa a partire dalla forma
+        # giuridica) funziona anche sui documenti scansionati.
+        "entries": words,
+        "full_text": full_text,
+        "word_positions": word_positions,
+        "results": results,
+        "raw": raw_count,
+        "filtered": len(results),
+        "dropped_fp": dropped_fp,
+        "ocr_failed": False,
+    }
+
+
+def apply_scanned_redactions(src_page, out_doc, analysis, custom_terms,
+                             known_person_tokens, log, page_num, dpi,
+                             redaction_mode="blackout", assigner=None,
+                             known_org_tokens=None, redact_handwriting=False):
+    """
+    Disegna le redazioni sull'immagine della pagina scansionata e la
+    inserisce nel documento di uscita.
+
+    La pagina viene ri-renderizzata invece di tenere in memoria
+    l'immagine della prima passata: a 300 dpi sono ~25 MB per pagina e
+    un atto di 50 pagine saturerebbe la RAM. Il render costa frazioni
+    di secondo, l'OCR — che NON viene rifatto — costa secondi.
+    """
+    known_person_tokens = known_person_tokens or set()
+    known_org_tokens = known_org_tokens or set()
+    use_codes = redaction_mode == "codes" and assigner is not None
+
+    zoom = dpi / 72
+    pix = src_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    img = Image.open(BytesIO(pix.tobytes("png")))
+
+    words = analysis["words"]
+    full_text = analysis["full_text"]
+    word_positions = analysis["word_positions"]
+    results = analysis["results"]
 
     draw = ImageDraw.Draw(img)
 
-    def draw_redaction(matching, code=None):
+    def draw_box(box, code=None):
         """Rettangolo nero, oppure riquadro bianco col codice (pseudonimizzazione)."""
-        x_min = min(w["x"] for w in matching)
-        y_min = min(w["y"] for w in matching)
-        x_max = max(w["x"] + w["w"] for w in matching)
-        y_max = max(w["y"] + w["h"] for w in matching)
-        pad = 2
-        box = [(x_min - pad, y_min - pad), (x_max + pad, y_max + pad)]
+        x_min, y_min, x_max, y_max = box
         if not (use_codes and code):
-            draw.rectangle(box, fill="black")
+            draw.rectangle([(x_min, y_min), (x_max, y_max)], fill="black")
             return
-        draw.rectangle(box, fill="white", outline="black")
+        draw.rectangle([(x_min, y_min), (x_max, y_max)], fill="white", outline="black")
         label = f"[{code}]"
         size = max(10, int((y_max - y_min) * 0.75))
         while size >= 8:
@@ -1736,94 +2181,45 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
             label, fill="black", font=font,
         )
 
+    def draw_redaction(matching, code=None):
+        pad = 2
+        draw_box((
+            min(w["x"] for w in matching) - pad,
+            min(w["y"] for w in matching) - pad,
+            max(w["x"] + w["w"] for w in matching) + pad,
+            max(w["y"] + w["h"] for w in matching) + pad,
+        ), code)
+
+    def _log_ocr(tipo, testo, confidenza, code):
+        row = {
+            "Pagina": page_num,
+            "Tipo": tipo,
+            "Testo": testo,
+            "Confidenza": confidenza,
+            "Metodo": "OCR",
+        }
+        if use_codes:
+            row["Codice"] = code
+        log.append(row)
+
+    # R-20: firme e scritte a mano, prima del testo — l'area è
+    # individuata sui pixel della pagina pulita, senza i rettangoli
+    # appena disegnati che altrimenti verrebbero scambiati per inchiostro.
+    # Se l'OCR è fallito del tutto non sappiamo dov'è la stampa: senza
+    # quel riferimento il rilevamento annerirebbe l'intera pagina.
+    if redact_handwriting and not analysis.get("ocr_failed"):
+        for box in detect_handwriting_regions(img, words, dpi):
+            # Sempre rettangolo nero, anche in pseudonimizzazione: una
+            # firma non ha un testo da mettere nella tabella di
+            # accoppiamento, e un codice lì sarebbe solo rumore.
+            draw_box(box, None)
+            _log_ocr("FIRMA / SCRITTA A MANO", "(area grafica)", "—", None)
+
+    # Stesso ordine di priorità delle pagine testuali: ogni parola
+    # riceve UNA sola redazione (termini utente → entità → propagazione)
+    drawn_idx = set()
+
     if words:
-        full_text = ""
-        word_positions = []
-        for idx, w in enumerate(words):
-            start = len(full_text)
-            full_text += w["text"]
-            end = len(full_text)
-            word_positions.append((start, end, idx))
-            full_text += " "
-
-        results = []
-        if selected_entities and full_text.strip():
-            try:
-                all_results = analyzer.analyze(
-                    text=full_text,
-                    entities=selected_entities,
-                    language="it",
-                )
-                raw_count = len(all_results)
-                # R-10: set magistrati doc-wide + contesti di questa pagina
-                local_magistrates = None
-                if magistrate_tokens is not None:
-                    local_magistrates = (
-                        magistrate_tokens | collect_magistrate_tokens(full_text)
-                    )
-                # R-01/R-07/R-08: soglia, trim, falsi positivi, citazioni
-                results = []
-                for r in all_results:
-                    if r.score < min_score:
-                        continue
-                    if r.entity_type in NER_ENTITY_TYPES:
-                        trimmed = (trim_org_span(full_text, r.start, r.end)
-                                   if r.entity_type == "ORGANIZATION"
-                                   else trim_ner_span(full_text, r.start, r.end))
-                        if trimmed is None:
-                            continue
-                        r.start, r.end = trimmed
-                    if is_false_positive(r.entity_type, full_text[r.start:r.end]):
-                        continue
-                    if (r.entity_type in NER_ENTITY_TYPES
-                            and is_case_citation(full_text, r.start, r.end)):
-                        continue
-                    # R-10: magistrati esclusi (set doc-wide + contesti locali)
-                    if (local_magistrates is not None
-                            and r.entity_type in NER_ENTITY_TYPES
-                            and is_magistrate(full_text[r.start:r.end],
-                                              local_magistrates)):
-                        continue
-                    # R-14: marca/modello dopo "automezzo/..." non si redige
-                    if (r.entity_type in NER_ENTITY_TYPES
-                            and is_vehicle_description(full_text, r.start)):
-                        continue
-                    # R-13/R-14: città → LOCATION, società → ORGANIZATION
-                    r.entity_type = retype_city_as_location(
-                        r.entity_type, full_text[r.start:r.end])
-                    r.entity_type = retype_company_as_org(
-                        r.entity_type, full_text[r.start:r.end],
-                        full_text[r.end:r.end + 25])
-                    results.append(r)
-                filtered_count = len(results)
-
-                if debug_first and all_results:
-                    sample = [
-                        f"{r.entity_type}={full_text[r.start:r.end][:25]!r}(s={r.score:.2f})"
-                        for r in all_results[:6]
-                    ]
-                    st.write(f"   Entità grezze OCR: {' | '.join(sample)}")
-
-            except Exception as e:
-                # L-03: messaggio sanitizzato
-                st.warning(safe_error_message(f"Presidio OCR pagina {page_num}", e))
-
-        # Stesso ordine di priorità delle pagine testuali: ogni parola
-        # riceve UNA sola redazione (termini utente → entità → propagazione)
-        drawn_idx = set()
-
-        def _log_ocr(tipo, testo, confidenza, code):
-            row = {
-                "Pagina": page_num,
-                "Tipo": tipo,
-                "Testo": testo,
-                "Confidenza": confidenza,
-                "Metodo": "OCR",
-            }
-            if use_codes:
-                row["Codice"] = code
-            log.append(row)
-
         # 1. Termini personalizzati
         for term in custom_terms:
             term = term.strip()
@@ -1888,8 +2284,6 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
     new_page = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
     new_page.insert_image(new_page.rect, stream=img_bytes.getvalue())
 
-    return raw_count, filtered_count
-
 
 # ============================================================
 # FUNZIONE PRINCIPALE
@@ -1898,7 +2292,7 @@ def process_scanned_page(src_page, out_doc, selected_entities, custom_terms,
 def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                min_score=0.4, ocr_mode="auto", ocr_dpi=300, ocr_lang="ita",
                redaction_mode="blackout", exclude_magistrates=False,
-               assigner=None):
+               assigner=None, redact_handwriting=False):
     """
     Anonimizza un PDF. Gestisce sia pagine testuali che scansionate.
     ocr_mode: 'auto' | 'always' | 'never'
@@ -1906,6 +2300,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     exclude_magistrates: R-10 — non redigere i nomi del collegio giudicante
     assigner: R-16 — CodeAssigner condiviso, per dare gli STESSI codici a più
         documenti dello stesso fascicolo (se None ne viene creato uno nuovo).
+    redact_handwriting: R-20 — oscura anche firme, sigle e timbri sulle
+        pagine passate per OCR.
 
     Ritorna (bytes_pdf, log, mapping) dove mapping è la tabella di
     accoppiamento codice↔testo (vuota in modalità blackout).
@@ -1933,10 +2329,14 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     pages_text = 0
     pages_with_inline_images = 0
 
-    # ---------- PASSATA 1: analisi delle pagine testuali ----------
+    # ---------- PASSATA 1: analisi di TUTTE le pagine ----------
     # Analizziamo PRIMA tutto il documento per raccogliere i nomi di
     # persona rilevati (R-04): così "Cabalisti" trovato a pagina 1
     # viene oscurato anche nelle pagine dove il NER lo manca.
+    #
+    # R-19: le pagine OCR partecipano a questa passata esattamente
+    # come quelle testuali. In un PDF interamente scansionato sono le
+    # UNICHE a poter alimentare la propagazione.
     page_plans = {}  # page_index -> {"use_ocr": bool, "analysis": dict|None}
     known_person_tokens = set()
     magistrate_tokens = set()
@@ -1962,19 +2362,25 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             (ocr_mode == "auto" and scanned and TESSERACT_AVAILABLE)
         )
 
-        analysis = None
-        if not use_ocr:
+        if use_ocr:
+            status_text.text(f"🔍 OCR pagina {page_num}/{total_pages}...")
+            analysis = analyze_scanned_page(
+                src_page, selected_entities, analyzer, min_score,
+                ocr_dpi, ocr_lang, page_num, debug_first=(page_num == 1),
+            )
+        else:
             analysis = analyze_text_page(
                 src_page, selected_entities, analyzer, min_score,
                 page_num, debug_first=(page_num == 1),
             )
-            known_person_tokens |= collect_person_tokens(analysis)
-            org_tokens |= collect_org_tokens(analysis)
-            if exclude_magistrates:
-                magistrate_tokens |= collect_magistrate_tokens(analysis["full_text"])
-            total_raw += analysis["raw"]
-            total_filtered += analysis["filtered"]
-            total_dropped_fp += analysis["dropped_fp"]
+
+        known_person_tokens |= collect_person_tokens(analysis)
+        org_tokens |= collect_org_tokens(analysis)
+        if exclude_magistrates:
+            magistrate_tokens |= collect_magistrate_tokens(analysis["full_text"])
+        total_raw += analysis["raw"]
+        total_filtered += analysis["filtered"]
+        total_dropped_fp += analysis["dropped_fp"]
 
         page_plans[page_index] = {
             "use_ocr": use_ocr,
@@ -2031,19 +2437,15 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         progress_bar.progress(0.5 + (page_index + 1) / (total_pages * 2))
 
         if plan["use_ocr"]:
-            status_text.text(f"🔍 OCR pagina {page_num}/{total_pages}...")
-            raw, filtered = process_scanned_page(
-                src_page, out_doc, selected_entities, custom_terms,
-                analyzer, min_score, ocr_dpi, ocr_lang, log, page_num,
-                debug_first=(page_num == 1),
-                known_person_tokens=known_person_tokens,
+            status_text.text(f"🖊️ Redazione pagina {page_num}/{total_pages}...")
+            apply_scanned_redactions(
+                src_page, out_doc, plan["analysis"], custom_terms,
+                known_person_tokens, log, page_num, ocr_dpi,
                 redaction_mode=redaction_mode,
                 assigner=assigner,
-                magistrate_tokens=magistrate_tokens if exclude_magistrates else None,
                 known_org_tokens=org_tokens,
+                redact_handwriting=redact_handwriting,
             )
-            total_raw += raw
-            total_filtered += filtered
             pages_ocr += 1
         else:
             if plan["scanned"] and not TESSERACT_AVAILABLE:
@@ -2232,9 +2634,21 @@ with st.sidebar:
             value=300,
             help="Più alto = OCR più accurato ma più lento. 300 è lo standard.",
         )
+        # R-20: le firme autografe sono immagini, nessun OCR le legge.
+        redact_handwriting = st.checkbox(
+            "✍️ Oscura firme e scritte a mano",
+            value=False,
+            help=(
+                "Copre le aree di inchiostro manoscritto nelle pagine passate "
+                "per OCR: firme in calce, sigle, annotazioni a margine, timbri. "
+                "È un riconoscimento grafico, non testuale: può coprire anche "
+                "loghi o grafici. Verifica sempre il risultato."
+            ),
+        )
     else:
         ocr_mode = "never"
         ocr_dpi = 300
+        redact_handwriting = False
         st.caption("⚠️ Tesseract non installato — vedi README.md")
 
     st.divider()
@@ -2385,6 +2799,9 @@ with st.expander("🧪 Test e diagnostica"):
         st.markdown(f"- Soglia: **{min_score:.0%}**")
         st.markdown(f"- Termini custom: **{len(custom_terms)}**")
         if TESSERACT_AVAILABLE:
+            st.markdown(
+                f"- Firme a mano: **{'oscurate' if redact_handwriting else 'non oscurate'}**"
+            )
             st.markdown(f"- Tesseract: ✅ versione {TESSERACT_VERSION}")
             st.markdown(f"- Lingua italiana: {'✅' if ITALIAN_AVAILABLE else '❌'}")
             if TESSERACT_PATH:
@@ -2487,6 +2904,7 @@ if uploaded_files:
                     redaction_mode=redaction_mode,
                     exclude_magistrates=exclude_magistrates,
                     assigner=assigner_condiviso,
+                    redact_handwriting=redact_handwriting,
                 )
                 # con codici condivisi il mapping cresce a ogni documento:
                 # teniamo traccia di quali codici sono NUOVI in questo file
