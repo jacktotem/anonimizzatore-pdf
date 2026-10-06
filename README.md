@@ -24,6 +24,7 @@
 - 🆔 **Documenti italiani** — codice fiscale, P.IVA, carta d'identità, patente, passaporto
 - 💳 **Dati finanziari** — IBAN, carte di credito
 - 📝 **Termini specifici** — qualsiasi nome, ragione sociale o stringa personalizzata
+- ✍️ **Firme autografe** — opzionale: copre firme, sigle, timbri e annotazioni a mano nelle pagine scansionate
 
 ### Tre vantaggi chiave
 
@@ -114,9 +115,14 @@ L'app include un pulsante **"Verifica aggiornamenti"** nella barra laterale: con
    - `Automatica` (consigliata): rileva da solo le pagine scansionate
    - `Forza tutto`: applica OCR a ogni pagina (più lento, più sicuro)
    - `Mai`: solo testo estraibile
-5. Con più documenti in pseudonimizzazione, scegli se usare **codici condivisi** (stessa persona → stesso codice in tutti gli atti del fascicolo, con un'unica tabella di accoppiamento)
-6. Clicca **🔒 Anonimizza**
-7. **Scarica** i PDF risultanti — singolarmente o tutti insieme in ZIP
+5. **Firme a mano** (opzionale): spunta *Oscura firme e scritte a mano* per
+   coprire anche firme in calce, sigle e timbri. Il riconoscimento è grafico,
+   non testuale — può coprire loghi o grafici, quindi verifica il risultato.
+   Funziona sulle pagine passate per OCR: su un PDF testuale con firme
+   scansionate usa `Forza tutto`.
+6. Con più documenti in pseudonimizzazione, scegli se usare **codici condivisi** (stessa persona → stesso codice in tutti gli atti del fascicolo, con un'unica tabella di accoppiamento)
+7. Clicca **🔒 Anonimizza**
+8. **Scarica** i PDF risultanti — singolarmente o tutti insieme in ZIP
 
 > ⚠️ **Verifica sempre** il PDF risultante prima dell'invio. L'AI può sbagliare.
 
@@ -172,6 +178,10 @@ L'app include un pulsante **"Verifica aggiornamenti"** nella barra laterale: con
 
 **Italiane** (Presidio + regex custom):
 `IT_FISCAL_CODE`, `IT_VAT_CODE`, `IT_IDENTITY_CARD`, `IT_DRIVER_LICENSE`, `IT_PASSPORT`, `IT_LICENSE_PLATE` (targhe: formato auto AA 000 AA, più moto/estere/ciclomotori riconosciute dal contesto "targa/targato/...")
+
+Il codice fiscale viene riconosciuto anche quando è scritto a gruppi, come
+negli atti notarili dattiloscritti (`MNT NMR 41P46 C286B`) o spezzato da un
+a capo; se il carattere di controllo torna, la confidenza è massima.
 
 ---
 

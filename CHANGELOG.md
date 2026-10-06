@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-06
+
+Tre problemi segnalati su un contratto di mutuo notarile scansionato
+di 33 pagine: codici fiscali rimasti in chiaro, nomi in maiuscolo non
+oscurati, firme autografe leggibili.
+
+### Fixed
+- **R-18 — Codice fiscale scritto a gruppi non veniva riconosciuto.**
+  Gli atti notarili dattiloscritti scrivono "MNT NMR 41P46 C286B"
+  invece di "MNTNMR41P46C286B"; su PDF scansionati l'OCR restituisce
+  quei gruppi come parole separate, e il recognizer predefinito di
+  Presidio — che pretende 16 caratteri attaccati — non trovava nulla.
+  Il nuovo `ItSpacedFiscalCodeRecognizer` ricompone i token adiacenti
+  (spazi o a capo) e ne verifica la struttura; quando torna anche il
+  carattere di controllo lo score sale a 0.95.
+  Nota: il recognizer di Presidio assegna 0.3 anche alla forma
+  attaccata, **sotto la soglia predefinita del 40%** — quindi i codici
+  fiscali potevano sfuggire anche scritti correttamente.
+- **R-19 — La propagazione dei nomi era spenta sui PDF interamente
+  scansionati.** Le pagine OCR venivano analizzate e redatte in un
+  colpo solo, nella seconda passata: non contribuivano quindi al set
+  di nomi propagato a tutto il documento (R-04). In una scansione —
+  dove *nessuna* pagina è testuale — quel set restava vuoto. Risultato:
+  un nome letto correttamente a pagina 2 non veniva oscurato a pagina
+  27, dove compariva in MAIUSCOLO e il NER statistico lo mancava
+  (spaCy etichetta "MONTOLEONE ANNA MARIA" come ORGANIZATION, non
+  PERSON). Ora `analyze_scanned_page()` e `apply_scanned_redactions()`
+  sono separate e le pagine OCR partecipano alla prima passata come
+  quelle testuali. L'OCR resta eseguito **una volta sola**.
+  Di conseguenza anche R-10 (magistrati), R-13/R-14 (città e società)
+  e R-17 (ragione sociale intera) ora funzionano sulle scansioni.
+- **Intestazioni dei piani di ammortamento scambiate per luoghi.**
+  "Rata", "Importo", "Quota", "Scadenza", "Totale" e simili sono ora
+  in stoplist.
+
+### Added
+- **R-20 — Oscuramento delle firme autografe** (opzione nella sidebar,
+  disattivata di default). Una firma è un'immagine: nessun OCR legge il
+  corsivo, quindi nessuna entità veniva mai rilevata — eppure le firme
+  in calce rivelano esattamente i nomi che il resto del documento
+  oscura. Il rilevamento è grafico e senza modelli: cerca le componenti
+  connesse di inchiostro grandi, rade e non coperte da parole lette
+  dall'OCR, poi le raggruppa per vicinanza. Copre anche timbri,
+  sigle e annotazioni a margine.
+  È un'euristica, perciò l'opzione è opt-in e l'interfaccia avverte di
+  verificare il risultato: può coprire anche loghi o grafici, e su
+  stampe molto sbiadite che l'OCR non legge può oscurare qualche
+  parola stampata (sbaglia verso l'eccesso di oscuramento, non verso
+  il difetto). Funziona sulle pagine passate per OCR: per usarla su un
+  PDF testuale con firme scansionate, scegliere "Forza OCR su tutto".
+
+### Changed
+- La prima passata ora mostra l'avanzamento dell'OCR, che è la fase
+  lenta; la seconda si limita al disegno delle redazioni.
+
 ## [2.0.2] - 2026-09-29
 
 Correzione dell'installazione su Windows Server, segnalata dal

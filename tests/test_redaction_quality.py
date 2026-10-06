@@ -920,3 +920,209 @@ def test_articoli_e_ruoli_non_entrano_nel_nome():
     toks = _org_tokens_da_testo("citava in giudizio la Spett.le ESEMPIO S.r.l.")
     assert "esempio" in toks
     assert not {"spett", "spettle", "citava"} & toks
+
+
+# ------------------------------------------------------------
+# R-18: codice fiscale spezzato in gruppi da spazi
+# ------------------------------------------------------------
+# Negli atti notarili dattiloscritti il codice fiscale si scrive
+# "MNT NMR 41P46 C286B"; su PDF scansionati l'OCR restituisce quei
+# gruppi come parole separate e il recognizer standard non li vede.
+
+def _cf_spans(testo):
+    """(testo_trovato, score) per ogni codice fiscale riconosciuto."""
+    from app import ItSpacedFiscalCodeRecognizer
+    rec = ItSpacedFiscalCodeRecognizer()
+    return [
+        (testo[r.start:r.end], r.score)
+        for r in rec.analyze(testo, ["IT_FISCAL_CODE"])
+    ]
+
+
+@pytest.mark.parametrize("testo,atteso", [
+    # i due casi reali del contratto di mutuo segnalato
+    ("codice fiscale MNT NMR 41P46 C286B, entrambi residenti",
+     "MNT NMR 41P46 C286B"),
+    ("scale BNC FNC 73B24 C286C.", "BNC FNC 73B24 C286C"),
+    # forma attaccata: deve continuare a funzionare
+    ("codice fiscale MNTNMR41P46C286B, entrambi", "MNTNMR41P46C286B"),
+    # raggruppamenti alternativi e a capo
+    ("C.F. RSS MRA 85T10 A562S", "RSS MRA 85T10 A562S"),
+    ("CF RSSMRA85T10\nA562S spezzato", "RSSMRA85T10\nA562S"),
+])
+def test_codice_fiscale_spezzato_riconosciuto(testo, atteso):
+    trovati = _cf_spans(testo)
+    assert [t for t, _ in trovati] == [atteso]
+
+
+def test_codice_fiscale_sopra_la_soglia_predefinita():
+    """Il recognizer predefinito di Presidio dà 0.3 a un codice fiscale
+    senza contesto: sotto la soglia di default (40%) sparirebbe."""
+    for testo in ("codice fiscale MNT NMR 41P46 C286B,", "CF BNC FNC 73B24 C286C"):
+        assert all(score >= 0.4 for _, score in _cf_spans(testo))
+
+
+def test_codice_fiscale_valido_ha_score_piu_alto():
+    """Carattere di controllo corretto → quasi certezza."""
+    from app import is_valid_fiscal_code
+    assert is_valid_fiscal_code("RSSMRA85T10A562S") is True
+    assert is_valid_fiscal_code("RSSMRA85T10A562X") is False
+    (_, valido), = _cf_spans("CF RSS MRA 85T10 A562S")
+    (_, struttura), = _cf_spans("CF RSS MRA 85T10 A562X")
+    assert valido > struttura >= 0.4
+
+
+@pytest.mark.parametrize("testo", [
+    # numeri di un piano di ammortamento
+    "121 337,83 91,09 246,74 17.056,55 12/07/2017",
+    "il n. 20941 e dal n. 17747 per euro trentanovemila",
+    # altri identificativi che NON sono codici fiscali
+    "P.IVA 01234567890 della societa'",
+    "IBAN IT60X0542811101000000123456",
+    "targa AB 123 CD del veicolo",
+    # 16 caratteri ma struttura sbagliata
+    "ABC DEF 00X00 Y000Z non e' un codice",
+])
+def test_nessun_falso_codice_fiscale(testo):
+    assert _cf_spans(testo) == []
+
+
+# ------------------------------------------------------------
+# R-19: le pagine OCR alimentano la propagazione dei nomi
+# ------------------------------------------------------------
+# In un PDF interamente scansionato nessuna pagina era "testuale",
+# quindi known_person_tokens restava vuoto e la propagazione (R-04)
+# era di fatto spenta: un nome letto a pagina 2 non veniva oscurato
+# a pagina 27, dove compariva in MAIUSCOLO e il NER lo mancava.
+
+def test_analisi_ocr_compatibile_con_la_propagazione():
+    """Il dict di analyze_scanned_page() deve avere le stesse chiavi
+    che collect_person_tokens() e collect_org_tokens() si aspettano."""
+    import inspect
+
+    from app import analyze_scanned_page, analyze_text_page
+
+    sorgente = inspect.getsource(analyze_scanned_page)
+    for chiave in ("full_text", "results", "entries"):
+        assert f'"{chiave}":' in sorgente, f"manca la chiave {chiave}"
+
+    # e deve accettare gli stessi parametri d'analisi
+    firma_ocr = inspect.signature(analyze_scanned_page).parameters
+    firma_testo = inspect.signature(analyze_text_page).parameters
+    for nome in ("selected_entities", "analyzer", "min_score", "page_num"):
+        assert nome in firma_ocr and nome in firma_testo
+
+
+def test_nome_maiuscolo_propagato_da_una_pagina_allaltra():
+    """'Montoleone' riconosciuto in una pagina deve coprire
+    'MONTOLEONE' in un'altra, dove il NER non lo vede."""
+    from app import collect_person_tokens
+
+    tokens = collect_person_tokens({
+        "full_text": "il Sig. Montoleone Anna Maria, nato a Castelvetrano",
+        "entries": [],
+        "results": [RecognizerResult("PERSON", 8, 29, 0.85)],
+    })
+    assert {"montoleone", "anna", "maria"} <= tokens
+    # è così che la propagazione confronta le parole della pagina OCR
+    for parola in ("MONTOLEONE", "ANNA", "MARIA"):
+        assert parola.strip().lower() in tokens
+        assert parola[:1].isupper()
+
+
+@pytest.mark.parametrize("testo", [
+    "Rata", "Rate", "Rata Importo Quota", "Totale importo",
+    "Scadenza", "Totali", "Quota capitale",
+])
+def test_intestazioni_piano_ammortamento_scartate(testo):
+    """Le colonne di un piano di ammortamento non sono luoghi."""
+    assert is_false_positive("LOCATION", testo) is True
+
+
+# ------------------------------------------------------------
+# R-20: firme autografe e scritte a mano
+# ------------------------------------------------------------
+# Tesseract non legge il corsivo: una firma in calce non produce
+# alcuna entità, pur rivelando il nome. Il rilevamento è grafico.
+
+def _pagina_sintetica(disegna, size=(1200, 1600)):
+    from PIL import Image, ImageDraw
+    img = Image.new("L", size, 255)
+    disegna(ImageDraw.Draw(img))
+    return img
+
+
+def test_firma_rilevata_dove_locr_non_legge():
+    """Un tratto lungo e rado, senza parole OCR sopra, è una firma."""
+    from app import detect_handwriting_regions
+
+    def firma(d):
+        punti = [(200 + i * 6, 1200 + int(90 * ((i % 20) - 10) / 10))
+                 for i in range(120)]
+        d.line(punti, fill=0, width=5)
+
+    regioni = detect_handwriting_regions(_pagina_sintetica(firma), [], dpi=300)
+    assert len(regioni) == 1
+    x0, y0, x1, y1 = regioni[0]
+    assert x0 < 220 and x1 > 900          # copre tutto il tratto
+    assert y0 < 1130 and y1 > 1280
+
+
+def test_testo_stampato_non_scambiato_per_firma():
+    """La stessa area, ma coperta da parole lette dall'OCR, è stampa."""
+    from app import detect_handwriting_regions
+
+    def firma(d):
+        punti = [(200 + i * 6, 1200 + int(90 * ((i % 20) - 10) / 10))
+                 for i in range(120)]
+        d.line(punti, fill=0, width=5)
+
+    parole = [{"text": "parola", "x": 180 + k * 120, "y": 1100,
+               "w": 115, "h": 230, "conf": 85} for k in range(6)]
+    assert detect_handwriting_regions(_pagina_sintetica(firma), parole, dpi=300) == []
+
+
+def test_pagina_bianca_nessuna_firma():
+    from app import detect_handwriting_regions
+    assert detect_handwriting_regions(_pagina_sintetica(lambda d: None), [], dpi=300) == []
+
+
+def test_blocco_pieno_non_e_una_firma():
+    """Un rettangolo nero pieno (logo, foto, redazione già applicata)
+    non ha la radezza di un tratto a penna."""
+    from app import detect_handwriting_regions
+
+    def blocco(d):
+        d.rectangle([(300, 400), (900, 700)], fill=0)
+
+    assert detect_handwriting_regions(_pagina_sintetica(blocco), [], dpi=300) == []
+
+
+def test_firma_sottile_non_sbiadita_dalla_riduzione():
+    """Il tratto di una biro è sottile: la riduzione per l'analisi deve
+    prendere il pixel più scuro del blocco, non la media, altrimenti
+    la firma sparisce (succedeva con la firma blu del notaio)."""
+    from app import detect_handwriting_regions
+
+    def tratto_sottile(d):
+        punti = [(200 + i * 8, 900 + int(70 * ((i % 16) - 8) / 8))
+                 for i in range(110)]
+        d.line(punti, fill=90, width=2)      # grigio medio, 2 px
+
+    assert len(detect_handwriting_regions(
+        _pagina_sintetica(tratto_sottile), [], dpi=300)) == 1
+
+
+@pytest.mark.parametrize("testo,atteso", [
+    # R-18: importi di un piano di ammortamento, non telefoni
+    ("8.765,42", True),
+    ("337,83", True),
+    ("337,83 288,58", True),
+    ("60.809,40", True),
+    # telefoni veri: nessuno ha la virgola decimale
+    ("0541 123456", False),
+    ("+39 335 1234567", False),
+    ("011.345.678", False),
+])
+def test_importi_non_sono_telefoni(testo, atteso):
+    assert is_false_positive("PHONE_NUMBER", testo) is atteso
