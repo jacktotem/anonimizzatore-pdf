@@ -218,9 +218,22 @@ function Download-VerifiedFile {
 # già presente. Qui cerchiamo l'interprete in tutti i posti plausibili
 # e ne restituiamo il PERCORSO, che poi viene usato ovunque.
 
+# PY-04: gli "alias di esecuzione app" di Windows
+# (%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe) sono segnaposto da
+# zero byte, non interpreti. Test-Path li vede, ma eseguirli stampa
+# "Failed to launch ... This may be a corrupt install or a system
+# configuration issue": è il rumore che riempiva i log sul server.
+function Test-AppExecutionAlias {
+    param([string]$Percorso)
+    return ($Percorso -like "*\AppData\Local\Microsoft\WindowsApps\*")
+}
+
 function Test-PythonExe {
     param([string]$Percorso)
     if ([string]::IsNullOrWhiteSpace($Percorso) -or -not (Test-Path $Percorso)) {
+        return $false
+    }
+    if (Test-AppExecutionAlias $Percorso) {
         return $false
     }
     $prevEap = $ErrorActionPreference
@@ -235,7 +248,59 @@ function Test-PythonExe {
     return ($versione -match "Python 3\.12")
 }
 
+# PY-05: Windows può dichiarare installata una 3.12 che sul disco non
+# c'è più — registro e launcher "py" indicano un percorso, ma il file è
+# sparito. In quello stato l'installer ufficiale vede la versione già
+# presente, non fa nulla ed esce con 0 in pochi secondi: il setup
+# credeva quindi di aver installato Python e falliva subito dopo.
+#
+# Qui si raccolgono i percorsi DICHIARATI senza eseguirli, e si guarda
+# solo se esistono. La distinzione fra "manca tutta la cartella" e
+# "c'è la cartella ma non python.exe" è ciò che separa una
+# registrazione stantia da un file messo in quarantena dall'antivirus.
+function Get-Python312Dichiarati {
+    $dichiarati = @()
+
+    foreach ($radice in @("HKLM:\SOFTWARE\Python\PythonCore\3.12\InstallPath",
+                          "HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore\3.12-32\InstallPath",
+                          "HKCU:\SOFTWARE\Python\PythonCore\3.12\InstallPath")) {
+        try {
+            $dir = (Get-ItemProperty -Path $radice -ErrorAction Stop)."(default)"
+            if ($dir) { $dichiarati += (Join-Path $dir "python.exe") }
+        } catch { }
+    }
+
+    # Il launcher elenca le versioni note: "-V:3.12 *   C:\...\python.exe"
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        foreach ($riga in (& py -0p 2>$null)) {
+            if ("$riga" -match "3\.12.*?\s+([A-Za-z]:\\.*python\.exe)") {
+                $dichiarati += $Matches[1].Trim()
+            }
+        }
+    } catch { } finally { $ErrorActionPreference = $prevEap }
+
+    $esiti = @()
+    foreach ($exe in ($dichiarati | Select-Object -Unique)) {
+        if (Test-AppExecutionAlias $exe) { continue }
+        $esiti += [PSCustomObject]@{
+            Percorso    = $exe
+            FilePresente = (Test-Path $exe)
+            CartellaPresente = (Test-Path (Split-Path $exe -Parent))
+        }
+    }
+    return $esiti
+}
+
+function Get-Python312Fantasma {
+    # Registrazioni che puntano a un file inesistente.
+    return @(Get-Python312Dichiarati | Where-Object { -not $_.FilePresente })
+}
+
 function Find-Python312 {
+    param([switch]$Silenzioso)
+
     # 1. Launcher ufficiale
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -300,9 +365,11 @@ function Find-Python312 {
     # sistema: se l'amministratore ne ha installato uno a mano ma di
     # versione diversa (3.13, 3.14...), il log lo dice esplicitamente
     # invece di lasciare intendere che Python manchi del tutto.
+    if ($Silenzioso) { return $null }
     try {
         $altri = @()
         foreach ($cmd in (Get-Command python.exe, python3.exe -All -ErrorAction SilentlyContinue)) {
+            if (Test-AppExecutionAlias $cmd.Source) { continue }   # PY-04
             $prevEap = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
             try { $v = (& $cmd.Source --version 2>&1 | Out-String).Trim() } catch { $v = "" }
@@ -329,35 +396,36 @@ function Find-Python312 {
     return $null
 }
 
-function Install-Python {
-    Show-Progress "Download Python 3.12..." 10
-
-    $pythonInstaller = Join-Path $env:TEMP "python-3.12.8-amd64.exe"
-
-    Download-VerifiedFile `
-        -Url $Binaries.Python.Url `
-        -ExpectedSha256 $Binaries.Python.Sha256 `
-        -DestinationPath $pythonInstaller `
-        -ComponentName "Python 3.12"
-
-    Show-Progress "Installazione Python 3.12 in corso..." 20
-
-    $pythonArgs = @(
-        "/quiet",
-        "InstallAllUsers=1",
-        "PrependPath=1",
-        "Include_test=0",
-        "Include_launcher=1",
-        "InstallLauncherAllUsers=1"
+function Invoke-PythonSetup {
+    param(
+        [string]$Installer,
+        [switch]$Disinstalla
     )
 
-    # PY-02: log dell'installer Python, utile quando fallisce sul campo
     $logPython = Join-Path $LogDir "python-install.log"
-    $pythonArgs += "/log"
-    $pythonArgs += $logPython
+    if ($Disinstalla) {
+        $argomenti = @("/quiet", "/uninstall")
+    } else {
+        $argomenti = @(
+            "/quiet",
+            "InstallAllUsers=1",
+            "PrependPath=1",
+            "Include_test=0",
+            "Include_launcher=1",
+            "InstallLauncherAllUsers=1"
+        )
+    }
+    # PY-02: log dell'installer Python, utile quando fallisce sul campo
+    $argomenti += "/log"
+    $argomenti += $logPython
 
-    $process = Start-Process -FilePath $pythonInstaller -ArgumentList $pythonArgs -Wait -PassThru
+    $process = Start-Process -FilePath $Installer -ArgumentList $argomenti -Wait -PassThru
     $codice = $process.ExitCode
+
+    if ($Disinstalla) {
+        Write-Log "Rimozione della registrazione Python 3.12 (codice $codice)" "WARN"
+        return
+    }
 
     # PY-02: non tutti i codici diversi da 0 sono errori.
     #  3010 = riuscito, richiede riavvio (prima faceva fallire il setup!)
@@ -380,9 +448,48 @@ function Install-Python {
                    "Dettagli in $logPython")
         }
     }
+}
 
-    # Refresh PATH per la sessione corrente
+function Update-PathCorrente {
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+}
+
+function Install-Python {
+    Show-Progress "Download Python 3.12..." 10
+
+    $pythonInstaller = Join-Path $env:TEMP "python-3.12.8-amd64.exe"
+
+    Download-VerifiedFile `
+        -Url $Binaries.Python.Url `
+        -ExpectedSha256 $Binaries.Python.Sha256 `
+        -DestinationPath $pythonInstaller `
+        -ComponentName "Python 3.12"
+
+    Show-Progress "Installazione Python 3.12 in corso..." 20
+    Invoke-PythonSetup -Installer $pythonInstaller
+    Update-PathCorrente
+
+    # PY-06: se dopo l'installazione l'interprete ancora non c'è E il
+    # sistema dichiara una 3.12 a un percorso inesistente, siamo nel
+    # caso descritto in PY-05: l'installer ha visto la versione "già
+    # presente" e non ha scritto nulla. Si ripulisce la registrazione
+    # fantasma e si reinstalla da zero. Una volta sola, e solo in
+    # questo stato dimostrabilmente rotto.
+    if (-not (Find-Python312 -Silenzioso)) {
+        $fantasmi = Get-Python312Fantasma
+        if ($fantasmi.Count -gt 0) {
+            foreach ($f in $fantasmi) {
+                Write-Log ("Registrazione Python 3.12 fantasma: $($f.Percorso) " +
+                           "(cartella presente: $($f.CartellaPresente))") "WARN"
+            }
+            Show-Progress "Pulizia di un'installazione Python incompleta..." 25
+            Invoke-PythonSetup -Installer $pythonInstaller -Disinstalla
+            Update-PathCorrente
+            Show-Progress "Reinstallazione di Python 3.12..." 28
+            Invoke-PythonSetup -Installer $pythonInstaller
+            Update-PathCorrente
+        }
+    }
 
     Remove-Item $pythonInstaller -ErrorAction SilentlyContinue
 }
@@ -711,9 +818,30 @@ try {
         Install-Python
         $script:PythonExe = Find-Python312
         if (-not $script:PythonExe) {
+            # PY-05/PY-06: il messaggio deve dire la causa vera, non
+            # mandare l'amministratore a riavviare il server a vuoto.
+            $fantasmi = Get-Python312Fantasma
+            if ($fantasmi.Count -gt 0) {
+                $f = $fantasmi[0]
+                if ($f.CartellaPresente) {
+                    $causa = ("Windows dichiara Python 3.12 in $($f.Percorso): la cartella c'è " +
+                              "ma python.exe no. Di norma significa che un antivirus lo ha messo " +
+                              "in quarantena. Controlla la cronologia delle protezioni di " +
+                              "Microsoft Defender, ripristina il file o escludi la cartella, " +
+                              "poi rilancia il setup.")
+                } else {
+                    $causa = ("Windows dichiara Python 3.12 in $($f.Percorso), ma quella cartella " +
+                              "non esiste: è una registrazione rimasta da un'installazione " +
+                              "rimossa a mano. Il setup ha già provato a ripulirla senza " +
+                              "riuscirci. Disinstalla 'Python 3.12' da Impostazioni > App " +
+                              "installate (anche se la cartella non c'è più), poi rilancia il setup.")
+                }
+            } else {
+                $causa = ("Se il sistema ha chiesto un riavvio, riavvia il server e rilancia " +
+                          "il setup.")
+            }
             throw ("Python 3.12 risulta installato ma non è utilizzabile. " +
-                   "Se il sistema ha chiesto un riavvio, riavvia il server e " +
-                   "rilancia il setup. Dettagli nei log in $LogDir")
+                   $causa + " Dettagli nei log in $LogDir")
         }
     }
     Write-Log "Interprete Python in uso: $script:PythonExe"
