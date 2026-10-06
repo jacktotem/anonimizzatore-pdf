@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-10-06
+
+Secondo giro di correzioni all'installazione su Windows Server,
+sempre dal responsabile IT di Advais: il setup si fermava con "Python
+3.12 risulta installato ma non è utilizzabile".
+
+### Fixed
+- **PY-05 — Registrazione di Python 3.12 "fantasma".** Sul server
+  Windows dichiarava Python 3.12 installato in
+  `C:\Program Files\Python312` — sia nel registro sia nel launcher
+  `py -0p` — ma lì non c'era alcun `python.exe` (errore `0x80070002`,
+  file non trovato). In quello stato l'installer ufficiale considera la
+  versione già presente, non scrive nulla ed esce con codice **0 in tre
+  secondi**: il setup credeva di aver installato Python e falliva
+  immediatamente dopo, perché l'interprete non esisteva.
+  Ora i percorsi dichiarati vengono verificati **senza eseguirli** e,
+  quando puntano al vuoto, la registrazione viene riconosciuta come tale.
+- **PY-06 — Riparazione automatica, una volta sola.** Rilevata la
+  registrazione fantasma, il setup disinstalla la voce rotta e
+  reinstalla Python da zero, poi riprova. L'operazione avviene
+  esclusivamente in quello stato dimostrabilmente guasto, mai su
+  un'installazione funzionante.
+- **PY-04 — Alias di esecuzione app scambiati per interpreti.** I
+  segnaposto da zero byte in
+  `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe` venivano eseguiti
+  durante la ricerca dell'interprete e rispondevano con
+  *"Failed to launch ... This may be a corrupt install or a system
+  configuration issue"*: decine di righe di errore che rendevano i log
+  illeggibili e sembravano la causa del guasto invece che un effetto.
+  Ora quei percorsi vengono riconosciuti e saltati.
+- **Messaggio d'errore finale rifatto.** Prima diceva solo «se il
+  sistema ha chiesto un riavvio, riavvia il server»: un consiglio
+  inutile per questa causa. Ora il messaggio distingue i due casi e
+  indica il rimedio esatto —
+  *cartella assente* → registrazione rimasta da una disinstallazione
+  manuale, da rimuovere da Impostazioni › App installate;
+  *cartella presente ma senza `python.exe`* → con ogni probabilità
+  l'antivirus lo ha messo in quarantena, da ripristinare o escludere.
+
+### Added
+- `windows/tests/test-python-discovery.ps1`: test della ricerca
+  dell'interprete con registro e launcher simulati. Gira su qualsiasi
+  piattaforma e riproduce il guasto del server.
+
 ## [2.1.0] - 2026-10-06
 
 Tre problemi segnalati su un contratto di mutuo notarile scansionato
