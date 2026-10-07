@@ -73,17 +73,27 @@ jobs:
               Start-Process $Matches[1] -ArgumentList $Matches[2] -Wait
             }
           }
-          # Poi i pacchetti MSI rimasti (launcher "py" incluso): un
-          # launcher più recente fa fallire l'installer della 3.12.8
-          # con codice 1603.
-          $msi = foreach ($radice in "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-                                     "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall") {
-            Get-ChildItem $radice -ErrorAction SilentlyContinue | Get-ItemProperty |
-              Where-Object { $_.DisplayName -match '^Python ' -and $_.PSChildName -match '^\{[0-9A-F-]+\}$' }
+          # Poi TUTTI i prodotti MSI di Python, enumerati tramite Windows
+          # Installer (vede anche quelli nascosti dal Pannello di controllo).
+          # Una 3.12 più recente rimasta registrata fa fallire l'installer
+          # della 3.12.8: "A newer version of Python 3.12 is already
+          # installed". Si ripete finché non ne resta nessuno.
+          $wi = New-Object -ComObject WindowsInstaller.Installer
+          for ($giro = 1; $giro -le 3; $giro++) {
+            $resti = @(foreach ($code in $wi.Products) {
+              $nome = try { $wi.ProductInfo($code, "ProductName") } catch { "" }
+              if ($nome -match '^Python ') { [PSCustomObject]@{ Code = $code; Nome = $nome } }
+            })
+            Write-Host "Giro $giro - prodotti Python registrati: $($resti.Count)"
+            if ($resti.Count -eq 0) { break }
+            foreach ($r in $resti) {
+              $p = Start-Process msiexec.exe -ArgumentList "/x", $r.Code, "/qn", "/norestart" -Wait -PassThru
+              Write-Host "  msiexec /x $($r.Nome): codice $($p.ExitCode)"
+            }
           }
-          foreach ($m in $msi) {
-            Write-Host "Rimuovo MSI: $($m.DisplayName)"
-            Start-Process msiexec.exe -ArgumentList "/x", $m.PSChildName, "/qn", "/norestart" -Wait
+          if ($resti.Count -gt 0) {
+            $resti | Format-Table | Out-String | Write-Host
+            throw "Impossibile ripulire il runner dai Python preinstallati"
           }
           Remove-Item -Recurse -Force C:\hostedtoolcache\windows\Python -ErrorAction SilentlyContinue
           foreach ($k in "HKLM:\SOFTWARE\Python", "HKCU:\SOFTWARE\Python", "HKLM:\SOFTWARE\WOW6432Node\Python") {
