@@ -78,21 +78,21 @@ jobs:
           # Una 3.12 più recente rimasta registrata fa fallire l'installer
           # della 3.12.8: "A newer version of Python 3.12 is already
           # installed". Si ripete finché non ne resta nessuno.
-          $wi = New-Object -ComObject WindowsInstaller.Installer
+          # Win32_Product interroga Windows Installer prodotto per prodotto:
+          # lento, ma vede tutto (la COM WindowsInstaller.Installer da
+          # PowerShell 7 non enumerava nulla).
           for ($giro = 1; $giro -le 3; $giro++) {
-            $resti = @(foreach ($code in $wi.Products) {
-              $nome = try { $wi.ProductInfo($code, "ProductName") } catch { "" }
-              if ($nome -match '^Python ') { [PSCustomObject]@{ Code = $code; Nome = $nome } }
-            })
+            $resti = @(Get-CimInstance -ClassName Win32_Product |
+                       Where-Object { $_.Name -match '^Python ' })
             Write-Host "Giro $giro - prodotti Python registrati: $($resti.Count)"
             if ($resti.Count -eq 0) { break }
             foreach ($r in $resti) {
-              $p = Start-Process msiexec.exe -ArgumentList "/x", $r.Code, "/qn", "/norestart" -Wait -PassThru
-              Write-Host "  msiexec /x $($r.Nome): codice $($p.ExitCode)"
+              $p = Start-Process msiexec.exe -ArgumentList "/x", $r.IdentifyingNumber, "/qn", "/norestart" -Wait -PassThru
+              Write-Host "  msiexec /x $($r.Name) $($r.Version): codice $($p.ExitCode)"
             }
           }
           if ($resti.Count -gt 0) {
-            $resti | Format-Table | Out-String | Write-Host
+            $resti | Format-Table Name, Version, IdentifyingNumber | Out-String | Write-Host
             throw "Impossibile ripulire il runner dai Python preinstallati"
           }
           Remove-Item -Recurse -Force C:\hostedtoolcache\windows\Python -ErrorAction SilentlyContinue
