@@ -81,10 +81,19 @@ jobs:
           # Win32_Product interroga Windows Installer prodotto per prodotto:
           # lento, ma vede tutto (la COM WindowsInstaller.Installer da
           # PowerShell 7 non enumerava nulla).
+          #
+          # Contano solo i pacchetti 3.12 che l'installer della 3.12.8
+          # installerebbe: una loro versione più recente lo blocca ("A newer
+          # version of Python 3.12 is already installed"). Le altre versioni
+          # possono restare — molte non si lasciano disinstallare sul runner
+          # (1603) e un server con altri Python è anzi uno scenario realistico.
+          # La Test Suite è esclusa perché il setup la installa con
+          # Include_test=0.
+          $bloccanti = { @(Get-CimInstance -ClassName Win32_Product |
+                           Where-Object { $_.Name -match '^Python 3\.12\.' -and $_.Name -notmatch 'Test Suite' }) }
           for ($giro = 1; $giro -le 3; $giro++) {
-            $resti = @(Get-CimInstance -ClassName Win32_Product |
-                       Where-Object { $_.Name -match '^Python ' })
-            Write-Host "Giro $giro - prodotti Python registrati: $($resti.Count)"
+            $resti = & $bloccanti
+            Write-Host "Giro $giro - pacchetti Python 3.12 che bloccherebbero l'installazione: $($resti.Count)"
             if ($resti.Count -eq 0) { break }
             foreach ($r in $resti) {
               $p = Start-Process msiexec.exe -ArgumentList "/x", $r.IdentifyingNumber, "/qn", "/norestart" -Wait -PassThru
@@ -93,8 +102,11 @@ jobs:
           }
           if ($resti.Count -gt 0) {
             $resti | Format-Table Name, Version, IdentifyingNumber | Out-String | Write-Host
-            throw "Impossibile ripulire il runner dai Python preinstallati"
+            throw "Impossibile togliere dal runner la Python 3.12 preinstallata"
           }
+          Write-Host "Altri Python registrati sul runner (non bloccanti):"
+          Get-CimInstance -ClassName Win32_Product | Where-Object { $_.Name -match '^Python ' } |
+            Sort-Object Name | ForEach-Object { Write-Host "  $($_.Name)" }
           Remove-Item -Recurse -Force C:\hostedtoolcache\windows\Python -ErrorAction SilentlyContinue
           foreach ($k in "HKLM:\SOFTWARE\Python", "HKCU:\SOFTWARE\Python", "HKLM:\SOFTWARE\WOW6432Node\Python") {
             Remove-Item -Recurse -Force $k -ErrorAction SilentlyContinue
