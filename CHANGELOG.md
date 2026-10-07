@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-10-07
+
+Terzo giro sull'installazione Windows del server Advais: con la 2.1.1
+il setup si fermava ancora con "Python 3.12 risulta installato ma non
+è utilizzabile", e la riparazione automatica introdotta apposta non
+partiva.
+
+### Fixed
+- **PY-07 — La riparazione automatica non scattava.** La 2.1.1
+  ripuliva e reinstallava Python solo se riconosceva una registrazione
+  "fantasma", cioè un percorso dichiarato dove il file mancava. Sul
+  server quel riconoscimento non è scattato: o perché il `python.exe`
+  dichiarato esiste ma non parte (caso che la 2.1.1 non considerava),
+  o perché il percorso non veniva letto. La riparazione era fragile
+  quanto la diagnosi da cui dipendeva.
+  Ora, se dopo l'installazione non c'è un interprete utilizzabile, il
+  setup disinstalla e reinstalla Python **sempre**, una volta sola, a
+  prescindere dalla diagnosi. Non si rischia di toccare un Python
+  funzionante: se ce ne fosse uno, la ricerca lo avrebbe già trovato.
+- **Interprete presente ma non avviabile.** Ogni 3.12 dichiarata viene
+  ora classificata come *ok*, *assente* o *non avviabile*; per
+  quest'ultima il log riporta codice di uscita e messaggio di Windows
+  (DLL mancanti, esecuzione bloccata da un criterio o dall'antivirus).
+- **Ricerca più robusta.** Il registro viene letto esplicitamente nelle
+  viste a 64 e a 32 bit (una PowerShell a 32 bit vedeva solo la
+  seconda); l'elenco del launcher `py` viene letto anche da stderr;
+  i Program Files a 64 bit vengono cercati anche tramite
+  `ProgramW6432`.
+- **Log autosufficienti.** Se l'installazione non va a buon fine il log
+  riporta bitness di PowerShell, ogni 3.12 dichiarata con il suo stato
+  e la durata dell'installer di Python — un "successo" in 3-4 secondi
+  rivela subito che l'installer non ha scritto nulla.
+- **VER-01 — Versione sbagliata nei log.** Lo script di setup aveva la
+  versione scritta a mano, ferma alla 2.0.2: i log della 2.1.1 si
+  presentavano come "v2.0.2", facendo pensare che sul server girasse
+  ancora la versione vecchia. Ora la passa l'installer.
+- Il messaggio d'errore finale indica anche il rimedio manuale:
+  eseguire l'installer di Python 3.12.8, scegliere *Uninstall* e
+  rilanciare il setup.
+
+### Changed
+- `windows/tests/test-python-discovery.ps1` esteso a 17 casi, incluso
+  il flusso di riparazione: verificato che fallisce sul codice della
+  2.1.1 (nessuna riparazione) e passa sulla 2.1.2.
+
 ## [2.1.1] - 2026-10-06
 
 Secondo giro di correzioni all'installazione su Windows Server,

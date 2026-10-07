@@ -3,12 +3,12 @@
 ; Installer Inno Setup
 ; ========================================
 ; La versione può essere sovrascritta da riga di comando (CI):
-;   ISCC.exe /DMyAppVersion=2.1.1 installer.iss
+;   ISCC.exe /DMyAppVersion=2.1.2 installer.iss
 ; Il default qui sotto serve per la compilazione manuale.
 
 #define MyAppName "Anonimizzatore PDF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.1.1"
+  #define MyAppVersion "2.1.2"
 #endif
 #define MyAppPublisher "Anonimizzatore PDF"
 #define MyAppExeName "AnonimizzatorePDF.bat"
@@ -59,7 +59,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 ; 2. Un installer non firmato che lancia PowerShell nascosto, scarica
 ;    exe e li esegue in silenzio ha il profilo comportamentale di un
 ;    dropper: era uno dei motivi dei falsi positivi di Defender.
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -NoProfile -File ""{app}\setup-dependencies.ps1"" -InstallPath ""{app}"""; \
+Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -NoProfile -File ""{app}\setup-dependencies.ps1"" -InstallPath ""{app}"" -AppVersion ""{#MyAppVersion}"""; \
     StatusMsg: "Configurazione di Python, Tesseract e dipendenze (10-15 minuti)..."; \
     Flags: waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Avvia {#MyAppName} ora"; Flags: postinstall nowait skipifsilent unchecked
