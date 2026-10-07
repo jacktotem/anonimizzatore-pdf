@@ -204,6 +204,15 @@ jobs:
           if ($v -notmatch "Python 3\.12") { throw "Python 3.12 non funziona dopo il setup: '$v'" }
           Write-Host "Python dopo il setup: $v"
 
+          # L'ambiente dell'applicazione deve poggiare sul Python per TUTTI
+          # gli utenti: uno nel profilo di chi installa funzionerebbe solo
+          # per lui, non per gli altri utenti del server.
+          $cfg = Get-Content "$env:APP_DIR\venv\pyvenv.cfg" -Raw
+          Write-Host $cfg
+          if ($cfg -notmatch '(?m)^home\s*=\s*C:\\Program Files\\Python312') {
+            throw "L'ambiente dell'applicazione usa un Python non installato per tutti gli utenti"
+          }
+
           if ("${{ matrix.scenario }}" -eq "funzionante" -and $testo -match "procedo con l'installazione") {
             throw "Python 3.12 funzionante non riusato: il setup lo ha reinstallato"
           }

@@ -496,20 +496,25 @@ function Invoke-PythonSetup {
     # Un log per operazione: con un file unico ogni passaggio cancellava
     # il precedente, e proprio quello della riparazione fallita andava perso.
     $logPython = Join-Path $LogDir "python-$Modo.log"
-    if ($Modo -eq "disinstalla") {
-        $argomenti = @("/quiet", "/uninstall")
-    } elseif ($Modo -eq "ripara") {
-        $argomenti = @("/quiet", "/repair")
-    } else {
-        $argomenti = @(
-            "/quiet",
-            "InstallAllUsers=1",
-            "PrependPath=1",
-            "Include_test=0",
-            "Include_launcher=1",
-            "InstallLauncherAllUsers=1"
-        )
+
+    # PY-10: le stesse proprietà per TUTTE le operazioni. Senza
+    # InstallAllUsers=1 la riparazione ripiegava sull'installazione per
+    # il solo utente corrente (in AppData): il setup arrivava in fondo,
+    # ma sul server gli altri utenti — gli avvocati — non avrebbero
+    # potuto avviare l'applicazione. Emerso dal test su Windows reale.
+    $proprieta = @(
+        "InstallAllUsers=1",
+        "PrependPath=1",
+        "Include_test=0",
+        "Include_launcher=1",
+        "InstallLauncherAllUsers=1"
+    )
+    $azione = switch ($Modo) {
+        "ripara"      { @("/repair") }
+        "disinstalla" { @("/uninstall") }
+        default       { @() }
     }
+    $argomenti = @("/quiet") + $azione + $proprieta
     # PY-02: log dell'installer Python, utile quando fallisce sul campo.
     # PY-08: il percorso va tra virgolette. Start-Process unisce gli
     # argomenti con uno spazio senza quotarli: "C:\Program Files\..."
@@ -969,6 +974,14 @@ try {
         }
     }
     Write-Log "Interprete Python in uso: $script:PythonExe"
+    # PY-10: un Python installato nel profilo di un utente funziona solo
+    # per lui. Su un server condiviso gli altri utenti non riuscirebbero
+    # ad avviare l'applicazione: meglio saperlo subito che dagli avvocati.
+    if ($script:PythonExe -like "*\Users\*\AppData\*") {
+        Write-Log ("Python 3.12 è installato solo per l'utente corrente ($script:PythonExe). " +
+                   "Su un server con più utenti va installato per tutti: in quel caso " +
+                   "disinstallalo e rilancia questo setup, che lo installa in Program Files.") "WARN"
+    }
 
     # 2. Tesseract
     if (-not (Test-TesseractInstalled)) {
