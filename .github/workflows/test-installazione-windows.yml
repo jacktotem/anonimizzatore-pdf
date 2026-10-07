@@ -73,6 +73,18 @@ jobs:
               Start-Process $Matches[1] -ArgumentList $Matches[2] -Wait
             }
           }
+          # Poi i pacchetti MSI rimasti (launcher "py" incluso): un
+          # launcher più recente fa fallire l'installer della 3.12.8
+          # con codice 1603.
+          $msi = foreach ($radice in "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                                     "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall") {
+            Get-ChildItem $radice -ErrorAction SilentlyContinue | Get-ItemProperty |
+              Where-Object { $_.DisplayName -match '^Python ' -and $_.PSChildName -match '^\{[0-9A-F-]+\}$' }
+          }
+          foreach ($m in $msi) {
+            Write-Host "Rimuovo MSI: $($m.DisplayName)"
+            Start-Process msiexec.exe -ArgumentList "/x", $m.PSChildName, "/qn", "/norestart" -Wait
+          }
           Remove-Item -Recurse -Force C:\hostedtoolcache\windows\Python -ErrorAction SilentlyContinue
           foreach ($k in "HKLM:\SOFTWARE\Python", "HKCU:\SOFTWARE\Python", "HKLM:\SOFTWARE\WOW6432Node\Python") {
             Remove-Item -Recurse -Force $k -ErrorAction SilentlyContinue
@@ -95,8 +107,14 @@ jobs:
         run: |
           $inst = Join-Path $env:RUNNER_TEMP "python-3.12.8-amd64.exe"
           Invoke-WebRequest $env:PY_URL -OutFile $inst
-          $p = Start-Process $inst -ArgumentList $env:PY_ARGS -Wait -PassThru
+          $plog = Join-Path $env:RUNNER_TEMP "prep-python.log"
+          $p = Start-Process $inst -ArgumentList "$env:PY_ARGS /log `"$plog`"" -Wait -PassThru
           Write-Host "Installazione Python 3.12.8: codice $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) {
+            Get-ChildItem (Split-Path $plog) -Filter "prep-python*.log" |
+              ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Tail 40 }
+            throw "Preparazione fallita: Python 3.12.8 non si installa sul runner"
+          }
           & $env:PY_EXE --version
 
           switch ("${{ matrix.scenario }}") {
@@ -164,12 +182,19 @@ jobs:
           }
           Write-Host "Scenario ${{ matrix.scenario }}: OK"
 
+      - name: Raccogli i log
+        if: always()
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:GITHUB_WORKSPACE "log-raccolti"
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          Copy-Item "$env:APP_DIR\logs\*" $dest -ErrorAction SilentlyContinue
+          Copy-Item "$env:RUNNER_TEMP\*.log" $dest -ErrorAction SilentlyContinue
+
       - name: Allega i log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: log-${{ matrix.scenario }}
-          path: |
-            ${{ env.APP_DIR }}\logs\
-            ${{ runner.temp }}\inno.log
+          path: log-raccolti/
           if-no-files-found: warn

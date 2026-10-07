@@ -31,6 +31,15 @@ param(
 # I-02: fail-fast. Mai installare con setup parzialmente rotto.
 $ErrorActionPreference = "Stop"
 
+# ENV-01: se l'installer viene lanciato da una console PowerShell 7, la
+# PowerShell 5.1 di questo script eredita il PSModulePath della 7 e non
+# trova più i moduli di sistema: il setup si fermava con "Get-FileHash
+# is not recognized". Emerso dal test su Windows reale. Si riparte dal
+# PSModulePath di macchina, quello di un avvio normale.
+if ($PSVersionTable.PSEdition -eq "Desktop" -and $env:PSModulePath -match "PowerShell\\7") {
+    $env:PSModulePath = [Environment]::GetEnvironmentVariable("PSModulePath", "Machine")
+}
+
 
 # ============================================================
 # CONFIGURAZIONE BINARI CON HASH PINNING
