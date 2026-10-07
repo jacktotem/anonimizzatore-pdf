@@ -505,9 +505,14 @@ function Invoke-PythonSetup {
             "InstallLauncherAllUsers=1"
         )
     }
-    # PY-02: log dell'installer Python, utile quando fallisce sul campo
+    # PY-02: log dell'installer Python, utile quando fallisce sul campo.
+    # PY-08: il percorso va tra virgolette. Start-Process unisce gli
+    # argomenti con uno spazio senza quotarli: "C:\Program Files\..."
+    # arrivava all'installer spezzato in due ("C:\Program" e il resto),
+    # il log finiva in un file C:\Program e quello indicato nel
+    # messaggio d'errore non esisteva. Emerso dal test su Windows reale.
     $argomenti += "/log"
-    $argomenti += $logPython
+    $argomenti += "`"$logPython`""
 
     $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
     $process = Start-Process -FilePath $Installer -ArgumentList $argomenti -Wait -PassThru

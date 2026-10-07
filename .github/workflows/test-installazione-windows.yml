@@ -111,8 +111,16 @@ jobs:
           $p = Start-Process $inst -ArgumentList "$env:PY_ARGS /log `"$plog`"" -Wait -PassThru
           Write-Host "Installazione Python 3.12.8: codice $($p.ExitCode)"
           if ($p.ExitCode -ne 0) {
-            Get-ChildItem (Split-Path $plog) -Filter "prep-python*.log" |
-              ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Tail 40 }
+            # Il punto esatto in cui un pacchetto MSI fallisce è la riga
+            # prima di "Return value 3": la mostriamo per ciascun log.
+            Get-ChildItem (Split-Path $plog) -Filter "prep-python*.log" | ForEach-Object {
+              $righe = Get-Content $_.FullName
+              $i = ($righe | Select-String -SimpleMatch "Return value 3" | Select-Object -First 1).LineNumber
+              if ($i) {
+                Write-Host "--- $($_.Name): errore alla riga $i ---"
+                $righe[[Math]::Max(0, $i - 25)..($i)] | ForEach-Object { Write-Host $_ }
+              }
+            }
             throw "Preparazione fallita: Python 3.12.8 non si installa sul runner"
           }
           & $env:PY_EXE --version
@@ -190,6 +198,7 @@ jobs:
           New-Item -ItemType Directory -Force $dest | Out-Null
           Copy-Item "$env:APP_DIR\logs\*" $dest -ErrorAction SilentlyContinue
           Copy-Item "$env:RUNNER_TEMP\*.log" $dest -ErrorAction SilentlyContinue
+          Copy-Item "$env:TEMP\Python*.log" $dest -ErrorAction SilentlyContinue
 
       - name: Allega i log
         if: always()
