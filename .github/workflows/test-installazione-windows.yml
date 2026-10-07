@@ -207,7 +207,7 @@ jobs:
           if ("${{ matrix.scenario }}" -eq "funzionante" -and $testo -match "procedo con l'installazione") {
             throw "Python 3.12 funzionante non riusato: il setup lo ha reinstallato"
           }
-          if ("${{ matrix.scenario }}" -in "fantasma", "rotto" -and $testo -notmatch "provo a ripulire e reinstallare") {
+          if ("${{ matrix.scenario }}" -in "fantasma", "rotto" -and $testo -notmatch "avvio la riparazione automatica") {
             throw "La riparazione automatica non è partita"
           }
           Write-Host "Scenario ${{ matrix.scenario }}: OK"

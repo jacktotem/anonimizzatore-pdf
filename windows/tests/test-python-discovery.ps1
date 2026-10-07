@@ -1,5 +1,5 @@
 # ============================================================
-# Test della ricerca di Python 3.12 (PY-04 / PY-05 / PY-07)
+# Test della ricerca di Python 3.12 (PY-04 / PY-05 / PY-07 / PY-09)
 #
 # Uso:  pwsh -NoProfile -File windows/tests/test-python-discovery.ps1
 #
@@ -118,21 +118,26 @@ function Show-Progress { param($m, $p) }
 function Update-PathCorrente { }
 function Write-DiagnosiPython { }
 
-function Prova-Installazione($nome, $interpreteDopoPrimoGiro, $attese) {
+# $esiti: cosa restituisce ciascuna ricerca dell'interprete, nell'ordine
+# in cui Install-Python la fa ($true = trovato).
+function Prova-Installazione($nome, $esiti, $attese) {
     $script:chiamate = @()
-    $script:primoGiro = $interpreteDopoPrimoGiro
-    function Invoke-PythonSetup { param($Installer, [switch]$Disinstalla)
-        $script:chiamate += $(if ($Disinstalla) { "disinstalla" } else { "installa" }) }
+    $script:ricerche = [System.Collections.Queue]::new([object[]]$esiti)
+    function Invoke-PythonSetup { param($Installer, $Modo = "installa")
+        $script:chiamate += $Modo }
     function Find-Python312 { param([switch]$Silenzioso)
-        if ($script:primoGiro) { return "C:\Program Files\Python312\python.exe" } else { return $null } }
+        $ok = if ($script:ricerche.Count) { $script:ricerche.Dequeue() } else { $false }
+        if ($ok) { return "C:\Program Files\Python312\python.exe" } else { return $null } }
     Install-Python
     $ok = (($script:chiamate -join ",") -eq ($attese -join ","))
     Esito $ok "$nome -> $($script:chiamate -join ', ')"
 }
 
 Scenario   # nessuna registrazione dichiarata: la 2.1.1 qui NON riparava
-Prova-Installazione "interprete assente, nessun guasto diagnosticato" $false @("installa", "disinstalla", "installa")
-Prova-Installazione "interprete presente dopo il primo giro" $true @("installa")
+Prova-Installazione "interprete presente dopo l'installazione" @($true) @("installa")
+# PY-09: il caso del server (cartella cancellata) si risolve con /repair
+Prova-Installazione "interprete recuperato dalla riparazione" @($false, $true) @("installa", "ripara")
+Prova-Installazione "riparazione insufficiente" @($false, $false) @("installa", "ripara", "disinstalla", "installa")
 
 Remove-Item -Recurse -Force $cartellaVuota, (Split-Path $exeRotto), (Split-Path $exeBuono) -ErrorAction SilentlyContinue
 $falliti = @($script:esiti | Where-Object { $_ -eq "FAIL" }).Count

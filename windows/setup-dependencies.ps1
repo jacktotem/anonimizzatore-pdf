@@ -489,12 +489,17 @@ function Find-Python312 {
 function Invoke-PythonSetup {
     param(
         [string]$Installer,
-        [switch]$Disinstalla
+        [ValidateSet("installa", "ripara", "disinstalla")]
+        [string]$Modo = "installa"
     )
 
-    $logPython = Join-Path $LogDir "python-install.log"
-    if ($Disinstalla) {
+    # Un log per operazione: con un file unico ogni passaggio cancellava
+    # il precedente, e proprio quello della riparazione fallita andava perso.
+    $logPython = Join-Path $LogDir "python-$Modo.log"
+    if ($Modo -eq "disinstalla") {
         $argomenti = @("/quiet", "/uninstall")
+    } elseif ($Modo -eq "ripara") {
+        $argomenti = @("/quiet", "/repair")
     } else {
         $argomenti = @(
             "/quiet",
@@ -520,12 +525,11 @@ function Invoke-PythonSetup {
     # Un'installazione vera richiede decine di secondi: un "successo" in
     # 3-4 secondi significa che l'installer ha creduto Python già
     # presente e non ha scritto nulla. Il tempo nel log lo rende evidente.
-    Write-Log "Installer Python terminato: codice $codice in $([int]$cronometro.Elapsed.TotalSeconds) s"
+    Write-Log "Installer Python ($Modo) terminato: codice $codice in $([int]$cronometro.Elapsed.TotalSeconds) s"
 
-    if ($Disinstalla) {
-        Write-Log "Rimozione della registrazione Python 3.12 (codice $codice)" "WARN"
-        return
-    }
+    # Riparazione e disinstallazione sono tentativi: l'esito vero si
+    # misura subito dopo, cercando un interprete che funzioni.
+    if ($Modo -ne "installa") { return }
 
     # PY-02: non tutti i codici diversi da 0 sono errori.
     #  3010 = riuscito, richiede riavvio (prima faceva fallire il setup!)
@@ -566,27 +570,43 @@ function Install-Python {
         -ComponentName "Python 3.12"
 
     Show-Progress "Installazione Python 3.12 in corso..." 20
-    Invoke-PythonSetup -Installer $pythonInstaller
+    Invoke-PythonSetup -Installer $pythonInstaller -Modo installa
     Update-PathCorrente
 
-    # PY-06/PY-07: se dopo l'installazione l'interprete ancora non c'è,
-    # si ripulisce e si reinstalla da zero — SEMPRE, una volta sola.
-    # La 2.1.1 lo faceva solo se riconosceva una registrazione
-    # "fantasma" (file assente); sul server quel riconoscimento non è
-    # scattato e la riparazione non è mai partita. Una riparazione
-    # subordinata a una diagnosi è fragile quanto la diagnosi.
-    # Non si rischia di toccare un Python funzionante: se ce ne fosse
-    # uno, Find-Python312 lo avrebbe trovato. E la disinstallazione
-    # riguarda solo la 3.12.8 di questo installer.
+    # PY-06/PY-07/PY-09: se dopo l'installazione l'interprete non c'è,
+    # parte la riparazione automatica — sempre, a prescindere dalla
+    # diagnosi (subordinarla a una diagnosi l'aveva resa inefficace sul
+    # server). Non si rischia di toccare un Python funzionante: se ce ne
+    # fosse uno, Find-Python312 lo avrebbe trovato.
+    #
+    # PY-09: prima /repair, poi disinstalla e reinstalla. Il test su
+    # Windows reale ha mostrato che quando la cartella di Python è stata
+    # cancellata (il caso del server) Windows Installer considera i
+    # pacchetti ancora "presenti": la reinstallazione diventa una
+    # modifica che non scrive nulla e la disinstallazione fallisce con
+    # 1603. Solo la riparazione riscrive i file mancanti. La sequenza
+    # disinstalla+reinstalla resta per i casi in cui la riparazione
+    # non basta (python.exe presente ma danneggiato).
     if (-not (Find-Python312 -Silenzioso)) {
-        Write-Log "Python 3.12 non utilizzabile dopo l'installazione: provo a ripulire e reinstallare" "WARN"
+        Write-Log "Python 3.12 non utilizzabile dopo l'installazione: avvio la riparazione automatica" "WARN"
         Write-DiagnosiPython
-        Show-Progress "Pulizia di un'installazione Python incompleta..." 25
-        Invoke-PythonSetup -Installer $pythonInstaller -Disinstalla
+
+        Show-Progress "Riparazione di Python 3.12..." 24
+        Invoke-PythonSetup -Installer $pythonInstaller -Modo ripara
         Update-PathCorrente
-        Show-Progress "Reinstallazione di Python 3.12..." 28
-        Invoke-PythonSetup -Installer $pythonInstaller
-        Update-PathCorrente
+
+        if (Find-Python312 -Silenzioso) {
+            Write-Log "Riparazione riuscita"
+        } else {
+            Write-Log "La riparazione non basta: disinstallo e reinstallo Python 3.12" "WARN"
+            Write-DiagnosiPython
+            Show-Progress "Pulizia di un'installazione Python incompleta..." 26
+            Invoke-PythonSetup -Installer $pythonInstaller -Modo disinstalla
+            Update-PathCorrente
+            Show-Progress "Reinstallazione di Python 3.12..." 28
+            Invoke-PythonSetup -Installer $pythonInstaller -Modo installa
+            Update-PathCorrente
+        }
     }
 
     Remove-Item $pythonInstaller -ErrorAction SilentlyContinue
@@ -921,7 +941,7 @@ try {
             Write-DiagnosiPython
             $guasti = Get-Python312Guasti
             $rimedio = (" Rimedio manuale: scarica python-3.12.8-amd64.exe da " +
-                        "python.org, eseguilo, scegli Uninstall, poi rilancia questo setup.")
+                        "python.org, eseguilo e scegli Repair; poi rilancia questo setup.")
             if ($guasti.Count -gt 0) {
                 $g = $guasti[0]
                 if ($g.Stato -eq "non avviabile") {
