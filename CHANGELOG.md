@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-10-07
+
+Terzo giro sull'installazione Windows del server Advais. Con la 2.1.1
+il setup si fermava ancora con "Python 3.12 risulta installato ma non
+è utilizzabile". Questa volta la correzione è stata verificata **su
+Windows reale**, riproducendo il guasto del server, prima di essere
+consegnata.
+
+### Verificato su Windows reale
+Nuovo test automatico (`.github/workflows/test-installazione-windows.yml`):
+compila l'installer, lo esegue in modalità silenziosa come farebbe un
+amministratore e controlla che il setup arrivi in fondo con Python 3.12
+funzionante **per tutti gli utenti**. Quattro scenari:
+
+| Scenario | Situazione | Esito |
+|---|---|---|
+| pulito | nessun Python | installazione completa |
+| funzionante | Python 3.12 sano | riusato, non toccato |
+| fantasma | registrazione presente, cartella di Python cancellata — **il caso del server** | riparato in 16 s |
+| rotto | cartella presente, `python.exe` danneggiato | riparato in 29 s |
+
+Negli ultimi due il test verifica prima di aver riprodotto il guasto
+del server (l'installer di Python rilanciato esce con 0 in un secondo
+senza ripristinare nulla). Il test parte da solo a ogni modifica della
+cartella `windows/`.
+
+### Fixed
+- **PY-09 — La riparazione automatica non risolveva il caso del
+  server.** Il test ha mostrato che, quando la cartella di Python è
+  stata cancellata, Windows Installer considera i pacchetti ancora
+  "presenti": la reinstallazione diventa una modifica che non scrive
+  nulla, e la disinstallazione fallisce con 1603 in un secondo. La
+  riparazione della 2.1.1 — e quella inizialmente prevista per questa
+  versione — non avrebbero mai funzionato sul server. Ora il setup
+  esegue prima `/repair`, che riscrive i file mancanti, e solo se non
+  basta disinstalla e reinstalla.
+- **PY-07 — La riparazione dipendeva dalla diagnosi.** La 2.1.1
+  ripuliva Python solo se riconosceva una registrazione "fantasma"; sul
+  server quel riconoscimento non è scattato. Ora la riparazione parte
+  sempre quando dopo l'installazione manca un interprete funzionante.
+  Un Python sano non viene mai toccato: la ricerca lo trova prima.
+- **PY-10 — Riparazione per il solo utente corrente.** Senza
+  `InstallAllUsers=1` la riparazione reinstallava Python nel profilo di
+  chi stava installando: il setup riusciva, ma sul server gli altri
+  utenti non avrebbero potuto avviare l'applicazione. Ora riparazione e
+  disinstallazione usano le stesse proprietà dell'installazione, e il
+  log avvisa se l'interprete in uso è comunque nel profilo di un utente.
+- **PY-08 — Log dell'installer di Python mai scritto.** Il percorso
+  `C:\Program Files\...\python-install.log` arrivava all'installer
+  spezzato in due dallo spazio, perché `Start-Process` non quota gli
+  argomenti: il log finiva in un file `C:\Program` e quello indicato
+  nei messaggi d'errore, dalla 2.0.2 in poi, non è mai esistito. Ora
+  ogni operazione scrive il proprio log (`python-installa.log`,
+  `python-ripara.log`, `python-disinstalla.log`).
+- **ENV-01 — Setup interrotto se lanciato da PowerShell 7.** La
+  PowerShell 5.1 dello script ereditava il `PSModulePath` della 7 e non
+  trovava più `Get-FileHash`. Ora riparte da quello di macchina.
+- **Ricerca e diagnosi dell'interprete.** Ogni 3.12 dichiarata è
+  classificata *ok / assente / non avviabile*, con codice di uscita e
+  messaggio di Windows nel log; registro letto nelle viste a 64 e 32
+  bit; elenco del launcher letto anche da stderr; il log riporta la
+  durata dell'installer di Python (un "successo" in 3 secondi rivela
+  che non ha scritto nulla).
+- **VER-01 — Versione sbagliata nei log.** Era scritta a mano nello
+  script, ferma alla 2.0.2. Ora la passa l'installer.
+- Il messaggio d'errore finale indica il rimedio manuale corretto:
+  eseguire l'installer di Python 3.12.8 e scegliere *Repair*.
+
+### Added
+- **SIL-01 — Installazione silenziosa** per gli amministratori:
+  `AnonimizzatorePDF-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`
+  installa senza alcuna finestra in attesa di un clic.
+
+### Changed
+- `windows/tests/test-python-discovery.ps1`: 18 casi, incluso il flusso
+  di riparazione (installa → ripara → disinstalla e reinstalla).
+
 ## [2.1.1] - 2026-10-06
 
 Secondo giro di correzioni all'installazione su Windows Server,

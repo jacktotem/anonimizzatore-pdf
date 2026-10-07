@@ -1,0 +1,240 @@
+# ============================================================
+# Test dell'installazione su Windows vero
+#
+# Compila l'installer, prepara il sistema in uno stato preciso e lo
+# esegue in modalità silenziosa, esattamente come farebbe un
+# amministratore. Poi verifica che il setup sia arrivato in fondo e che
+# Python 3.12 funzioni.
+#
+# Gli scenari riproducono quelli incontrati sul campo:
+#   pulito       nessun Python: server appena installato
+#   funzionante  Python 3.12 già presente e sano: va riusato, non toccato
+#   fantasma     Windows dichiara Python 3.12 ma la cartella non c'è più
+#   rotto        la cartella c'è ma python.exe non parte
+# Negli ultimi due l'installer ufficiale di Python, rilanciato, esce
+# con 0 in pochi secondi senza scrivere nulla: è il guasto del server
+# Advais (ottobre 2026). Il job verifica di averlo davvero riprodotto
+# prima di provare il setup, altrimenti il test non dimostrerebbe nulla.
+# ============================================================
+
+name: Test installazione Windows
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "windows/**"
+      - ".github/workflows/test-installazione-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  installa:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [pulito, funzionante, fantasma, rotto]
+    env:
+      PY_URL: https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe
+      PY_ARGS: /quiet InstallAllUsers=1 PrependPath=1 Include_test=0 Include_launcher=1 InstallLauncherAllUsers=1
+      PY_EXE: C:\Program Files\Python312\python.exe
+      APP_DIR: C:\Program Files\AnonimizzatorePDF
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Sincronizza app.py (fonte di verità: src/)"
+        shell: bash
+        run: cp src/app.py windows/app/app.py
+
+      - name: Compila l'installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=0.0.0-test windows\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC fallito" }
+
+      # Il runner ha diverse versioni di Python già installate (toolcache,
+      # registrate come normali installazioni). Il server no: le togliamo
+      # tutte, dal Pannello di controllo, dal disco, dal registro e dal PATH.
+      - name: Rimuovi il Python preinstallato sul runner
+        shell: pwsh
+        run: |
+          $voci = foreach ($radice in "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                                      "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall") {
+            Get-ChildItem $radice -ErrorAction SilentlyContinue | Get-ItemProperty |
+              Where-Object { $_.DisplayName -match '^Python 3\.' -and $_.QuietUninstallString }
+          }
+          foreach ($v in $voci) {
+            # QuietUninstallString: "C:\...\python-3.x.exe" /uninstall /quiet
+            if ($v.QuietUninstallString -match '^"([^"]+)"\s*(.*)$') {
+              Write-Host "Disinstallo: $($v.DisplayName)"
+              Start-Process $Matches[1] -ArgumentList $Matches[2] -Wait
+            }
+          }
+          # Poi TUTTI i prodotti MSI di Python, enumerati tramite Windows
+          # Installer (vede anche quelli nascosti dal Pannello di controllo).
+          # Una 3.12 più recente rimasta registrata fa fallire l'installer
+          # della 3.12.8: "A newer version of Python 3.12 is already
+          # installed". Si ripete finché non ne resta nessuno.
+          # Win32_Product interroga Windows Installer prodotto per prodotto:
+          # lento, ma vede tutto (la COM WindowsInstaller.Installer da
+          # PowerShell 7 non enumerava nulla).
+          #
+          # Contano solo i pacchetti 3.12 che l'installer della 3.12.8
+          # installerebbe: una loro versione più recente lo blocca ("A newer
+          # version of Python 3.12 is already installed"). Le altre versioni
+          # possono restare — molte non si lasciano disinstallare sul runner
+          # (1603) e un server con altri Python è anzi uno scenario realistico.
+          # La Test Suite è esclusa perché il setup la installa con
+          # Include_test=0.
+          $bloccanti = { @(Get-CimInstance -ClassName Win32_Product |
+                           Where-Object { $_.Name -match '^Python 3\.12\.' -and $_.Name -notmatch 'Test Suite' }) }
+          for ($giro = 1; $giro -le 3; $giro++) {
+            $resti = & $bloccanti
+            Write-Host "Giro $giro - pacchetti Python 3.12 che bloccherebbero l'installazione: $($resti.Count)"
+            if ($resti.Count -eq 0) { break }
+            foreach ($r in $resti) {
+              $p = Start-Process msiexec.exe -ArgumentList "/x", $r.IdentifyingNumber, "/qn", "/norestart" -Wait -PassThru
+              Write-Host "  msiexec /x $($r.Name) $($r.Version): codice $($p.ExitCode)"
+            }
+          }
+          if ($resti.Count -gt 0) {
+            $resti | Format-Table Name, Version, IdentifyingNumber | Out-String | Write-Host
+            throw "Impossibile togliere dal runner la Python 3.12 preinstallata"
+          }
+          Write-Host "Altri Python registrati sul runner (non bloccanti):"
+          Get-CimInstance -ClassName Win32_Product | Where-Object { $_.Name -match '^Python ' } |
+            Sort-Object Name | ForEach-Object { Write-Host "  $($_.Name)" }
+          Remove-Item -Recurse -Force C:\hostedtoolcache\windows\Python -ErrorAction SilentlyContinue
+          foreach ($k in "HKLM:\SOFTWARE\Python", "HKCU:\SOFTWARE\Python", "HKLM:\SOFTWARE\WOW6432Node\Python") {
+            Remove-Item -Recurse -Force $k -ErrorAction SilentlyContinue
+          }
+          $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          $pulito = ($machine -split ';' | Where-Object { $_ -and $_ -notmatch 'Python' }) -join ';'
+          [Environment]::SetEnvironmentVariable("Path", $pulito, "Machine")
+
+      - name: Stato di partenza
+        shell: pwsh
+        run: |
+          $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine")
+          Write-Host "--- python nel PATH ---"; Get-Command python, python3 -All -ErrorAction SilentlyContinue | Format-Table Source
+          Write-Host "--- launcher ---"; try { py -0p 2>&1 } catch { "py non presente" }
+          Write-Host "--- registro ---"; Get-ChildItem HKLM:\SOFTWARE\Python\PythonCore -ErrorAction SilentlyContinue
+
+      - name: "Prepara lo scenario: ${{ matrix.scenario }}"
+        if: matrix.scenario != 'pulito'
+        shell: pwsh
+        run: |
+          $inst = Join-Path $env:RUNNER_TEMP "python-3.12.8-amd64.exe"
+          Invoke-WebRequest $env:PY_URL -OutFile $inst
+          $plog = Join-Path $env:RUNNER_TEMP "prep-python.log"
+          $p = Start-Process $inst -ArgumentList "$env:PY_ARGS /log `"$plog`"" -Wait -PassThru
+          Write-Host "Installazione Python 3.12.8: codice $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) {
+            # Il punto esatto in cui un pacchetto MSI fallisce è la riga
+            # prima di "Return value 3": la mostriamo per ciascun log.
+            Get-ChildItem (Split-Path $plog) -Filter "prep-python*.log" | ForEach-Object {
+              $righe = Get-Content $_.FullName
+              $i = ($righe | Select-String -SimpleMatch "Return value 3" | Select-Object -First 1).LineNumber
+              if ($i) {
+                Write-Host "--- $($_.Name): errore alla riga $i ---"
+                $righe[[Math]::Max(0, $i - 25)..($i)] | ForEach-Object { Write-Host $_ }
+              }
+            }
+            throw "Preparazione fallita: Python 3.12.8 non si installa sul runner"
+          }
+          & $env:PY_EXE --version
+
+          switch ("${{ matrix.scenario }}") {
+            "fantasma" {
+              Remove-Item -Recurse -Force (Split-Path $env:PY_EXE)
+              Write-Host "Cartella di Python eliminata"
+            }
+            "rotto" {
+              Set-Content -Path $env:PY_EXE -Value "" -NoNewline
+              Remove-Item (Join-Path (Split-Path $env:PY_EXE) "python312.dll") -Force
+              Write-Host "python.exe azzerato, python312.dll eliminata"
+            }
+          }
+
+          if ("${{ matrix.scenario }}" -in "fantasma", "rotto") {
+            # Riproduzione del guasto: l'installer, rilanciato, deve
+            # uscire subito con 0 SENZA ripristinare l'interprete.
+            $t = [Diagnostics.Stopwatch]::StartNew()
+            $p = Start-Process $inst -ArgumentList $env:PY_ARGS -Wait -PassThru
+            $sec = [int]$t.Elapsed.TotalSeconds
+            $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+            $v = try { (& $env:PY_EXE --version 2>&1 | Out-String).Trim() } catch { $_.Exception.Message }
+            $ErrorActionPreference = $prevEap
+            Write-Host "Rilancio installer: codice $($p.ExitCode) in $sec s; python --version: '$v'"
+            if ($v -match "Python 3\.12") {
+              throw "Guasto NON riprodotto: l'installer ha ripristinato Python da solo, il test non dimostrerebbe nulla"
+            }
+            Write-Host "Guasto riprodotto come sul server"
+          }
+
+      - name: Installa l'Anonimizzatore (silenzioso, come un amministratore)
+        shell: pwsh
+        run: |
+          # Ambiente pulito anche per questo processo, non solo per il registro
+          $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine")
+          $exe = Get-ChildItem windows\installer\AnonimizzatorePDF-Setup-v0.0.0-test.exe
+          $log = Join-Path $env:RUNNER_TEMP "inno.log"
+          $p = Start-Process $exe.FullName -PassThru `
+                 -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG=`"$log`""
+          if (-not $p.WaitForExit(45 * 60 * 1000)) {
+            $p.Kill(); throw "Installazione oltre i 45 minuti: probabilmente ferma su una finestra"
+          }
+          Write-Host "Installer terminato con codice $($p.ExitCode)"
+
+      - name: Verifica
+        shell: pwsh
+        run: |
+          $log = Get-ChildItem "$env:APP_DIR\logs\install-*.log" | Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $log) { throw "Nessun log del setup: lo script non è partito" }
+          $testo = Get-Content $log.FullName -Raw -Encoding UTF8
+          Write-Host $testo
+
+          if ($testo -notmatch "SETUP COMPLETATO CON SUCCESSO") { throw "Il setup NON è arrivato in fondo" }
+          if ($testo -notmatch "v0\.0\.0-test") { throw "La versione nel log non è quella passata dall'installer" }
+
+          $v = (& $env:PY_EXE --version 2>&1 | Out-String).Trim()
+          if ($v -notmatch "Python 3\.12") { throw "Python 3.12 non funziona dopo il setup: '$v'" }
+          Write-Host "Python dopo il setup: $v"
+
+          # L'ambiente dell'applicazione deve poggiare sul Python per TUTTI
+          # gli utenti: uno nel profilo di chi installa funzionerebbe solo
+          # per lui, non per gli altri utenti del server.
+          $cfg = Get-Content "$env:APP_DIR\venv\pyvenv.cfg" -Raw
+          Write-Host $cfg
+          if ($cfg -notmatch '(?m)^home\s*=\s*C:\\Program Files\\Python312') {
+            throw "L'ambiente dell'applicazione usa un Python non installato per tutti gli utenti"
+          }
+
+          if ("${{ matrix.scenario }}" -eq "funzionante" -and $testo -match "procedo con l'installazione") {
+            throw "Python 3.12 funzionante non riusato: il setup lo ha reinstallato"
+          }
+          if ("${{ matrix.scenario }}" -in "fantasma", "rotto" -and $testo -notmatch "avvio la riparazione automatica") {
+            throw "La riparazione automatica non è partita"
+          }
+          Write-Host "Scenario ${{ matrix.scenario }}: OK"
+
+      - name: Raccogli i log
+        if: always()
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:GITHUB_WORKSPACE "log-raccolti"
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          Copy-Item "$env:APP_DIR\logs\*" $dest -ErrorAction SilentlyContinue
+          Copy-Item "$env:RUNNER_TEMP\*.log" $dest -ErrorAction SilentlyContinue
+          Copy-Item "$env:TEMP\Python*.log" $dest -ErrorAction SilentlyContinue
+
+      - name: Allega i log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ matrix.scenario }}
+          path: log-raccolti/
+          if-no-files-found: warn
