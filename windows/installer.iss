@@ -59,7 +59,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 ; 2. Un installer non firmato che lancia PowerShell nascosto, scarica
 ;    exe e li esegue in silenzio ha il profilo comportamentale di un
 ;    dropper: era uno dei motivi dei falsi positivi di Defender.
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -NoProfile -File ""{app}\setup-dependencies.ps1"" -InstallPath ""{app}"" -AppVersion ""{#MyAppVersion}"""; \
+Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -NoProfile -File ""{app}\setup-dependencies.ps1"" -InstallPath ""{app}"" -AppVersion ""{#MyAppVersion}"" {code:ArgNonInterattivo}"; \
     StatusMsg: "Configurazione di Python, Tesseract e dipendenze (10-15 minuti)..."; \
     Flags: waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Avvia {#MyAppName} ora"; Flags: postinstall nowait skipifsilent unchecked
@@ -70,10 +70,21 @@ Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\__pycache__"
 
 [Code]
+// SIL-01: installazione silenziosa per gli amministratori
+// (/VERYSILENT /SUPPRESSMSGBOXES): nessuna finestra deve restare in
+// attesa di un clic, né qui né nello script PowerShell.
+function ArgNonInterattivo(Param: String): String;
+begin
+  if WizardSilent then
+    Result := '-NonInterattivo'
+  else
+    Result := '';
+end;
+
 function InitializeSetup(): Boolean;
 begin
   Result := True;
-  MsgBox('Anonimizzatore PDF v' + '{#MyAppVersion}' + #13#10 + #13#10 +
+  SuppressibleMsgBox('Anonimizzatore PDF v' + '{#MyAppVersion}' + #13#10 + #13#10 +
          'Questa installazione scaricherà e configurerà:' + #13#10 +
          '- Python 3.12 (se non già presente)' + #13#10 +
          '- Tesseract OCR con supporto italiano (se non già presente)' + #13#10 +
@@ -81,5 +92,5 @@ begin
          '- Il modello linguistico italiano per spaCy' + #13#10 + #13#10 +
          'Tutti i download vengono verificati con SHA256.' + #13#10 + #13#10 +
          'Richiede una connessione internet.' + #13#10 +
-         'Tempo stimato: 10-15 minuti.', mbInformation, MB_OK);
+         'Tempo stimato: 10-15 minuti.', mbInformation, MB_OK, IDOK);
 end;

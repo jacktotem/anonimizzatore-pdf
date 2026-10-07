@@ -21,7 +21,11 @@ param(
     # già). Prima era scritta qui a mano ed era rimasta ferma alla 2.0.2:
     # i log della 2.1.1 si presentavano come "v2.0.2", facendo pensare
     # che sul server girasse ancora la versione vecchia.
-    [string]$AppVersion = "sviluppo"
+    [string]$AppVersion = "sviluppo",
+
+    # SIL-01: installazione silenziosa (/VERYSILENT). Niente finestre di
+    # dialogo: in una sessione senza utente resterebbero aperte per sempre.
+    [switch]$NonInterattivo
 )
 
 # I-02: fail-fast. Mai installare con setup parzialmente rotto.
@@ -956,6 +960,7 @@ try {
 
     Write-Progress -Activity "Installazione" -Completed
 
+    if (-not $NonInterattivo) {
     [System.Windows.Forms.MessageBox]::Show(
         "Anonimizzatore PDF v$AppVersion installato correttamente!`n`n" +
         "Tutti i componenti sono stati verificati.`n`n" +
@@ -964,6 +969,7 @@ try {
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Information
     ) | Out-Null
+    }
 
     exit 0
 
@@ -971,6 +977,7 @@ try {
     Write-Log "ERRORE FATALE: $_" "ERROR"
     Write-Log "Stack: $($_.ScriptStackTrace)" "ERROR"
 
+    if (-not $NonInterattivo) {
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show(
         "Errore durante l'installazione:`n`n$_`n`n" +
@@ -981,6 +988,7 @@ try {
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error
     ) | Out-Null
+    }
 
     exit 1
 }
