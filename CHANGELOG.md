@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-10-08
+
+Due difetti dell'oscuramento delle firme (R-20), emersi preparando la
+guida 2.1 e verificati sul contratto di mutuo che aveva originato la
+funzione.
+
+### Fixed
+- **R-21 — Pagine intere oscurate per una cornice.** Un riquadro con
+  bordo attorno al testo, frequente negli atti bancari, veniva preso per
+  inchiostro a mano: con l'opzione firme attiva la 2.1.2 oscurava
+  l'intera pagina 32 del contratto di prova. Ora le componenti fatte
+  per metà o più di linee dritte (cornici, griglie di tabelle) vengono
+  escluse. Lo svolazzo dritto sotto una firma non basta a farla
+  scambiare per una linea: le righe della stessa linea si contano una
+  volta sola.
+- **R-21 — Firme scambiate per testo stampato.** Sopra una firma
+  Tesseract a volte "legge" parole inesistenti ("ANTON" con
+  confidenza 52%, in un riquadro alto come quattro righe di testo).
+  Prese per buone, facevano passare la firma per stampa e la firma
+  restava visibile. Ora le parole OCR con proporzioni impossibili per un
+  testo stampato (altezza o larghezza per carattere oltre 3,5 volte
+  quelle tipiche della pagina) non contano come prova di stampa.
+
+### Verifica
+Sul contratto di mutuo (33 pagine): le firme delle pagine 23-33
+restano coperte, le 15 pagine di solo testo restano pulite e la pagina
+15 perde un falso positivo. Cinque nuovi test di regressione.
+
 ## [2.1.2] - 2026-10-07
 
 Terzo giro sull'installazione Windows del server Advais. Con la 2.1.1
