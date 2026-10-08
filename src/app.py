@@ -27,7 +27,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "2.1.2"
+__version__ = "2.1.3"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -1797,6 +1797,14 @@ _HW_CLUSTER_MIN_H_PT = 9.0
 _HW_CLUSTER_MAX_FILL = 0.45   # un'area densa è stampa o grafica, non un tratto
 _HW_CLUSTER_MIN_INK = 0.012   # sotto: due granelli di sporco della scansione
 _HW_PAD_PT = 3.0
+# R-21: "parole" OCR con proporzioni impossibili per un testo stampato
+_HW_OCR_MAX_H = 3.5        # altezza oltre 3,5 volte quella tipica della pagina
+_HW_OCR_MAX_PASSO = 3.5    # larghezza per carattere oltre 3,5 volte la tipica
+_HW_OCR_MAX_H_PT = 28.0    # tetto assoluto, se le parole sono troppo poche per una media
+_HW_OCR_MAX_PASSO_PT = 20.0
+# R-21: righe di tabelle e cornici
+_HW_LINEA_PIENA = 0.7      # riga o colonna coperta d'inchiostro per oltre il 70%
+_HW_QUOTA_LINEE = 0.5      # componente fatta per metà o più di linee dritte
 
 
 def _connected_components(mask):
@@ -1888,6 +1896,70 @@ def _merge_nearby(boxes, gap):
     return boxes
 
 
+def _parole_stampate(words, px):
+    """
+    R-21: le parole OCR che provano davvero la presenza di stampa.
+
+    Sopra una firma Tesseract a volte "legge" parole inventate ("ANTON",
+    "O") con confidenza 50-60%, in riquadri alti quanto quattro righe o
+    larghi mezza pagina per una lettera sola. Prese per buone, coprivano
+    la firma e il rilevatore la scambiava per testo stampato. Si scartano
+    le parole con proporzioni impossibili per un testo stampato, rispetto
+    alla misura tipica della pagina (o a un tetto assoluto se le parole
+    sono troppo poche per una media).
+    """
+    parole = [w for w in (words or [])
+              if w.get("conf", 100) >= _HW_OCR_CONF and w.get("text", "").strip()]
+    if not parole:
+        return []
+
+    def passo(w):
+        return w["w"] / max(1, len(w["text"].strip()))
+
+    if len(parole) >= 5:
+        # Misura relativa: la stampa della pagina fa da riferimento, così
+        # anche un documento a caratteri grandi resta coerente.
+        alt = sorted(w["h"] for w in parole)
+        pas = sorted(passo(w) for w in parole)
+        max_h = _HW_OCR_MAX_H * alt[len(alt) // 2]
+        max_passo = _HW_OCR_MAX_PASSO * pas[len(pas) // 2]
+    else:
+        # Troppo poche parole per una media (per esempio una pagina con
+        # le sole firme): tetto assoluto in punti tipografici.
+        max_h = _HW_OCR_MAX_H_PT * px
+        max_passo = _HW_OCR_MAX_PASSO_PT * px
+    return [w for w in parole if w["h"] <= max_h and passo(w) <= max_passo]
+
+
+def _quota_linee(mask, x0, y0, x1, y1, ink):
+    """
+    R-21: quanta parte dell'inchiostro della componente sta in linee
+    dritte (orizzontali o verticali). Cornici e griglie di tabelle sono
+    fatte quasi solo di linee; una firma quasi mai. Le righe si guardano
+    con una tolleranza di un pixel sopra e sotto, per reggere una
+    scansione leggermente storta.
+    """
+    import numpy as np
+
+    sub = mask[y0:y1, x0:x1]
+    h, w = sub.shape
+    if h < 3 or w < 3 or ink <= 0:
+        return 0.0
+    righe = sub[:-2] | sub[1:-1] | sub[2:]
+    colonne = sub[:, :-2] | sub[:, 1:-1] | sub[:, 2:]
+
+    def linee(piene):
+        # La tolleranza fa risultare "piena" la stessa linea su tre righe
+        # vicine: si contano i gruppi di righe consecutive, non le righe,
+        # altrimenti lo svolazzo sotto una firma conterebbe tre volte.
+        piene = np.asarray(piene, dtype=np.int8)
+        return int(np.count_nonzero(np.diff(np.concatenate(([0], piene))) == 1))
+
+    n_r = linee(righe.mean(axis=1) > _HW_LINEA_PIENA)
+    n_c = linee(colonne.mean(axis=0) > _HW_LINEA_PIENA)
+    return min(1.0, (n_r * w + n_c * h) / float(ink))
+
+
 def detect_handwriting_regions(img, words, dpi):
     """
     Aree della pagina occupate da inchiostro manoscritto (firme,
@@ -1929,7 +2001,7 @@ def detect_handwriting_regions(img, words, dpi):
     ocr_boxes = [
         (w["x"] / scale, w["y"] / scale,
          (w["x"] + w["w"]) / scale, (w["y"] + w["h"]) / scale)
-        for w in (words or []) if w.get("conf", 100) >= _HW_OCR_CONF
+        for w in _parole_stampate(words, px)
     ]
 
     min_w = _HW_MIN_W_PT * px / scale
@@ -1944,6 +2016,8 @@ def detect_handwriting_regions(img, words, dpi):
             continue                                   # bordo/cornice della scansione
         if ink / float(w * h) > _HW_MAX_FILL:
             continue                                   # blocco pieno, non un tratto
+        if _quota_linee(mask, x0, y0, x1, y1, ink) >= _HW_QUOTA_LINEE:
+            continue                                   # cornice o griglia di tabella
         box = (x0, y0, x1, y1)
         covered = sum(_overlap_area(box, o) for o in ocr_boxes)
         if covered / float(w * h) > _HW_OCR_COVER:

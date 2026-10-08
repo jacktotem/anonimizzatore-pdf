@@ -1126,3 +1126,80 @@ def test_firma_sottile_non_sbiadita_dalla_riduzione():
 ])
 def test_importi_non_sono_telefoni(testo, atteso):
     assert is_false_positive("PHONE_NUMBER", testo) is atteso
+
+
+# ------------------------------------------------------------
+# R-21: firme coperte da "parole" OCR inventate; cornici e tabelle
+# ------------------------------------------------------------
+
+def _firma_sintetica(d, x, y, larghezza=600):
+    import math
+    punti = [(x + t * larghezza / 200 + 25 * math.cos(t * 0.17),
+              y + 55 * math.sin(t * 0.17) * (1 - t / 400))
+             for t in range(200)]
+    d.line(punti, fill=40, width=5)
+
+
+def test_firma_rilevata_anche_sotto_una_parola_ocr_inventata():
+    """Tesseract "legge" a volte parole inesistenti sopra una firma
+    ("ANTON", conf. 52, riquadro alto come quattro righe): non devono
+    farla passare per testo stampato."""
+    from app import detect_handwriting_regions
+
+    def pagina(d):
+        _firma_sintetica(d, 250, 1300)
+
+    # testo stampato normale sulla pagina, per avere una misura tipica
+    parole = [{"text": "parola", "x": 150 + k * 140, "y": 300,
+               "w": 130, "h": 40, "conf": 90} for k in range(6)]
+    # la parola fantasma che copre tutta la firma
+    parole.append({"text": "ANTON", "x": 220, "y": 1220,
+                   "w": 680, "h": 170, "conf": 52})
+    assert len(detect_handwriting_regions(_pagina_sintetica(pagina), parole, dpi=300)) == 1
+
+
+def test_parole_stampate_scarta_solo_le_proporzioni_impossibili():
+    from app import _parole_stampate
+    normali = [{"text": "contratto", "x": 0, "y": 0, "w": 210, "h": 42, "conf": 88}
+               for _ in range(8)]
+    titolo = {"text": "MUTUO", "x": 0, "y": 0, "w": 300, "h": 110, "conf": 90}
+    fantasma = {"text": "O", "x": 0, "y": 0, "w": 640, "h": 170, "conf": 59}
+    tenute = _parole_stampate(normali + [titolo, fantasma], 300 / 72)
+    assert titolo in tenute          # un titolo 2,6 volte più alto resta stampa
+    assert fantasma not in tenute    # una lettera larga mezza pagina no
+
+
+def test_cornice_di_testo_non_e_una_firma():
+    """Nella 2.1.2 un riquadro con bordo attorno al testo veniva preso per
+    inchiostro a mano: con l'opzione firme attiva, pagine intere di atti
+    bancari risultavano oscurate."""
+    from app import detect_handwriting_regions
+
+    def cornice(d):
+        d.rectangle([(120, 200), (1080, 1400)], outline=30, width=3)
+
+    assert detect_handwriting_regions(_pagina_sintetica(cornice), [], dpi=300) == []
+
+
+def test_griglia_di_tabella_non_e_una_firma():
+    from app import detect_handwriting_regions
+
+    def griglia(d):
+        for y in range(300, 901, 60):
+            d.line([(150, y), (1050, y)], fill=30, width=3)
+        for x in (150, 450, 750, 1050):
+            d.line([(x, 300), (x, 900)], fill=30, width=3)
+
+    assert detect_handwriting_regions(_pagina_sintetica(griglia), [], dpi=300) == []
+
+
+def test_firma_con_svolazzo_resta_una_firma():
+    """Lo svolazzo dritto sotto una firma non deve farla scambiare per una
+    linea di tabella."""
+    from app import detect_handwriting_regions
+
+    def firma(d):
+        _firma_sintetica(d, 250, 1300)
+        d.line([(230, 1390), (880, 1385)], fill=40, width=4)
+
+    assert len(detect_handwriting_regions(_pagina_sintetica(firma), [], dpi=300)) == 1
