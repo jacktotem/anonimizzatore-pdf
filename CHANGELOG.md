@@ -47,6 +47,23 @@ firme".
   testo.
 - Il lessico delle cessioni di crediti ("Banca Cedente", cessionaria)
   non viene più scambiato per nomi di persona.
+- **DEP-01 — Installazione da zero rotta da dipendenze esterne.** Il
+  test su Windows reale, partito con questa versione, ha rivelato che
+  dall'uscita di numpy 2.4 e pandas 3.1 (ottobre 2026) pip installava
+  una combinazione incompatibile con thinc 8.2, il motore di spaCy 3.7:
+  l'installazione si fermava alla verifica finale con "numpy.dtype size
+  changed". Riguardava qualunque installazione nuova, **compresa la
+  2.1.3 già pubblicata**; le installazioni esistenti non erano toccate.
+  numpy, pandas e thinc sono ora bloccati alle versioni verificate, in
+  `requirements.txt`, nell'installer Windows e in quello per Mac.
+  Su Windows la lista dei pacchetti cambia, quindi chi aggiorna
+  ricostruisce l'ambiente Python una volta (circa 15 minuti, serve la
+  connessione).
+
+### Changed
+- Il test di installazione su Windows reale gira anche **ogni lunedì**,
+  senza modifiche al codice, per cogliere in anticipo i cambiamenti
+  delle dipendenze su PyPI.
 
 ### Verifica
 Sui tre documenti segnalati, con la 2.1.4 i destinatari in maiuscolo
