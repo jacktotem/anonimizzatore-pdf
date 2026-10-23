@@ -21,6 +21,12 @@ name: Test installazione Windows
 
 on:
   workflow_dispatch:
+  # DEP-01: ogni lunedì, anche senza modifiche. Le dipendenze cambiano
+  # su PyPI indipendentemente da noi: a ottobre 2026 numpy 2.4 e pandas
+  # 3.1 hanno rotto le installazioni da zero senza che il codice fosse
+  # toccato. Meglio scoprirlo da un test che da un collega.
+  schedule:
+    - cron: "0 6 * * 1"
   pull_request:
     paths:
       - "windows/**"

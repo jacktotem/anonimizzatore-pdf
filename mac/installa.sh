@@ -194,7 +194,10 @@ setup_venv() {
         "presidio-anonymizer>=2.2.0" \
         "spacy>=3.7.0,<3.8.0" \
         "pytesseract>=0.3.10" \
-        "Pillow>=10.0.0" 2>&1 | tee -a "$LOG_FILE"
+        "Pillow>=10.0.0" \
+        "numpy>=1.26,<2.0" \
+        "pandas>=2.0,<2.3" \
+        "thinc>=8.2.2,<8.2.5" 2>&1 | tee -a "$LOG_FILE"
     
     print_success "Pacchetti Python installati"
 }

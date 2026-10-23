@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.4] - 2026-10-23
+
+Tre problemi segnalati da un avvocato su lettere bancarie di messa in
+mora, comunicazioni di cessione del credito e avvisi di ricevimento:
+"si vedono ancora i nomi delle parti, che sono evincibili anche dalle
+firme".
+
+### Fixed
+- **R-22 — Destinatari in maiuscolo nei blocchi indirizzo.** In questi
+  documenti le parti compaiono solo nell'indirizzo, in maiuscolo
+  ("SIG.RA ROSSI ANNA / CONTRADA ... / 91025 MARSALA"), e il NER
+  statistico non riconosce i nomi in maiuscolo. Senza un'occorrenza
+  scritta normalmente altrove, neppure la propagazione poteva aiutare.
+  Il nuovo `ItRecipientNameRecognizer` riconosce la struttura
+  dell'indirizzo invece del nome: una sequenza di parole maiuscole è un
+  destinatario se è seguita a breve da una parola d'indirizzo (VIA,
+  CONTRADA, PIAZZA, CORSO...) o preceduta da un appellativo o
+  un'etichetta (SIG.RA, SPETT.LE, PREG.MO, DESTINATARIO, "intestato
+  a"). Enti, città dopo il CAP, nomi di vie e destinatari "c/o" sono
+  esclusi. Riconosciuto una volta, il nome si propaga al resto del
+  documento.
+  La particella dei cognomi composti ("DE VITA") non viene più tolta dal
+  nome: lasciava in chiaro un indizio sul cognome.
+- **R-23 — Firme incollate come immagine nei PDF digitali.** L'opzione
+  firme agiva solo sulle pagine scansionate: in una lettera generata
+  dal gestionale con la firma scansionata in calce, la firma restava
+  visibile, a meno di forzare l'OCR su tutto e perdere il testo. Ora,
+  con l'opzione attiva, le immagini delle pagine digitali vengono
+  analizzate con lo stesso rilevatore e le aree a mano oscurate, senza
+  toccare il testo della pagina.
+- **R-24 — Scritte a mano sulle righe prestampate.** Sulle cartoline di
+  ritorno, e nei campi "Firme: ____" dei contratti, la scrittura a mano
+  poggia su una riga stampata: tratto e riga formavano un pezzo unico,
+  scartato come cornice dalla regola introdotta nella 2.1.3. Ora le
+  righe dritte lunghe vengono tolte prima dell'analisi. Sul contratto di
+  mutuo di prova questo copre la firma "Firme: ...", che la 2.1.3
+  lasciava in chiaro, ed elimina un falso positivo su un paragrafo di
+  testo.
+- Il lessico delle cessioni di crediti ("Banca Cedente", cessionaria)
+  non viene più scambiato per nomi di persona.
+- **DEP-01 — Installazione da zero rotta da dipendenze esterne.** Il
+  test su Windows reale, partito con questa versione, ha rivelato che
+  dall'uscita di numpy 2.4 e pandas 3.1 (ottobre 2026) pip installava
+  una combinazione incompatibile con thinc 8.2, il motore di spaCy 3.7:
+  l'installazione si fermava alla verifica finale con "numpy.dtype size
+  changed". Riguardava qualunque installazione nuova, **compresa la
+  2.1.3 già pubblicata**; le installazioni esistenti non erano toccate.
+  numpy, pandas e thinc sono ora bloccati alle versioni verificate, in
+  `requirements.txt`, nell'installer Windows e in quello per Mac.
+  Su Windows la lista dei pacchetti cambia, quindi chi aggiorna
+  ricostruisce l'ambiente Python una volta (circa 15 minuti, serve la
+  connessione).
+
+### Changed
+- Il test di installazione su Windows reale gira anche **ogni lunedì**,
+  senza modifiche al codice, per cogliere in anticipo i cambiamenti
+  delle dipendenze su PyPI.
+
+### Verifica
+Sui tre documenti segnalati, con la 2.1.4 i destinatari in maiuscolo
+sono oscurati in tutte le lettere e ricevute, e lo stesso vale per la
+firma digitale del doc 7 e per l'indirizzo scritto a mano sulla
+cartolina del doc 6. Sul contratto di mutuo di prova le 22 pagine di
+solo testo restano identiche. 22 test nuovi, 220 verdi.
+
 ## [2.1.3] - 2026-10-08
 
 Due difetti dell'oscuramento delle firme (R-20), emersi preparando la

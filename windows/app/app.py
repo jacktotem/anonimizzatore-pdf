@@ -27,7 +27,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "2.1.3"
+__version__ = "2.1.4"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -175,6 +175,8 @@ FALSE_POSITIVE_STOPWORDS = {
     "ammortamento", "rientro", "capitale", "totale", "totali",
     "mutuo", "mutuataria",
     "mutuatario", "mutuante", "garante", "ipotecaria", "ipoteca",
+    # R-22: lessico delle cessioni di crediti ("Banca Cedente")
+    "cedente", "cedenti", "cessionaria", "cessionario", "ottenere",
     # titoli professionali e abbreviazioni di ruolo
     "avv", "avvocato", "avvocati", "dott", "ssa", "sig", "sigra",
     "prof", "ing", "geom", "rag", "notaio", "rel", "est", "cons",
@@ -291,6 +293,13 @@ def trim_ner_span(full_text, start, end):
     while tokens and not _is_substantive_token(tokens[0].group()):
         # R-14: "Piazza/Via/..." in testa apre un indirizzo: si tiene
         if _clean_token(tokens[0].group()) in _STREET_PREFIXES:
+            break
+        # R-22: la particella di un cognome composto resta nel nome
+        # ("DE VITA GIROLAMO", "Di Pietro"): toglierla lascerebbe in
+        # chiaro un indizio sul cognome.
+        if (_clean_token(tokens[0].group()) in _SURNAME_PARTICLES
+                and tokens[0].group()[:1].isupper() and len(tokens) > 1
+                and _is_substantive_token(tokens[1].group())):
             break
         tokens.pop(0)
     while tokens and not _is_substantive_token(tokens[-1].group()):
@@ -982,6 +991,178 @@ class ItLegalNameRecognizer(EntityRecognizer):
 
 
 # ============================================================
+# DESTINATARI IN MAIUSCOLO (R-22)
+# ============================================================
+# Lettere bancarie, raccomandate e avvisi di ricevimento indicano le
+# parti SOLO nel blocco indirizzo, in maiuscolo:
+#     SIG.RA MALTESE ANGELA
+#     CONTRADA CUORE DI GESU' 453/D
+#     91025 MARSALA (TP)
+# Il NER statistico non riconosce i nomi in maiuscolo, e senza
+# un'occorrenza "normale" altrove nel documento neppure la propagazione
+# (R-04) può aiutare: il destinatario restava in chiaro.
+#
+# Qui si riconosce la struttura dell'indirizzo, non il nome: una
+# sequenza di 1-4 parole maiuscole è un destinatario se
+#   A) è seguita a breve da una parola d'indirizzo (VIA, CONTRADA,
+#      PIAZZA, CORSO...) — servono almeno due parole, cognome e nome;
+#   B) è preceduta da un appellativo o da un'etichetta di destinatario
+#      (SIG.RA, SPETT.LE, PREG.MO, DESTINATARIO, "intestato a"...).
+# Una volta riconosciuto, il nome si propaga al resto del documento
+# anche quando ricompare scritto normalmente ("intestato a Maltese").
+
+_ADDR_KEYWORDS = {
+    "via", "viale", "vle", "contrada", "cda", "piazza", "pza", "pzza",
+    "piazzale", "corso", "cso", "traversa", "vicolo", "largo", "localita",
+    "località", "loc", "frazione", "fraz", "strada", "borgo", "salita",
+    "lungomare", "rione", "casella",
+}
+# Appellativi ed etichette che introducono un destinatario
+_RECIPIENT_MARKER_RE = re.compile(
+    r"^(?:sig(?:\.?(?:ra|na|ri|g|gri|ne))?|signor[ae]?|spett(?:\.?le|abile)?|"
+    r"gent(?:\.?(?:mo|ma|mi|me|ile))?|preg(?:\.?(?:mo|ma|mi|me))?|"
+    r"egr(?:\.?(?:egio|egia|\.))?|ill(?:\.?(?:mo|ma))?|destinatari[oa]|"
+    r"intestat[oaie]|c\.?a)$",
+    re.IGNORECASE,
+)
+# Particelle dei cognomi composti: ammesse, ma non da sole né in coda
+_SURNAME_PARTICLES = {"de", "di", "del", "della", "dello", "dei", "degli",
+                      "da", "dal", "la", "lo", "li", "le", "d", "van", "von"}
+# Parole maiuscole frequenti negli stessi blocchi che non sono nomi
+_NOT_A_NAME = {
+    "raccomandata", "ar", "rr", "oggetto", "avviso", "ricevimento",
+    "destinatario", "mittente", "prodotto", "spedita", "spedizione",
+    "accettazione", "online", "line", "numero", "data", "firma", "euro",
+    "posta", "poste", "italiane", "pacco", "assicurata", "cap", "tel",
+    "fax", "email", "pec", "presso", "attenzione", "cortese", "ufficio",
+    "studio", "legale", "avvocato", "notaio", "tribunale", "corte",
+    "giudice", "procura", "comune", "provincia", "regione", "agenzia",
+    "credito", "cooperativo", "cooperativa", "bancario", "fondo",
+    "garanzia", "sede", "filiale", "agenzia", "direzione", "servizio",
+    "mutuo", "rapporto", "conto", "pratica", "ndg", "bip", "pos",
+    "copia", "allegato", "allegati", "spett", "sig", "sigra",
+    "ordinario", "civile", "penale", "sezione", "appello", "cassazione",
+    "camera", "consiglio", "ministero", "prefettura", "questura",
+    "universita", "università", "ospedale", "azienda", "asl", "inps",
+}
+
+
+def _token_lettere(tok):
+    return "".join(c for c in tok.strip(_TOKEN_PUNCT) if c.isalpha())
+
+
+def _is_upper_name_token(tok):
+    """Parola tutta maiuscola, fatta di lettere (apostrofi ammessi)."""
+    core = tok.strip(_TOKEN_PUNCT)
+    lettere = _token_lettere(core)
+    if len(lettere) < 2 or not core.replace("'", "").replace("’", "").isalpha():
+        return False
+    return lettere.isupper()
+
+
+class ItRecipientNameRecognizer(EntityRecognizer):
+    """Nomi dei destinatari scritti in maiuscolo nei blocchi indirizzo."""
+
+    SCORE = 0.85
+    FINESTRA_INDIRIZZO = 10     # parole entro cui cercare VIA/CONTRADA/...
+    FINESTRA_APPELLATIVO = 2    # parole tra l'appellativo e il nome
+
+    def __init__(self):
+        super().__init__(
+            supported_entities=["PERSON"],
+            supported_language="it",
+            name="ItRecipientNameRecognizer",
+        )
+
+    def load(self):
+        pass
+
+    @staticmethod
+    def _escluso(clean):
+        return (clean in _NOT_A_NAME or clean in _ADDR_KEYWORDS
+                or clean in _ORG_MARKERS or clean in FALSE_POSITIVE_STOPWORDS)
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "PERSON" not in entities:
+            return []
+        toks = list(re.finditer(r"\S+", text))
+        clean = [_clean_token(t.group()) for t in toks]
+        results = []
+        i = 0
+        while i < len(toks):
+            if not _is_upper_name_token(toks[i].group()) or self._escluso(clean[i]) \
+                    and clean[i] not in _SURNAME_PARTICLES:
+                i += 1
+                continue
+            # sequenza di parole maiuscole, al massimo 4, interrotta dalla
+            # punteggiatura forte o da parole che non possono essere nomi
+            j = i
+            while (j < len(toks) and j - i < 4
+                   and _is_upper_name_token(toks[j].group())
+                   and (not self._escluso(clean[j]) or clean[j] in _SURNAME_PARTICLES)):
+                j += 1
+                if toks[j - 1].group().rstrip()[-1:] in ",;:":
+                    break
+            seq = list(range(i, j))
+            while seq and clean[seq[-1]] in _SURNAME_PARTICLES:
+                seq.pop()
+            while seq and clean[seq[0]] in _SURNAME_PARTICLES and len(seq) == 1:
+                seq.pop()
+            sostanziali = [k for k in seq if len(_token_lettere(toks[k].group())) >= 3
+                           and clean[k] not in _SURNAME_PARTICLES]
+            if not sostanziali:
+                i = j if j > i else i + 1
+                continue
+
+            # La sequenza continua il nome di un ente ("TRIBUNALE ORDINARIO
+            # DI MILANO") o è la città dopo il CAP ("93017 SAN CATALDO"):
+            # non è un destinatario.
+            precedente = toks[i - 1].group().strip(_TOKEN_PUNCT) if i > 0 else ""
+            if (re.fullmatch(r"\d{5}", precedente)
+                    or (i > 0 and _is_upper_name_token(precedente)
+                        and (clean[i - 1] in _NOT_A_NAME or clean[i - 1] in _ORG_MARKERS
+                             or _token_lettere(precedente).lower() in _ADDR_KEYWORDS))):
+                i = j if j > i else i + 1
+                continue
+
+            prima = [clean[k] for k in range(max(0, i - self.FINESTRA_APPELLATIVO - 1), i)]
+            dopo = [_token_lettere(toks[k].group()).lower()
+                    for k in range(seq[-1] + 1,
+                                   min(len(toks), seq[-1] + 1 + self.FINESTRA_INDIRIZZO))]
+            appellativo = any(_RECIPIENT_MARKER_RE.match(c.replace(" ", "")) for c in prima)
+            # "c/o" introduce chi ospita la posta, di solito un ufficio
+            presso = i > 0 and re.fullmatch(r"c/[o0]", clean[i - 1] or "") is not None
+            # L'indirizzo appartiene alla sequenza di nome più vicina:
+            # "SAN CATALDO, li 14/07/2010 MALTESE ANGELA CONTRADA..." —
+            # la contrada è di Maltese, non di San Cataldo.
+            indirizzo = False
+            if len(sostanziali) >= 2 and not presso:
+                for k, d in enumerate(dopo):
+                    if d in _ADDR_KEYWORDS:
+                        indirizzo = True
+                        break
+                    pos = seq[-1] + 1 + k
+                    def nome_pieno(q):
+                        return (q < len(toks) and _is_upper_name_token(toks[q].group())
+                                and len(_token_lettere(toks[q].group())) >= 3
+                                and not self._escluso(clean[q]))
+                    if (k > 0 and nome_pieno(pos) and nome_pieno(pos + 1)
+                            and not _is_upper_name_token(toks[pos - 1].group())):
+                        break   # inizia un'altra sequenza di nome prima dell'indirizzo
+
+            if appellativo or indirizzo:
+                start, end = toks[seq[0]].start(), toks[seq[-1]].end()
+                # niente punteggiatura appiccicata ai bordi
+                while end > start and text[end - 1] in _TOKEN_PUNCT:
+                    end -= 1
+                if not is_false_positive("PERSON", text[start:end]):
+                    results.append(RecognizerResult(
+                        entity_type="PERSON", start=start, end=end, score=self.SCORE))
+            i = j if j > i else i + 1
+        return results
+
+
+# ============================================================
 # VERIFICA AGGIORNAMENTI (R-06)
 # ============================================================
 # SOLO su click esplicito dell'utente: l'app non fa MAI chiamate di
@@ -1303,6 +1484,8 @@ def initialize_analyzer():
     registry.add_recognizer(build_license_plate_recognizer())
     # R-18: codice fiscale scritto a gruppi ("MNT NMR 41P46 C286B")
     registry.add_recognizer(ItSpacedFiscalCodeRecognizer())
+    # R-22: destinatari in maiuscolo nei blocchi indirizzo
+    registry.add_recognizer(ItRecipientNameRecognizer())
 
     analyzer = AnalyzerEngine(
         nlp_engine=nlp_engine,
@@ -1658,9 +1841,56 @@ def collect_person_tokens(analysis):
     return tokens
 
 
+def detect_handwriting_on_text_page(page, entries, dpi=300):
+    """
+    R-23: firme e scritte a mano incollate come IMMAGINI in un PDF
+    digitale (la firma scansionata in calce a una lettera generata dal
+    gestionale). Prima l'opzione firme agiva solo sulle pagine
+    scansionate e queste restavano visibili, a meno di forzare l'OCR su
+    tutto — che però trasforma la pagina in un'immagine.
+
+    Si usa lo stesso rilevatore delle scansioni, con le parole del
+    livello di testo come prova di stampa, e si tengono solo le aree
+    che cadono su un'immagine: il testo vero resta testo.
+    Ritorna rettangoli in punti PDF, già ritagliati sull'immagine.
+    Il render è a 300 dpi come per l'OCR: il rilevatore è tarato su quella
+    risoluzione, e a 150 dpi il tratto di una firma rimpicciolita sparisce.
+    La pagina viene renderizzata solo se contiene immagini.
+    """
+    immagini = []
+    try:
+        for info in page.get_image_info():
+            r = fitz.Rect(info["bbox"]) & page.rect
+            if r.width >= 20 and r.height >= 10:
+                immagini.append(r)
+    except Exception:
+        return []
+    if not immagini:
+        return []
+
+    zoom = dpi / 72
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    img = Image.open(BytesIO(pix.tobytes("png")))
+    parole = [{
+        "text": e["text"], "conf": 100,
+        "x": e["rect"].x0 * zoom, "y": e["rect"].y0 * zoom,
+        "w": e["rect"].width * zoom, "h": e["rect"].height * zoom,
+    } for e in entries]
+
+    aree = []
+    for x0, y0, x1, y1 in detect_handwriting_regions(img, parole, dpi):
+        area = fitz.Rect(x0 / zoom, y0 / zoom, x1 / zoom, y1 / zoom)
+        for im in immagini:
+            sovrapp = area & im
+            if not sovrapp.is_empty and sovrapp.width > 2 and sovrapp.height > 2:
+                aree.append(sovrapp)
+    return aree
+
+
 def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
                           log, page_num, redaction_mode="blackout",
-                          assigner=None, known_org_tokens=None):
+                          assigner=None, known_org_tokens=None,
+                          redact_handwriting=False):
     """
     Applica le redazioni a una pagina testuale usando le coordinate.
 
@@ -1760,6 +1990,14 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
         redacted_word_idx.add(idx)
         _log(prop_type, display, "—", code)
 
+    # 5. R-23: firme incollate come immagine nei PDF digitali. Sempre
+    #    rettangolo nero, anche in pseudonimizzazione (come sulle
+    #    scansioni: una firma non ha un testo da accoppiare a un codice).
+    if redact_handwriting:
+        for area in detect_handwriting_on_text_page(page, entries):
+            page.add_redact_annot(area, fill=(0, 0, 0))
+            _log("FIRMA / SCRITTA A MANO", "(immagine)", "—", None)
+
     page.apply_redactions()
 
 
@@ -1805,6 +2043,7 @@ _HW_OCR_MAX_PASSO_PT = 20.0
 # R-21: righe di tabelle e cornici
 _HW_LINEA_PIENA = 0.7      # riga o colonna coperta d'inchiostro per oltre il 70%
 _HW_QUOTA_LINEE = 0.5      # componente fatta per metà o più di linee dritte
+_HW_LINEA_MIN_PT = 60.0    # R-24: righe dritte più lunghe di così vanno tolte
 
 
 def _connected_components(mask):
@@ -1931,6 +2170,33 @@ def _parole_stampate(words, px):
     return [w for w in parole if w["h"] <= max_h and passo(w) <= max_passo]
 
 
+def _rimuovi_righe(mask, min_len):
+    """
+    R-24: cancella dalla maschera le righe dritte lunghe, orizzontali e
+    verticali (linee prestampate di moduli, cornici, tabelle).
+
+    Su una cartolina di ritorno l'indirizzo scritto a mano poggia sulle
+    righe prestampate ("Destinatario ____", "Via ____"): tratto e riga
+    formavano un pezzo unico, scartato come cornice, e l'indirizzo
+    restava visibile. Tolte le righe, resta l'inchiostro a mano.
+    """
+    import numpy as np
+
+    def togli(m):
+        out = m.copy()
+        for r in range(m.shape[0]):
+            riga = m[r]
+            if not riga.any():
+                continue
+            d = np.diff(np.concatenate(([0], riga.view(np.int8), [0])))
+            for s, e in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1)):
+                if e - s >= min_len:
+                    out[r, s:e] = False
+        return out
+
+    return togli(togli(mask).T).T
+
+
 def _quota_linee(mask, x0, y0, x1, y1, ink):
     """
     R-21: quanta parte dell'inchiostro della componente sta in linee
@@ -1990,6 +2256,7 @@ def detect_handwriting_regions(img, words, dpi):
     mask = gray[:h, :w].reshape(
         h // scale, scale, w // scale, scale
     ).min(axis=(1, 3)) < _HW_DARK
+    mask = _rimuovi_righe(mask, max(8, int(_HW_LINEA_MIN_PT * px / scale)))
     if not mask.any():
         return []
 
@@ -2374,8 +2641,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     exclude_magistrates: R-10 — non redigere i nomi del collegio giudicante
     assigner: R-16 — CodeAssigner condiviso, per dare gli STESSI codici a più
         documenti dello stesso fascicolo (se None ne viene creato uno nuovo).
-    redact_handwriting: R-20 — oscura anche firme, sigle e timbri sulle
-        pagine passate per OCR.
+    redact_handwriting: R-20/R-23 — oscura anche firme, sigle e timbri:
+        sulle pagine scansionate e, nei PDF digitali, sulle immagini.
 
     Ritorna (bytes_pdf, log, mapping) dove mapping è la tabella di
     accoppiamento codice↔testo (vuota in modalità blackout).
@@ -2537,6 +2804,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                 redaction_mode=redaction_mode,
                 assigner=assigner,
                 known_org_tokens=org_tokens,
+                redact_handwriting=redact_handwriting,
             )
             pages_text += 1
 
@@ -2713,8 +2981,9 @@ with st.sidebar:
             "✍️ Oscura firme e scritte a mano",
             value=False,
             help=(
-                "Copre le aree di inchiostro manoscritto nelle pagine passate "
-                "per OCR: firme in calce, sigle, annotazioni a margine, timbri. "
+                "Copre le aree di inchiostro manoscritto: firme in calce, sigle, "
+                "annotazioni a margine, timbri. Vale per le pagine scansionate "
+                "e per le firme incollate come immagine nei PDF digitali. "
                 "È un riconoscimento grafico, non testuale: può coprire anche "
                 "loghi o grafici. Verifica sempre il risultato."
             ),

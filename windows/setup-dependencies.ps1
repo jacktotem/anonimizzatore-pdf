@@ -710,7 +710,16 @@ $script:PythonPackages = @(
     "presidio-analyzer>=2.2.0,<3.0.0",
     "spacy>=3.7.0,<3.8.0",
     "pytesseract>=0.3.10,<1.0.0",
-    "Pillow>=10.2.0,<12.0.0"
+    "Pillow>=10.2.0,<12.0.0",
+    # DEP-01: librerie numeriche bloccate. spaCy 3.7 usa thinc 8.2,
+    # compilato per numpy 1.x: con numpy 2.4 e pandas 3.1 (ottobre 2026)
+    # l'installazione da zero si rompeva alla verifica finale con
+    # "numpy.dtype size changed". Cambiando questa lista cambia anche il
+    # fingerprint (UPD-01), quindi chi aggiorna ricostruisce l'ambiente
+    # con le versioni giuste.
+    "numpy>=1.26,<2.0",
+    "pandas>=2.0,<2.3",
+    "thinc>=8.2.2,<8.2.5"
 )
 
 # UPD-01: fingerprint delle dipendenze per aggiornamenti rapidi.

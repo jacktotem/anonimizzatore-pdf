@@ -26,6 +26,14 @@ pymupdf>=1.24.0,<2.0.0
 presidio-analyzer>=2.2.0,<3.0.0
 spacy>=3.7.0,<3.8.0
 
+# DEP-01: librerie numeriche bloccate. spaCy 3.7 usa thinc 8.2, compilato
+# per numpy 1.x; con numpy 2.4 e pandas 3.1 (usciti a ottobre 2026) pip
+# installava una combinazione che si rompe all'avvio ("numpy.dtype size
+# changed"). Il blocco va tolto solo passando a spaCy 3.8 / thinc 8.3.
+numpy>=1.26,<2.0
+pandas>=2.0,<2.3
+thinc>=8.2.2,<8.2.5
+
 # OCR per PDF scansionati
 pytesseract>=0.3.10,<1.0.0
 Pillow>=10.2.0,<12.0.0

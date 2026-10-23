@@ -1203,3 +1203,138 @@ def test_firma_con_svolazzo_resta_una_firma():
         d.line([(230, 1390), (880, 1385)], fill=40, width=4)
 
     assert len(detect_handwriting_regions(_pagina_sintetica(firma), [], dpi=300)) == 1
+
+
+# ------------------------------------------------------------
+# R-22: destinatari in maiuscolo nei blocchi indirizzo
+# ------------------------------------------------------------
+# Lettere bancarie, raccomandate e avvisi di ricevimento indicano le
+# parti solo nel blocco indirizzo, in maiuscolo: il NER statistico non
+# le vedeva e restavano in chiaro.
+
+def _destinatari(testo):
+    from app import ItRecipientNameRecognizer
+    r = ItRecipientNameRecognizer()
+    return [testo[x.start:x.end] for x in r.analyze(testo, ["PERSON"])]
+
+
+@pytest.mark.parametrize("testo,attesi", [
+    # casi reali (testo OCR di lettere di messa in mora e cessione crediti,
+    # nomi sostituiti con nomi di fantasia)
+    ("RACCOMANDATA AR. SAN CATALDO, li 14/07/2010 ROSSI ANNA CONTRADA "
+     "DEI MILLE 453/D 91025 MARSALA (TP) PREG.MA SIG.RA", ["ROSSI ANNA"]),
+    ("/Spett DE LUCA MARIO BCC19 Bip: 786685 - HL IP VIA DEI PINI 26 "
+     "91020 PETROSINO(TP) Oggetto: Comunicazione", ["DE LUCA MARIO"]),
+    ("= DE LUCA MARIO BCC19 BIP: 786685 - HL IP P OSste $ VIA DEI PINI 26",
+     ["DE LUCA MARIO"]),
+    ("VERDI CARLA BCC19 Bip: 786685 - HL IP CONTRADA DEI MILLE 454/P",
+     ["VERDI CARLA"]),
+    # appellativi ed etichette
+    ("SIG.RA ROSSI ANNA", ["ROSSI ANNA"]),
+    ("Gent.mo Sig. BIANCHI CARLO", ["BIANCHI CARLO"]),
+    ("NDG 4107761 Intestata a: ROSSI ANNA Rapporto 960360015513", ["ROSSI ANNA"]),
+    ("Intestata a: ANNA Rapporto", ["ANNA"]),
+    ("Destinatario DI MAIO LUIGI Via TRAVERSA VI", ["DI MAIO LUIGI"]),
+])
+def test_destinatario_in_maiuscolo_riconosciuto(testo, attesi):
+    assert _destinatari(testo) == attesi
+
+
+@pytest.mark.parametrize("testo", [
+    # enti, città e indirizzi in maiuscolo non sono destinatari
+    "BANCA DI CREDITO COOPERATIVO G.TONIOLO DI SAN CATALDO Aderente al Fondo",
+    "TRIBUNALE ORDINARIO DI MILANO VIA FREGUGLIA 1",
+    "SEDE 93017 SAN CATALDO - CORSO VITTORIO EMANUELE, 171",
+    "DOSOLUTIONS C/O ISOLA DIGITALE SIN NAF CORSO MERIDIONALE, 56 80143 NAPOLI",
+    "PREG.MA SIG.RA — CONTRADA CUORE DI GESU 453/D",
+    "OGGETTO: Messa in mora rapp. di mutuo",
+    "RACCOMANDATA A.R. AVVISO DI RICEVIMENTO",
+])
+def test_enti_citta_e_indirizzi_non_sono_destinatari(testo):
+    assert _destinatari(testo) == []
+
+
+def test_particella_del_cognome_resta_nel_nome():
+    """'DE LUCA MARIO' non deve perdere il 'DE': resterebbe in chiaro un
+    indizio sul cognome."""
+    from app import trim_ner_span
+    t = "spett DE LUCA MARIO"
+    assert t[slice(*trim_ner_span(t, 6, len(t)))] == "DE LUCA MARIO"
+
+
+# ------------------------------------------------------------
+# R-24: scritte a mano sulle righe prestampate dei moduli
+# ------------------------------------------------------------
+
+def test_scritta_a_mano_sopra_una_riga_prestampata():
+    """Sulla cartolina di ritorno l'indirizzo scritto a mano poggia sulla
+    riga "Destinatario ____": tratto e riga non devono essere scambiati
+    per una cornice."""
+    from app import detect_handwriting_regions
+
+    def modulo(d):
+        d.line([(120, 1350), (1100, 1350)], fill=30, width=3)   # riga del modulo
+        _firma_sintetica(d, 250, 1290)                             # scritta che la tocca
+
+    assert len(detect_handwriting_regions(_pagina_sintetica(modulo), [], dpi=300)) == 1
+
+
+def test_sola_riga_prestampata_non_e_una_scritta():
+    from app import detect_handwriting_regions
+
+    def righe(d):
+        for y in (400, 600, 800):
+            d.line([(120, y), (1100, y)], fill=30, width=3)
+
+    assert detect_handwriting_regions(_pagina_sintetica(righe), [], dpi=300) == []
+
+
+# ------------------------------------------------------------
+# R-23: firme incollate come immagine nei PDF digitali
+# ------------------------------------------------------------
+
+def _pdf_con_firma_immagine():
+    from io import BytesIO
+    from PIL import Image, ImageDraw
+    firma = Image.new("L", (600, 250), 255)
+    _firma_sintetica(ImageDraw.Draw(firma), 30, 130, larghezza=520)
+    buf = BytesIO(); firma.save(buf, format="PNG")
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Distinti saluti, l'ufficio crediti", fontsize=11)
+    page.insert_image(fitz.Rect(330, 620, 470, 680), stream=buf.getvalue())
+    return doc, page
+
+
+def test_firma_immagine_in_pdf_digitale_rilevata():
+    from app import build_word_map, detect_handwriting_on_text_page
+    doc, page = _pdf_con_firma_immagine()
+    _, entries = build_word_map(page)
+    aree = detect_handwriting_on_text_page(page, entries)
+    assert len(aree) == 1
+    assert fitz.Rect(330, 620, 470, 680).contains(aree[0])   # ritagliata sull'immagine
+    doc.close()
+
+
+def test_firma_immagine_oscurata_e_testo_intatto():
+    from app import analyze_text_page, apply_text_redactions
+    doc, page = _pdf_con_firma_immagine()
+    analysis = {"full_text": "", "entries": [], "results": []}
+    from app import build_word_map
+    analysis["full_text"], analysis["entries"] = build_word_map(page)
+    log = []
+    apply_text_redactions(page, analysis, [], set(), log, 1, redact_handwriting=True)
+    assert [r["Tipo"] for r in log] == ["FIRMA / SCRITTA A MANO"]
+    assert "Distinti saluti" in page.get_text()
+    doc.close()
+
+
+def test_senza_opzione_firme_il_pdf_digitale_non_cambia():
+    from app import apply_text_redactions, build_word_map
+    doc, page = _pdf_con_firma_immagine()
+    ft, entries = build_word_map(page)
+    log = []
+    apply_text_redactions(page, {"full_text": ft, "entries": entries, "results": []},
+                          [], set(), log, 1, redact_handwriting=False)
+    assert log == []
+    doc.close()
