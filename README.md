@@ -177,7 +177,9 @@ L'app include un pulsante **"Verifica aggiornamenti"** nella barra laterale: con
 `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `LOCATION`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`, `URL`, `DATE_TIME`
 
 **Italiane** (Presidio + regex custom):
-`IT_FISCAL_CODE`, `IT_VAT_CODE`, `IT_IDENTITY_CARD`, `IT_DRIVER_LICENSE`, `IT_PASSPORT`, `IT_LICENSE_PLATE` (targhe: formato auto AA 000 AA, più moto/estere/ciclomotori riconosciute dal contesto "targa/targato/...")
+`IT_FISCAL_CODE`, `IT_VAT_CODE`, `IT_IDENTITY_CARD`, `IT_DRIVER_LICENSE`, `IT_PASSPORT`, `IT_LICENSE_PLATE` (targhe: formato auto AA 000 AA, più moto/estere/mezzi agricoli riconosciute dal contesto "targa/targato/tg."), `IT_BIRTH_DATE` (date di nascita dopo "nato/nata il…", attiva di default), `IT_POLICY_NUMBER` (numeri di polizza, disattivata di default)
+
+Le date (`DATE_TIME`, disattivata di default) e le località introdotte da "località", "frazione", "regione" hanno riconoscitori dedicati all'italiano.
 
 Il codice fiscale viene riconosciuto anche quando è scritto a gruppi, come
 negli atti notarili dattiloscritti (`MNT NMR 41P46 C286B`) o spezzato da un

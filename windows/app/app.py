@@ -27,7 +27,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "2.1.4"
+__version__ = "2.1.5"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -108,7 +108,10 @@ st.set_page_config(
 # non producono questo tipo di falso positivo e non vanno filtrate.
 
 # Tipi di entità prodotti dal NER statistico (filtrabili)
-NER_ENTITY_TYPES = {"PERSON", "LOCATION", "DATE_TIME", "NRP", "ORGANIZATION"}
+# R-25: DATE_TIME non c'è più. In italiano le date le produce solo il
+# riconoscitore a pattern ItDateRecognizer, e i filtri pensati per i
+# nomi (almeno tre lettere) le scartavano tutte.
+NER_ENTITY_TYPES = {"PERSON", "LOCATION", "NRP", "ORGANIZATION"}
 
 # Lunghezza minima di un token perché sia "sostanziale"
 MIN_TOKEN_LEN = 3
@@ -205,6 +208,33 @@ _ROMAN_NUMERAL_RE = re.compile(
 # R-07: date italiane scambiate dal pattern PHONE_NUMBER per telefoni
 # (es. "3.9.2009")
 _DATE_LIKE_RE = re.compile(r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}")
+
+# R-25/R-26: una data vera — numerica (20/05/1989, 20.05.89) o con il
+# mese in lettere (20 maggio 1989, 3 apr. 1988).
+_MESI = (r"gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|"
+         r"settembre|ottobre|novembre|dicembre|gen|feb|mar|apr|mag|giu|"
+         r"lug|ago|set|sett|ott|nov|dic")
+_DATE_FULL_RE = re.compile(
+    r"\b\d{1,2}\s*[./\-]\s*\d{1,2}\s*[./\-]\s*(?:\d{4}|\d{2})\b"
+    rf"|\b\d{{1,2}}(?:°|º)?\s+(?i:{_MESI})\.?\s+\d{{4}}\b"
+)
+
+
+def restrict_date_span(full_text, start, end):
+    """
+    R-25: riduce un'entità DATE_TIME alla data vera che contiene.
+
+    Prima le date passavano dal filtro dei nomi (trim_ner_span), che
+    tiene solo le parole con almeno tre lettere: "20/05/1989" non ne ha
+    nessuna e veniva scartata. Per questo la casella "Date" non oscurava
+    praticamente nulla, a qualunque soglia. Ritorna (start, end) della
+    data, o None se l'entità non contiene una data completa (un anno da
+    solo, un orario, "mercoledì").
+    """
+    m = _DATE_FULL_RE.search(full_text, start, end)
+    if not m:
+        return None
+    return m.start(), m.end()
 
 # R-13: numeri di ruolo/registro scambiati per telefoni ("3 26972/2008"):
 # qualsiasi cosa che termina con /anno è una citazione, non un telefono
@@ -729,6 +759,8 @@ ENTITY_CODE_PREFIXES = {
     "IT_DRIVER_LICENSE": "PAT",
     "IT_PASSPORT": "PASS",
     "IT_LICENSE_PLATE": "TARGA",
+    "IT_BIRTH_DATE": "NASCITA",
+    "IT_POLICY_NUMBER": "POLIZZA",
     "IBAN_CODE": "IBAN",
     "CREDIT_CARD": "CARTA",
     "URL": "URL",
@@ -935,8 +967,14 @@ class ItLegalNameRecognizer(EntityRecognizer):
         rf"\s*(?i:(?:ssa|ra|ri|re|ti)\.?\s+)?({_NAME_SEQ})"
     )
 
+    # R-29: "Il teste Mario ROSSI", "deposizione del teste Luca Bianchi"
+    REGEX_WITNESS_NAME = re.compile(
+        rf"\b(?i:teste|testimone|testi|testimoni)\s+({_NAME_SEQ})"
+    )
+
     SCORE_NAME_CF = 0.9
     SCORE_TITLE_NAME = 0.85
+    SCORE_WITNESS = 0.85
 
     def __init__(self):
         super().__init__(
@@ -969,6 +1007,7 @@ class ItLegalNameRecognizer(EntityRecognizer):
         for regex, score in (
             (self.REGEX_NAME_CF, self.SCORE_NAME_CF),
             (self.REGEX_TITLE_NAME, self.SCORE_TITLE_NAME),
+            (self.REGEX_WITNESS_NAME, self.SCORE_WITNESS),
         ):
             for match in regex.finditer(text):
                 trimmed = self._trim_trailing_stopwords(
@@ -1246,10 +1285,12 @@ _PLATE_ALPHABET = "ABCDEFGHJKLMNPRSTVWXYZ"
 
 # Parole che introducono una targa
 _PLATE_TRIGGER_RE = re.compile(
-    r"\b(?:targa|targhe|targat[oaie]|"
+    r"(?:\b(?:targa|targhe|targat[oaie]|"
     r"immatricolat[oaie]|"
     r"(?:auto)?veicol[oi]|autovettur[ae]|autocarr[oi]|"
     r"motociclo|motoveicolo|ciclomotor[ei]|rimorchi[oi])\b"
+    # R-28: l'abbreviazione "tg." delle sentenze ("mezzo agricolo, tg. XYZW123")
+    r"|\btg\.?(?=\s))"
     r"[\s:,]*"
     r"(?:(?:n|nr|num|numero|sigla|con)\.?\s*)?",
     re.IGNORECASE,
@@ -1457,6 +1498,148 @@ class ItSpacedFiscalCodeRecognizer(EntityRecognizer):
         return results
 
 
+# ============================================================
+# DATE DI NASCITA, POLIZZE, LOCALITÀ (R-26, R-27, R-30)
+# ============================================================
+
+class ItBirthDateRecognizer(EntityRecognizer):
+    """
+    R-26: data di nascita — la data che segue "nato/nata/nati",
+    eventualmente con il luogo ("nato a Trento il 10/01/1980"). Si
+    oscura solo la data: le altre date dell'atto (sinistro, udienze)
+    restano leggibili, perché quasi sempre servono a capire la vicenda.
+    """
+
+    REGEX = re.compile(
+        r"\b(?i:nat[oaie])"
+        r"(?:\s+(?i:a|in|ad)\s+[A-ZÀ-Ý][\w'’\-]*(?:\s+[A-ZÀ-Ý(][\w'’\-)]*){0,3})?"
+        r"\s*,?\s*(?:(?i:il|in\s+data|in\s+data\s+del|addì|lì)\s+)?"
+        rf"({_DATE_FULL_RE.pattern})"
+    )
+    SCORE = 0.9
+
+    def __init__(self):
+        super().__init__(supported_entities=["IT_BIRTH_DATE"],
+                         supported_language="it", name="ItBirthDateRecognizer")
+
+    def load(self):
+        pass
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "IT_BIRTH_DATE" not in entities:
+            return []
+        return [RecognizerResult(entity_type="IT_BIRTH_DATE", start=m.start(1),
+                                 end=m.end(1), score=self.SCORE)
+                for m in self.REGEX.finditer(text)]
+
+
+class ItDateRecognizer(EntityRecognizer):
+    """
+    R-25: date in italiano. Presidio ha un riconoscitore di date solo per
+    l'inglese e il modello italiano di spaCy non ha una categoria "data":
+    per l'italiano nessuno produceva DATE_TIME, e la casella "Date" non
+    oscurava nulla a qualunque soglia (segnalato su una sentenza).
+    """
+
+    SCORE = 0.85
+
+    def __init__(self):
+        super().__init__(supported_entities=["DATE_TIME"],
+                         supported_language="it", name="ItDateRecognizer")
+
+    def load(self):
+        pass
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "DATE_TIME" not in entities:
+            return []
+        return [RecognizerResult(entity_type="DATE_TIME", start=m.start(),
+                                 end=m.end(), score=self.SCORE)
+                for m in _DATE_FULL_RE.finditer(text)]
+
+
+class ItPolicyNumberRecognizer(EntityRecognizer):
+    """
+    R-27: numero di polizza assicurativa ("n. polizza 123456789",
+    "polizza n. 123456789"). Serve un codice vero: almeno 4 cifre, così
+    "polizza RC auto" o "massimale di polizza" non producono nulla.
+    """
+
+    _CODICE = r"([A-Z0-9][A-Z0-9./\-]{3,24}[A-Z0-9])"
+    REGEX = re.compile(
+        r"\b(?:(?i:polizz[ae])(?:\s+(?i:assicurativ[ae]))?\s*(?:(?i:n\.?|nr\.?|n°|num\.?|numero)\s*)?"
+        r"|(?i:n\.?|nr\.?|n°|numero)\s*(?i:di\s+)?(?i:polizz[ae])\s*)"
+        rf"{_CODICE}"
+    )
+    SCORE = 0.85
+
+    def __init__(self):
+        super().__init__(supported_entities=["IT_POLICY_NUMBER"],
+                         supported_language="it", name="ItPolicyNumberRecognizer")
+
+    def load(self):
+        pass
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "IT_POLICY_NUMBER" not in entities:
+            return []
+        out = []
+        for m in self.REGEX.finditer(text):
+            codice = m.group(1).rstrip(".-/")
+            if sum(c.isdigit() for c in codice) < 4:
+                continue
+            out.append(RecognizerResult(entity_type="IT_POLICY_NUMBER", start=m.start(1),
+                                        end=m.start(1) + len(codice), score=self.SCORE))
+        return out
+
+
+class ItLocalityRecognizer(EntityRecognizer):
+    """
+    R-30: toponimi introdotti da "località", "frazione", "regione"...
+    ("in località “Pian dei Larici”", "loc. Prato Alto"). Sono spesso nomi
+    rurali o dialettali che il NER non conosce, e indicano con
+    precisione il luogo di un fatto.
+    """
+
+    _TRIGGER = (r"\b(?i:località|localita|loc\.|frazione|fraz\.|regione|reg\.|"
+                r"contrada|c\.da|c/da|borgata)")
+    REGEX_VIRGOLETTE = re.compile(_TRIGGER + r"\s*[“\"«‘']([^”\"»’'\n]{2,40})[”\"»’']")
+    REGEX_NOME = re.compile(
+        _TRIGGER + r"\s+((?:[A-ZÀ-Ý][\w'’\-]*)(?:\s+(?:[A-ZÀ-Ý][\w'’\-]*|de|di|del|della|sa|su|is|sos|sas)){0,3})"
+    )
+    _NON_TOPONIMI = {"ignota", "imprecisata", "sconosciuta", "non", "indicata", "Ignota"}
+    SCORE = 0.85
+
+    def __init__(self):
+        super().__init__(supported_entities=["LOCATION"],
+                         supported_language="it", name="ItLocalityRecognizer")
+
+    def load(self):
+        pass
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "LOCATION" not in entities:
+            return []
+        out, presi = [], []
+        for regex in (self.REGEX_VIRGOLETTE, self.REGEX_NOME):
+            for m in regex.finditer(text):
+                s, e = m.start(1), m.end(1)
+                nome = text[s:e].strip()
+                if not nome or nome.split()[0].lower() in self._NON_TOPONIMI:
+                    continue
+                # niente parole minuscole in coda ("Prato Alto di", "Fondo del")
+                while e > s and text[s:e].split()[-1].islower():
+                    e = s + text[s:e].rstrip().rfind(" ")
+                    if e <= s:
+                        break
+                if e <= s or any(a < e and b > s for a, b in presi):
+                    continue
+                presi.append((s, e))
+                out.append(RecognizerResult(entity_type="LOCATION", start=s, end=e,
+                                            score=self.SCORE))
+        return out
+
+
 def build_license_plate_recognizer():
     """Recognizer per targhe di veicoli (entità IT_LICENSE_PLATE)."""
     return ItLicensePlateRecognizer()
@@ -1486,6 +1669,11 @@ def initialize_analyzer():
     registry.add_recognizer(ItSpacedFiscalCodeRecognizer())
     # R-22: destinatari in maiuscolo nei blocchi indirizzo
     registry.add_recognizer(ItRecipientNameRecognizer())
+    # R-26/R-27/R-30: date di nascita, numeri di polizza, località
+    registry.add_recognizer(ItBirthDateRecognizer())
+    registry.add_recognizer(ItDateRecognizer())
+    registry.add_recognizer(ItPolicyNumberRecognizer())
+    registry.add_recognizer(ItLocalityRecognizer())
 
     analyzer = AnalyzerEngine(
         nlp_engine=nlp_engine,
@@ -1770,6 +1958,16 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
 
             for r in all_results:
                 if r.score < min_score:
+                    continue
+                # R-25: le date si riducono alla data vera, senza passare
+                # dal filtro dei nomi (che le scartava tutte)
+                if r.entity_type == "DATE_TIME":
+                    span = restrict_date_span(full_text, r.start, r.end)
+                    if span is None or is_case_citation(full_text, *span):
+                        dropped_fp += 1
+                        continue
+                    r.start, r.end = span
+                    results.append(r)
                     continue
                 # R-07: restringe l'entità NER ai token sostanziali
                 if r.entity_type in NER_ENTITY_TYPES:
@@ -2409,6 +2607,16 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
             for r in all_results:
                 if r.score < min_score:
                     continue
+                # R-25: le date si riducono alla data vera, senza passare
+                # dal filtro dei nomi (che le scartava tutte)
+                if r.entity_type == "DATE_TIME":
+                    span = restrict_date_span(full_text, r.start, r.end)
+                    if span is None or is_case_citation(full_text, *span):
+                        dropped_fp += 1
+                        continue
+                    r.start, r.end = span
+                    results.append(r)
+                    continue
                 # R-07/R-17: restringe l'entità ai token sostanziali
                 if r.entity_type in NER_ENTITY_TYPES:
                     trimmed = (trim_org_span(full_text, r.start, r.end)
@@ -2902,7 +3110,15 @@ with st.sidebar:
     use_email = st.checkbox("Email", value=True)
     use_phone = st.checkbox("Numeri di telefono", value=True)
     use_location = st.checkbox("Località e indirizzi", value=True)
-    use_date = st.checkbox("Date", value=False, help="Disabilitato di default: spesso le date servono nei documenti legali")
+    # R-26: le date di nascita sono un dato personale; le altre date di
+    # un atto quasi sempre servono a capire la vicenda.
+    use_birth = st.checkbox(
+        "Date di nascita", value=True,
+        help="Oscura solo le date introdotte da \"nato/nata il…\". "
+             "Le altre date (fatti, udienze) restano leggibili.",
+    )
+    use_date = st.checkbox("Tutte le date", value=False,
+                           help="Disabilitato di default: spesso le date servono nei documenti legali")
 
     st.subheader("Documenti italiani")
     use_cf = st.checkbox("Codice fiscale", value=True)
@@ -2911,8 +3127,12 @@ with st.sidebar:
     use_patente = st.checkbox("Patente di guida", value=True)
     use_passport = st.checkbox("Passaporto", value=True)
     use_targa = st.checkbox("Targhe di veicoli", value=True,
-                            help="Formato attuale AA 000 AA (auto, dal 1994). "
-                                 "Il vecchio formato provinciale non è coperto.")
+                            help="Formato auto AA 000 AA riconosciuto ovunque; "
+                                 "qualsiasi formato (moto, mezzi agricoli, estere) "
+                                 "dopo \"targa\", \"targato\" o \"tg.\".")
+    use_polizza = st.checkbox("Numeri di polizza", value=False,
+                              help="Oscura il codice dopo \"polizza n.\" o "
+                                   "\"n. polizza\". Disattivato di default.")
 
     st.subheader("Dati finanziari")
     use_iban = st.checkbox("IBAN", value=True)
@@ -3025,12 +3245,14 @@ entity_map = [
     (use_phone, "PHONE_NUMBER"),
     (use_location, "LOCATION"),
     (use_date, "DATE_TIME"),
+    (use_birth, "IT_BIRTH_DATE"),
     (use_cf, "IT_FISCAL_CODE"),
     (use_piva, "IT_VAT_CODE"),
     (use_ci, "IT_IDENTITY_CARD"),
     (use_patente, "IT_DRIVER_LICENSE"),
     (use_passport, "IT_PASSPORT"),
     (use_targa, "IT_LICENSE_PLATE"),
+    (use_polizza, "IT_POLICY_NUMBER"),
     (use_iban, "IBAN_CODE"),
     (use_credit_card, "CREDIT_CARD"),
     (use_url, "URL"),
