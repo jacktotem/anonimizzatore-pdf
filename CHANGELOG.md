@@ -46,6 +46,12 @@ dati rimasti in chiaro e la proposta di oscurare le date di nascita.
 - La casella "Date" diventa "Tutte le date", per distinguerla dalla
   nuova "Date di nascita".
 
+### Changed (notifica)
+- La mail di notifica dice **quanto impiega l'aggiornamento**: confronta
+  l'elenco delle librerie con la versione precedente e, se cambia
+  (l'installer ricostruisce l'ambiente Python), avvisa che servono circa
+  15 minuti e la connessione a internet; altrimenti circa un minuto.
+
 ### Fixed (installazione)
 - **DEP-02 — Nuova rottura dalle dipendenze esterne.** Il test su
   Windows reale di questa versione ha fermato la release: preshed
