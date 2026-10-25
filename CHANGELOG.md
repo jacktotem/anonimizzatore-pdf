@@ -46,6 +46,17 @@ dati rimasti in chiaro e la proposta di oscurare le date di nascita.
 - La casella "Date" diventa "Tutte le date", per distinguerla dalla
   nuova "Date di nascita".
 
+### Fixed (installazione)
+- **DEP-02 — Nuova rottura dalle dipendenze esterne.** Il test su
+  Windows reale di questa versione ha fermato la release: preshed
+  3.0.14, una libreria in C di spaCy uscita negli ultimi giorni, rompe
+  il caricamento del modello italiano ("OverflowError: Python int too
+  large to convert to C ssize_t"). Riprodotto anche su Mac e isolato
+  cambiando una libreria alla volta. Come per DEP-01 riguardava ogni
+  installazione nuova, **comprese la 2.1.4 e la 2.1.3 pubblicate**. Ora
+  preshed è bloccato alla 3.0.13 e cymem, murmurhash, srsly e blis hanno
+  un tetto alle versioni verificate.
+
 ### Verifica
 Sulla sentenza della segnalazione, con le impostazioni di default più i
 numeri di polizza, tutti e cinque i dati sono ora oscurati e le date
