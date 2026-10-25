@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.5] - 2026-10-25
+
+Segnalazione di un avvocato su una sentenza in materia di sinistro: cinque
+dati rimasti in chiaro e la proposta di oscurare le date di nascita.
+
+### Fixed
+- **R-25 — La casella "Date" non oscurava nulla.** Per l'italiano
+  nessuno produceva entità "data": il riconoscitore di date di Presidio
+  esiste solo per l'inglese e il modello italiano di spaCy non ha la
+  categoria. Le poche date trovate venivano poi scartate dal filtro
+  pensato per i nomi, che tiene solo le parole con almeno tre lettere.
+  Il nuovo `ItDateRecognizer` riconosce le date numeriche (gg/mm/aaaa,
+  gg.mm.aa) e con il mese in lettere ("20 maggio 2026"); le date dentro
+  le citazioni giurisprudenziali restano leggibili. Sulla sentenza della
+  segnalazione, con la casella attiva, ora vengono oscurate 86 date.
+- **R-28 — Targhe introdotte da "tg.".** L'abbreviazione usata nelle
+  sentenze non era tra le parole-spia: la targa di un mezzo agricolo,
+  che non ha il formato delle auto, restava visibile. Dopo "tg." ora si
+  riconosce qualsiasi formato di targa.
+- **R-29 — Testimoni.** Dopo "teste", "testimone", "testi" si riconosce
+  il nome completo: il NER prendeva solo il nome e lasciava in chiaro
+  il cognome scritto in maiuscolo. Il nome si propaga poi al resto
+  dell'atto.
+- **R-30 — Località.** Dopo "località", "loc.", "frazione", "regione",
+  "contrada" si riconosce il toponimo, anche tra virgolette: i nomi
+  rurali e dialettali non sono nel vocabolario del NER.
+
+### Added
+- **R-26 — Date di nascita** (casella "Date di nascita", **attiva** di
+  default). Oscura solo la data che segue "nato/nata/nati", anche con il
+  luogo ("nato a Trento il 10/01/1980"); le date dei fatti e delle
+  udienze restano leggibili. Accolta la proposta dell'avvocato.
+- **R-27 — Numeri di polizza** (casella "Numeri di polizza",
+  **disattivata** di default). Oscura il codice dopo "polizza n." o
+  "n. polizza"; servono almeno quattro cifre, così "massimale di
+  polizza" o "polizza RC" non producono nulla.
+- La casella "Date" diventa "Tutte le date", per distinguerla dalla
+  nuova "Date di nascita".
+
+### Changed (notifica)
+- La mail di notifica dice **quanto impiega l'aggiornamento**: confronta
+  l'elenco delle librerie con la versione precedente e, se cambia
+  (l'installer ricostruisce l'ambiente Python), avvisa che servono circa
+  15 minuti e la connessione a internet; altrimenti circa un minuto.
+
+### Fixed (installazione)
+- **DEP-02 — Nuova rottura dalle dipendenze esterne.** Il test su
+  Windows reale di questa versione ha fermato la release: preshed
+  3.0.14, una libreria in C di spaCy uscita negli ultimi giorni, rompe
+  il caricamento del modello italiano ("OverflowError: Python int too
+  large to convert to C ssize_t"). Riprodotto anche su Mac e isolato
+  cambiando una libreria alla volta. Come per DEP-01 riguardava ogni
+  installazione nuova, **comprese la 2.1.4 e la 2.1.3 pubblicate**. Ora
+  preshed è bloccato alla 3.0.13 e cymem, murmurhash, srsly e blis hanno
+  un tetto alle versioni verificate.
+
+### Verifica
+Sulla sentenza della segnalazione, con le impostazioni di default più i
+numeri di polizza, tutti e cinque i dati sono ora oscurati e le date
+del sinistro e delle udienze restano leggibili. Su altri tre documenti
+reali nessuna redazione nuova oltre a quelle attese. 30 test nuovi,
+250 verdi. I test usano solo dati di fantasia.
+
 ## [2.1.4] - 2026-10-23
 
 Tre problemi segnalati da un avvocato su lettere bancarie di messa in

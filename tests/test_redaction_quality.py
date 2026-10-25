@@ -34,7 +34,6 @@ from app import (
     ("PERSON", "Firmato Da"),
     ("PERSON", "Emesso Da"),
     ("PERSON", "Numero"),
-    ("DATE_TIME", "Data"),
     ("LOCATION", "SE’"),
     ("LOCATION", "CAUSA"),
     ("LOCATION", "S"),
@@ -1338,3 +1337,116 @@ def test_senza_opzione_firme_il_pdf_digitale_non_cambia():
                           [], set(), log, 1, redact_handwriting=False)
     assert log == []
     doc.close()
+
+
+
+# ------------------------------------------------------------
+# R-25..R-30: sentenza su un sinistro (segnalazione di ottobre 2026)
+# ------------------------------------------------------------
+# Restavano in chiaro numero di polizza, località, targa di un mezzo
+# agricolo introdotta da "tg.", cognome di un testimone e data di
+# nascita; la casella "Date" non oscurava nulla.
+# Tutti i dati qui sotto sono di fantasia.
+
+def test_parola_data_non_e_una_data():
+    """Il NER etichettava "Data" come DATE_TIME e serviva un filtro; ora
+    le date le produce solo il riconoscitore a pattern."""
+    from app import restrict_date_span
+    assert restrict_date_span("Data", 0, 4) is None
+    assert restrict_date_span("mercoledì", 0, 9) is None
+
+
+@pytest.mark.parametrize("testo,atteso", [
+    ("occorso in data 10/01/2019, alle ore 9:30", "10/01/2019"),
+    ("con memoria del 20 maggio 2026 (ove", "20 maggio 2026"),
+    ("nato il 1° gennaio 1970", "1° gennaio 1970"),
+])
+def test_riconoscitore_date_italiano(testo, atteso):
+    from app import ItDateRecognizer
+    r = ItDateRecognizer()
+    assert [testo[x.start:x.end] for x in r.analyze(testo, ["DATE_TIME"])] == [atteso]
+
+
+def test_numero_di_ruolo_non_e_una_data():
+    from app import ItDateRecognizer
+    t = "nella causa iscritta al R.G. 1234/2023 promossa"
+    assert ItDateRecognizer().analyze(t, ["DATE_TIME"]) == []
+
+
+def test_casella_date_oscura_davvero_le_date():
+    """La data passa dall'analisi alla redazione invece di essere
+    scartata dal filtro pensato per i nomi."""
+    from app import ItDateRecognizer, apply_text_redactions, build_word_map
+    doc = fitz.open(); page = doc.new_page()
+    page.insert_text((50, 80), "Il sinistro avvenne il 10/01/2019 a sera.", fontsize=11)
+    ft, entries = build_word_map(page)
+    risultati = ItDateRecognizer().analyze(ft, ["DATE_TIME"])
+    log = []
+    apply_text_redactions(page, {"full_text": ft, "entries": entries, "results": risultati},
+                          [], set(), log, 1)
+    assert [r["Tipo"] for r in log] == ["DATE_TIME"]
+    assert "10/01/2019" not in page.get_text()
+    doc.close()
+
+
+def _trova(recognizer, entita, testo):
+    return [testo[x.start:x.end] for x in recognizer.analyze(testo, [entita])]
+
+
+@pytest.mark.parametrize("testo,attesi", [
+    ("Rossi, nato il 10/01/1980, aveva", ["10/01/1980"]),
+    ("nata a Trento il 3 aprile 1988 e residente", ["3 aprile 1988"]),
+    ("nato a Rovereto (TN) il 10.01.80", ["10.01.80"]),
+    ("nati il 1° gennaio 1970", ["1° gennaio 1970"]),
+    ("sinistro occorso in data 10/01/2019", []),     # non è una nascita
+    ("nato il giorno dopo", []),
+])
+def test_date_di_nascita(testo, attesi):
+    from app import ItBirthDateRecognizer
+    assert _trova(ItBirthDateRecognizer(), "IT_BIRTH_DATE", testo) == attesi
+
+
+@pytest.mark.parametrize("testo,attesi", [
+    ("Alfa Spa – n. polizza 123456789. Per", ["123456789"]),
+    ("dell'operatività della polizza n. 123456789;", ["123456789"]),
+    ("di cui alla polizza n. 1234/56789-A", ["1234/56789-A"]),
+    ("polizza assicurativa nr. 12345678", ["12345678"]),
+    ("nei limiti del massimale di polizza e al netto", []),
+    ("polizza RC auto obbligatoria", []),
+    ("tenuta ai sensi di polizza a mandare indenne", []),
+])
+def test_numeri_di_polizza(testo, attesi):
+    from app import ItPolicyNumberRecognizer
+    assert _trova(ItPolicyNumberRecognizer(), "IT_POLICY_NUMBER", testo) == attesi
+
+
+@pytest.mark.parametrize("testo,attesi", [
+    ("presso l'agro del Comune in località “Pian dei Larici”, con", ["Pian dei Larici"]),
+    ("località \"Su Fondo\"", ["Su Fondo"]),
+    ("loc. Prato Alto, presso", ["Prato Alto"]),
+    ("in frazione Valfonda del comune", ["Valfonda"]),
+    ("in località imprecisata", []),
+])
+def test_localita(testo, attesi):
+    from app import ItLocalityRecognizer
+    assert _trova(ItLocalityRecognizer(), "LOCATION", testo) == attesi
+
+
+@pytest.mark.parametrize("testo,attesi", [
+    ("mezzo agricolo PGS, tg. XYZW123, di proprietà", ["XYZW123"]),
+    ("Nissan 75, tg AB123CD assicurato", ["AB123CD"]),
+    ("tg. assicurato presso", []),
+    ("Montg. 12 non", []),
+])
+def test_targa_introdotta_da_tg(testo, attesi):
+    from app import ItLicensePlateRecognizer
+    assert _trova(ItLicensePlateRecognizer(), "IT_LICENSE_PLATE", testo) == attesi
+
+
+@pytest.mark.parametrize("testo,attesi", [
+    ("• Il teste Mario ROSSI, sentito all'udienza", ["Mario ROSSI"]),
+    ("deposizione del teste Luca Bianchi che al", ["Luca Bianchi"]),
+    ("il teste oculare dell'evento", []),
+])
+def test_testimoni(testo, attesi):
+    assert _trova(ItLegalNameRecognizer(), "PERSON", testo) == attesi

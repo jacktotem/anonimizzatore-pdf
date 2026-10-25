@@ -14,6 +14,8 @@ Nessuna dipendenza esterna: solo libreria standard.
 import html
 import json
 import os
+import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -43,7 +45,58 @@ def leggi_hash(asset):
         return None
 
 
-def costruisci_html(tag, versione, url_release, exe, impronta):
+_SETUP = "windows/setup-dependencies.ps1"
+
+
+def pacchetti_python(tag):
+    """
+    Elenco delle librerie Python che l'installer Windows di quella
+    versione installa ($script:PythonPackages), oppure None se non si
+    riesce a leggerlo. È lo stesso elenco da cui l'installer calcola
+    il fingerprint (UPD-01): se cambia, l'ambiente viene ricostruito.
+    """
+    if not tag:
+        return None
+    try:
+        testo = subprocess.run(["git", "show", f"{tag}:{_SETUP}"], capture_output=True,
+                               text=True, encoding="utf-8", check=True).stdout
+    except Exception:
+        return None
+    m = re.search(r"\$script:PythonPackages\s*=\s*@\((.*?)\n\)", testo, re.S)
+    if not m:
+        return None
+    righe = [r.split("#", 1)[0] for r in m.group(1).splitlines()]
+    return sorted(re.findall(r'"([^"]+)"', "\n".join(righe)))
+
+
+def durata_aggiornamento(tag, tag_precedente):
+    """
+    Quanto impiega l'aggiornamento sul server, da dire nella mail:
+    ("lungo" | "breve" | "incerto", testo).
+
+    Se tra la versione precedente e questa cambia l'elenco delle
+    librerie, l'installer ricostruisce l'ambiente Python: circa 15
+    minuti e serve internet. Altrimenti riusa quello che c'è: circa un
+    minuto — a patto che il server avesse la versione precedente.
+    """
+    nuovi, vecchi = pacchetti_python(tag), pacchetti_python(tag_precedente)
+    if nuovi is None or vecchi is None:
+        return ("incerto",
+                "da circa un minuto fino a circa 15 minuti, se l'installer deve "
+                "ricostruire l'ambiente Python (in quel caso serve la connessione "
+                "a internet)")
+    if nuovi != vecchi:
+        return ("lungo",
+                "circa 15 minuti. Questa versione aggiorna le librerie Python e "
+                "l'installer ricostruisce l'ambiente: serve la connessione a "
+                "internet")
+    return ("breve",
+            f"circa un minuto, se sul server c'è la versione precedente "
+            f"({html.escape(tag_precedente.lstrip('vV'))}); se è più vecchia può "
+            f"servire fino a circa 15 minuti e la connessione a internet")
+
+
+def costruisci_html(tag, versione, url_release, exe, impronta, durata):
     nome_exe = html.escape(exe.get("name", "AnonimizzatorePDF-Setup.exe")) if exe else ""
     url_exe = html.escape(exe.get("url", url_release)) if exe else url_release
     peso = f" ({exe.get('size', 0) // 1024 // 102 / 10:.1f} MB)" if exe else ""
@@ -71,9 +124,13 @@ def costruisci_html(tag, versione, url_release, exe, impronta):
     Anonimizzatore PDF · Aggiornamento</p>
   <h1 style="margin:0 0 10px;font-size:25px;line-height:1.25">
     Da installare sul server: versione {html.escape(versione)}</h1>
-  <p style="margin:0 0 20px">
+  <p style="margin:0 0 14px">
     È disponibile una nuova versione dell'Anonimizzatore PDF.
     Occorre aggiornare l'installazione sul server Windows dello studio.</p>
+  <p style="margin:0 0 20px;padding:12px 16px;background:#fff;
+            border-left:4px solid {'#EC671A' if durata[0] == 'lungo' else '#78C7C9'};
+            font-size:14.5px">
+    <strong>Tempo dell'aggiornamento:</strong> {durata[1]}.</p>
 
   <div style="background:#fff;border-radius:8px;padding:20px 22px">
     <h2 style="margin:0 0 14px;font-size:15px;color:#EC671A;
@@ -92,7 +149,7 @@ def costruisci_html(tag, versione, url_release, exe, impronta):
       Doppio click e conferma la richiesta di autorizzazione di Windows.
       <strong>Non serve disinstallare</strong> la versione precedente:
       l'installer va eseguito sopra quella esistente e riconosce i
-      componenti già presenti (richiede circa un minuto).</p>
+      componenti già presenti.</p>
 
     <p style="margin:0 0 6px"><strong>3. Riavvia il servizio</strong></p>
     <p style="margin:0 0 8px;color:#334C58">
@@ -138,13 +195,15 @@ def main():
     assets = dati.get("assets") or []
     exe = trova_asset(assets, ".exe")
     impronta = leggi_hash(trova_asset(assets, ".sha256"))
+    durata = durata_aggiornamento(tag, os.environ.get("PREV_TAG", ""))
+    print(f"Durata stimata dell'aggiornamento: {durata[0]}")
 
     payload = {
         "from": mittente,
         "to": [destinatario],
         "subject": (f"Notifica automatica da Jacopo: Anonimizzatore PDF "
                     f"{versione} — aggiornamento da installare sul server"),
-        "html": costruisci_html(tag, versione, dati.get("url", ""), exe, impronta),
+        "html": costruisci_html(tag, versione, dati.get("url", ""), exe, impronta, durata),
     }
 
     richiesta = urllib.request.Request(

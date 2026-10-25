@@ -3,12 +3,12 @@
 ; Installer Inno Setup
 ; ========================================
 ; La versione può essere sovrascritta da riga di comando (CI):
-;   ISCC.exe /DMyAppVersion=2.1.4 installer.iss
+;   ISCC.exe /DMyAppVersion=2.1.5 installer.iss
 ; Il default qui sotto serve per la compilazione manuale.
 
 #define MyAppName "Anonimizzatore PDF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.1.4"
+  #define MyAppVersion "2.1.5"
 #endif
 #define MyAppPublisher "Anonimizzatore PDF"
 #define MyAppExeName "AnonimizzatorePDF.bat"

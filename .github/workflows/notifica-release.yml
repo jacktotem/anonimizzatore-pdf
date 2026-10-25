@@ -55,6 +55,10 @@ jobs:
       - name: Checkout
         if: steps.cfg.outputs.pronta == 'si'
         uses: actions/checkout@v4
+        with:
+          # Servono i tag delle release: la mail confronta l'elenco delle
+          # librerie con la versione precedente per stimare la durata.
+          fetch-depth: 0
 
       - name: Raccogli i dati della release
         if: steps.cfg.outputs.pronta == 'si'
@@ -71,7 +75,19 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           gh release view "$TAG" -R "$REPO" \
             --json name,body,url,publishedAt,assets > release.json
-          echo "Dati raccolti per $TAG"
+          # Release pubblicata subito prima di questa (per la stima della
+          # durata dell'aggiornamento): ordine di pubblicazione, no bozze.
+          gh release list -R "$REPO" --limit 100 --exclude-drafts \
+            --json tagName,publishedAt > releases.json
+          PREV=$(TAG="$TAG" python3 -c '
+          import json, os
+          rel = sorted(json.load(open("releases.json")), key=lambda r: r["publishedAt"])
+          tags = [r["tagName"] for r in rel]
+          t = os.environ["TAG"]
+          print(tags[tags.index(t) - 1] if t in tags and tags.index(t) > 0 else "")
+          ')
+          echo "prev_tag=$PREV" >> "$GITHUB_OUTPUT"
+          echo "Dati raccolti per $TAG (versione precedente: ${PREV:-nessuna})"
 
       - name: Componi e invia la mail
         if: steps.cfg.outputs.pronta == 'si'
@@ -82,4 +98,5 @@ jobs:
           NOTIFY_EMAIL: ${{ inputs.destinatario || vars.NOTIFY_EMAIL }}
           NOTIFY_FROM: ${{ vars.NOTIFY_FROM }}
           TAG: ${{ steps.rel.outputs.tag }}
+          PREV_TAG: ${{ steps.rel.outputs.prev_tag }}
         run: python3 .github/scripts/notifica_release.py

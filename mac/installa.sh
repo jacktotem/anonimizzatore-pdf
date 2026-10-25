@@ -197,7 +197,12 @@ setup_venv() {
         "Pillow>=10.0.0" \
         "numpy>=1.26,<2.0" \
         "pandas>=2.0,<2.3" \
-        "thinc>=8.2.2,<8.2.5" 2>&1 | tee -a "$LOG_FILE"
+        "thinc>=8.2.2,<8.2.5" \
+        "preshed>=3.0.2,<3.0.14" \
+        "cymem>=2.0.2,<2.0.17" \
+        "murmurhash>=0.28.0,<1.0.17" \
+        "srsly>=2.4.3,<2.6.0" \
+        "blis>=0.7.8,<0.8.0" 2>&1 | tee -a "$LOG_FILE"
     
     print_success "Pacchetti Python installati"
 }
