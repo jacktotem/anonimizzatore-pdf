@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.6] - 2026-11-11
+
+### Fixed
+- **DEP-03 — L'app si fermava sulla tabella dei risultati.** Streamlit
+  installa da sé pyarrow, che non era bloccata: pyarrow 26 (novembre
+  2026) richiede NumPy 2, mentre il progetto tiene NumPy 1.x per spaCy
+  3.7. Su un'installazione nuova l'app si interrompeva su
+  `st.dataframe` con "pyarrow requires NumPy 2.0 or newer". pyarrow ora
+  è bloccata a `<26` in `requirements.txt` e negli installer Mac e
+  Windows; le versioni dalla 21 alla 25 sono verificate con NumPy 1.26.
+  Il blocco va tolto insieme a quello di NumPy, passando a spaCy 3.8.
+
+### Changed
+- La verifica finale degli installer Mac e Windows carica anche pyarrow,
+  così un'incompatibilità come questa emerge in installazione e non
+  all'apertura dell'app.
+
 ## [2.1.5] - 2026-10-25
 
 Segnalazione di un avvocato su una sentenza in materia di sinistro: cinque

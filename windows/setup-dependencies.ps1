@@ -727,7 +727,10 @@ $script:PythonPackages = @(
     "cymem>=2.0.2,<2.0.17",
     "murmurhash>=0.28.0,<1.0.17",
     "srsly>=2.4.3,<2.6.0",
-    "blis>=0.7.8,<0.8.0"
+    "blis>=0.7.8,<0.8.0",
+    # DEP-03: pyarrow 26 (novembre 2026) richiede numpy 2; con numpy 1.x
+    # le tabelle di Streamlit si rompono ("pyarrow requires NumPy 2.0").
+    "pyarrow>=14,<26"
 )
 
 # UPD-01: fingerprint delle dipendenze per aggiornamenti rapidi.
@@ -771,7 +774,7 @@ function Test-PythonEnvironmentCurrent {
     # Sanity check: i moduli chiave devono essere importabili
     # (NAT-01: può legittimamente fallire, non deve abortire il setup)
     $code = Invoke-Native -Exe $pythonExe -Arguments @(
-        "-c", "import streamlit, fitz, pytesseract; from presidio_analyzer import AnalyzerEngine"
+        "-c", "import streamlit, pyarrow, fitz, pytesseract; from presidio_analyzer import AnalyzerEngine"
     )
     if ($code -ne 0) {
         Write-Log "Venv presente ma moduli non importabili: ricreo" "WARN"
@@ -921,7 +924,7 @@ function Verify-Installation {
     $verifyScript = @"
 import sys
 try:
-    import streamlit, fitz, pytesseract, spacy
+    import streamlit, pyarrow, fitz, pytesseract, spacy
     from presidio_analyzer import AnalyzerEngine
     from PIL import Image
     nlp = spacy.load('it_core_news_lg')
