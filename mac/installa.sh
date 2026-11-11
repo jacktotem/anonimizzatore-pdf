@@ -202,7 +202,8 @@ setup_venv() {
         "cymem>=2.0.2,<2.0.17" \
         "murmurhash>=0.28.0,<1.0.17" \
         "srsly>=2.4.3,<2.6.0" \
-        "blis>=0.7.8,<0.8.0" 2>&1 | tee -a "$LOG_FILE"
+        "blis>=0.7.8,<0.8.0" \
+        "pyarrow>=14,<26" 2>&1 | tee -a "$LOG_FILE"
     
     print_success "Pacchetti Python installati"
 }
@@ -334,7 +335,7 @@ run_tests() {
     
     source venv/bin/activate
     
-    python -c "import streamlit, fitz, pytesseract, spacy; from presidio_analyzer import AnalyzerEngine; print('✓ Tutti i pacchetti Python importati')" 2>&1 | tee -a "$LOG_FILE"
+    python -c "import streamlit, pyarrow, fitz, pytesseract, spacy; from presidio_analyzer import AnalyzerEngine; print('✓ Tutti i pacchetti Python importati')" 2>&1 | tee -a "$LOG_FILE"
     python -c "import spacy; nlp = spacy.load('it_core_news_lg'); print('✓ Modello italiano caricato')" 2>&1 | tee -a "$LOG_FILE"
     
     if tesseract --list-langs 2>&1 | grep -q "^ita$"; then

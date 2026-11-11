@@ -41,6 +41,10 @@ cymem>=2.0.2,<2.0.17
 murmurhash>=0.28.0,<1.0.17
 srsly>=2.4.3,<2.6.0
 blis>=0.7.8,<0.8.0
+# DEP-03: pyarrow arriva con streamlit (tabelle st.dataframe). pyarrow 26
+# (novembre 2026) richiede numpy 2 e con numpy 1.x si rompe all'avvio
+# ("pyarrow requires NumPy 2.0 or newer"). Va sbloccato insieme a numpy.
+pyarrow>=14,<26
 
 # OCR per PDF scansionati
 pytesseract>=0.3.10,<1.0.0
