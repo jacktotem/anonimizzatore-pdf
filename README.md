@@ -87,7 +87,7 @@ python3.12 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python -m spacy download it_core_news_lg
-streamlit run src/app.py
+streamlit run src/app.py --server.address 127.0.0.1 --browser.gatherUsageStats false
 ```
 
 ---
@@ -182,7 +182,7 @@ L'app include un pulsante **"Verifica aggiornamenti"** nella barra laterale: con
 Le date (`DATE_TIME`, disattivata di default) e le località introdotte da "località", "frazione", "regione" hanno riconoscitori dedicati all'italiano.
 
 Il codice fiscale viene riconosciuto anche quando è scritto a gruppi, come
-negli atti notarili dattiloscritti (`MNT NMR 41P46 C286B`) o spezzato da un
+negli atti notarili dattiloscritti (`VRD NNA 81A41 H501X`) o spezzato da un
 a capo; se il carattere di controllo torna, la confidenza è massima.
 
 ---

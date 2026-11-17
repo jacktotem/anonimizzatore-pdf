@@ -27,7 +27,7 @@ from presidio_analyzer import (
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-__version__ = "2.1.6"
+__version__ = "2.1.7"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -301,7 +301,7 @@ def is_false_positive(entity_type, text):
 # R-14: i prefissi di indirizzo restano nell'entità quando sono in
 # TESTA ("Piazza delle Donne Lavoratrici" non deve diventare "Donne
 # Lavoratrici"), ma vengono trimmati quando sono in CODA, incollati a
-# un nome ("Stefano Carlo Ferrari Via" → "Stefano Carlo Ferrari").
+# un nome ("Sandro Carlo Ferretti Via" → "Sandro Carlo Ferretti").
 _STREET_PREFIXES = {
     "via", "viale", "piazza", "piazzale", "corso", "largo", "vicolo",
     "strada", "località", "localita", "frazione", "contrada",
@@ -312,9 +312,9 @@ def trim_ner_span(full_text, start, end):
     """
     R-07: restringe un'entità NER ai soli token sostanziali, eliminando
     dai BORDI il boilerplate catturato per errore dal modello:
-    "FRASCA Emesso Da" → "FRASCA"; "Raffaele Frasca - Presidente dott"
-    → "Raffaele Frasca". (Migliora anche la coerenza dei codici di
-    pseudonimizzazione: "Rossetti - Consigliere" e "Rossetti" diventano
+    "BELTRAMI Emesso Da" → "BELTRAMI"; "Ottavio Beltrami - Presidente dott"
+    → "Ottavio Beltrami". (Migliora anche la coerenza dei codici di
+    pseudonimizzazione: "Zanardi - Consigliere" e "Zanardi" diventano
     la stessa entità.)
 
     Ritorna (start, end) aggiustati, o None se non resta nulla.
@@ -325,7 +325,7 @@ def trim_ner_span(full_text, start, end):
         if _clean_token(tokens[0].group()) in _STREET_PREFIXES:
             break
         # R-22: la particella di un cognome composto resta nel nome
-        # ("DE VITA GIROLAMO", "Di Pietro"): toglierla lascerebbe in
+        # ("DE LUCA MARIO", "Di Pietro"): toglierla lascerebbe in
         # chiaro un indizio sul cognome.
         if (_clean_token(tokens[0].group()) in _SURNAME_PARTICLES
                 and tokens[0].group()[:1].isupper() and len(tokens) > 1
@@ -675,18 +675,18 @@ _NAME_SEQ = rf"{_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,3}}"
 # Default: disattivata (si anonimizza tutto — comportamento prudente).
 
 _MAGISTRATE_CONTEXT_RES = [
-    # epigrafe del collegio: "dott. Marco Rossetti - Consigliere rel."
-    # "dott. ssa Clotilde Parise      Presidente"
+    # epigrafe del collegio: "dott. Marco Zanardi - Consigliere rel."
+    # "dott. ssa Clotilde Farnesi      Presidente"
     re.compile(
         rf"\bdott\.?\s*(?:(?i:ssa)\.?\s*)?({_NAME_SEQ})\s*[-–—]?\s*"
         rf"(?i:presidente|consigliere|giudice|relatore|estensore|rel\b|est\b)"
     ),
-    # "udita la relazione ... dal Consigliere relatore dott. Marco Rossetti"
+    # "udita la relazione ... dal Consigliere relatore dott. Marco Zanardi"
     re.compile(
         rf"(?i:presidente|consigliere|giudice|relatore|estensore)"
         rf"[^A-ZÀ-Ö]{{0,40}}?\bdott\.?\s*(?:(?i:ssa)\.?\s*)?({_NAME_SEQ})"
     ),
-    # firma digitale a margine: "Firmato Da: RAFFAELE GAETANO ANTONIO FRASCA"
+    # firma digitale a margine: "Firmato Da: OTTAVIO LUCIANO ANTONIO BELTRAMI"
     re.compile(
         r"(?i:firmato\s+da)\s*:?\s*((?:[A-ZÀ-Ö']{2,}\s+){0,4}[A-ZÀ-Ö']{2,})"
     ),
@@ -777,8 +777,8 @@ class CodeAssigner:
     - Stessa stringa (normalizzata: minuscole, punteggiatura ai bordi
       ignorata) → stesso codice in tutto il documento.
     - Prefisso per tipo di dato: PER-01, CF-01, IBAN-01, TERM-01...
-    - Un token di nome propagato ("Alonge") riusa il codice della
-      persona già codificata ("Alonge Antonio") se l'attribuzione è
+    - Un token di nome propagato ("Moroni") riusa il codice della
+      persona già codificata ("Moroni Antonio") se l'attribuzione è
       univoca; altrimenti riceve un codice proprio.
     """
 
@@ -805,7 +805,7 @@ class CodeAssigner:
             # R-09: nei provvedimenti la stessa persona compare sia come
             # "Cognome Nome" (epigrafe) sia come "Nome Cognome" (corpo).
             # La chiave è insensibile all'ordine dei token, così
-            # "Criniti Francesco" e "Francesco Criniti" ricevono lo
+            # "Galvani Francesco" e "Francesco Galvani" ricevono lo
             # STESSO codice. (Due persone distinte con le stesse
             # identiche parole in ordine diverso sono un caso di scuola
             # che accettiamo di non distinguere.)
@@ -943,7 +943,7 @@ def find_custom_term_matches(term, entries):
 # ============================================================
 # RECOGNIZER NOMI IN CONTESTO LEGALE (R-03)
 # ============================================================
-# spaCy manca nomi con cognomi rari (es. "Cabalisti Marco").
+# spaCy manca nomi con cognomi rari (es. "Tavernelli Marco").
 # Nei documenti legali italiani però ci sono contesti deterministici:
 #   1. "Cognome Nome (C.F. XXXXXXXXXXXXXXXX)" — un nome seguito dal
 #      codice fiscale tra parentesi è quasi certamente una persona
@@ -957,11 +957,11 @@ def find_custom_term_matches(term, entries):
 class ItLegalNameRecognizer(EntityRecognizer):
     """Nomi di persona in contesti tipici dei documenti legali italiani."""
 
-    # "Cabalisti Marco (C.F. CBLMRC90L07A459F)"
+    # "Tavernelli Marco (C.F. TVRMRC90L07H501X)"
     REGEX_NAME_CF = re.compile(
         rf"({_NAME_SEQ})\s*\(\s*(?i:c\.?\s?f\.?|cod\.?\s*fisc\.?|codice\s+fiscale)"
     )
-    # "avv. Calogera Cusumano", "dott. ssa Clotilde Parise"
+    # "avv. Calogera Fontanesi", "dott. ssa Clotilde Farnesi"
     REGEX_TITLE_NAME = re.compile(
         rf"\b(?i:avv|dott|prof|sig|ing|geom|rag|not)\."
         rf"\s*(?i:(?:ssa|ra|ri|re|ti)\.?\s+)?({_NAME_SEQ})"
@@ -989,7 +989,7 @@ class ItLegalNameRecognizer(EntityRecognizer):
     def _trim_trailing_stopwords(self, text, start, end):
         """
         Rimuove dal fondo i token di ruolo/boilerplate catturati per
-        errore ("Clotilde Parise Presidente" → "Clotilde Parise").
+        errore ("Clotilde Farnesi Presidente" → "Clotilde Farnesi").
         Ritorna (start, end) aggiustati oppure None se non resta nulla.
         """
         span = text[start:end]
@@ -1034,9 +1034,9 @@ class ItLegalNameRecognizer(EntityRecognizer):
 # ============================================================
 # Lettere bancarie, raccomandate e avvisi di ricevimento indicano le
 # parti SOLO nel blocco indirizzo, in maiuscolo:
-#     SIG.RA MALTESE ANGELA
-#     CONTRADA CUORE DI GESU' 453/D
-#     91025 MARSALA (TP)
+#     SIG.RA ROSSI ANNA
+#     CONTRADA DEI MILLE 12/D
+#     38060 BORGOVERDE (TN)
 # Il NER statistico non riconosce i nomi in maiuscolo, e senza
 # un'occorrenza "normale" altrove nel documento neppure la propagazione
 # (R-04) può aiutare: il destinatario restava in chiaro.
@@ -1048,7 +1048,7 @@ class ItLegalNameRecognizer(EntityRecognizer):
 #   B) è preceduta da un appellativo o da un'etichetta di destinatario
 #      (SIG.RA, SPETT.LE, PREG.MO, DESTINATARIO, "intestato a"...).
 # Una volta riconosciuto, il nome si propaga al resto del documento
-# anche quando ricompare scritto normalmente ("intestato a Maltese").
+# anche quando ricompare scritto normalmente ("intestato a Rossi").
 
 _ADDR_KEYWORDS = {
     "via", "viale", "vle", "contrada", "cda", "piazza", "pza", "pzza",
@@ -1154,7 +1154,7 @@ class ItRecipientNameRecognizer(EntityRecognizer):
                 continue
 
             # La sequenza continua il nome di un ente ("TRIBUNALE ORDINARIO
-            # DI MILANO") o è la città dopo il CAP ("93017 SAN CATALDO"):
+            # DI MILANO") o è la città dopo il CAP ("38062 SAN FLORIANO"):
             # non è un destinatario.
             precedente = toks[i - 1].group().strip(_TOKEN_PUNCT) if i > 0 else ""
             if (re.fullmatch(r"\d{5}", precedente)
@@ -1172,8 +1172,8 @@ class ItRecipientNameRecognizer(EntityRecognizer):
             # "c/o" introduce chi ospita la posta, di solito un ufficio
             presso = i > 0 and re.fullmatch(r"c/[o0]", clean[i - 1] or "") is not None
             # L'indirizzo appartiene alla sequenza di nome più vicina:
-            # "SAN CATALDO, li 14/07/2010 MALTESE ANGELA CONTRADA..." —
-            # la contrada è di Maltese, non di San Cataldo.
+            # "SAN FLORIANO, li 03/05/2011 ROSSI ANNA CONTRADA..." —
+            # la contrada è di Rossi, non di San Floriano.
             indirizzo = False
             if len(sostanziali) >= 2 and not presso:
                 for k, d in enumerate(dopo):
@@ -1400,8 +1400,8 @@ class ItLicensePlateRecognizer(EntityRecognizer):
 # CODICE FISCALE SPEZZATO DA SPAZI (R-18)
 # ============================================================
 # Gli atti notarili e bancari dattiloscritti scrivono il codice
-# fiscale a gruppi: "MNT NMR 41P46 C286B" invece di
-# "MNTNMR41P46C286B". Nei PDF scansionati l'OCR restituisce quei
+# fiscale a gruppi: "VRD NNA 81A41 H501X" invece di
+# "VRDNNA81A41H501X". Nei PDF scansionati l'OCR restituisce quei
 # gruppi come parole distinte, quindi il recognizer predefinito di
 # Presidio — che pretende 16 caratteri attaccati — non vede nulla.
 #
@@ -1665,7 +1665,7 @@ def initialize_analyzer():
     registry.add_recognizer(ItLegalNameRecognizer())
     # R-11: targhe di veicoli italiane
     registry.add_recognizer(build_license_plate_recognizer())
-    # R-18: codice fiscale scritto a gruppi ("MNT NMR 41P46 C286B")
+    # R-18: codice fiscale scritto a gruppi ("VRD NNA 81A41 H501X")
     registry.add_recognizer(ItSpacedFiscalCodeRecognizer())
     # R-22: destinatari in maiuscolo nei blocchi indirizzo
     registry.add_recognizer(ItRecipientNameRecognizer())
@@ -2019,7 +2019,7 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
 def collect_person_tokens(analysis):
     """
     R-04: raccoglie i token dei nomi di persona rilevati, per
-    propagarli a tutto il documento (es. "Cabalisti" rilevato a
+    propagarli a tutto il documento (es. "Tavernelli" rilevato a
     pagina 1 viene oscurato anche dove il NER lo manca).
     """
     tokens = set()
@@ -2179,7 +2179,7 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
             prop_type = "PERSON (propagato)"
         else:
             continue
-        # R-15: nel log/tabella niente punteggiatura appiccicata ("Pieri," → "Pieri")
+        # R-15: nel log/tabella niente punteggiatura appiccicata ("Sartori," → "Sartori")
         display = entry["text"].strip(_TOKEN_PUNCT)
         code = assigner.assign(prop_type, display) if use_codes else None
         add_redaction_for_hits(
@@ -2880,7 +2880,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 
     # ---------- PASSATA 1: analisi di TUTTE le pagine ----------
     # Analizziamo PRIMA tutto il documento per raccogliere i nomi di
-    # persona rilevati (R-04): così "Cabalisti" trovato a pagina 1
+    # persona rilevati (R-04): così "Tavernelli" trovato a pagina 1
     # viene oscurato anche nelle pagine dove il NER lo manca.
     #
     # R-19: le pagine OCR partecipano a questa passata esattamente

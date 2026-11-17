@@ -34,6 +34,18 @@ if [[ ! -f "$SCRIPT_DIR/venv/bin/activate" ]]; then
     exit 1
 fi
 
+# NET-01: l'icona sul Desktop ha il comando di avvio scritto dentro e
+# viene ricreata solo da installa.sh. Le copie installate prima della
+# 2.1.7 vanno corrette qui, altrimenti l'app continuerebbe ad ascoltare
+# su tutta la rete. Sta PRIMA del controllo di versione: così vale
+# anche quando non c'è nulla da scaricare.
+LAUNCHER="$HOME/Desktop/Anonimizzatore PDF.app/Contents/MacOS/launch"
+if [[ -f "$LAUNCHER" ]] && ! grep -q -- "--server.address" "$LAUNCHER"; then
+    sed -i '' 's/--server.headless false/--server.headless false --server.address 127.0.0.1/' "$LAUNCHER"
+    echo "🔒 Icona sul Desktop corretta: l'app ora risponde solo da questo computer."
+    echo ""
+fi
+
 echo "📥 Controllo l'ultima versione..."
 git fetch origin main
 

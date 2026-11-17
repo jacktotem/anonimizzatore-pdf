@@ -23,12 +23,14 @@ echo  Anonimizzatore PDF
 echo  Avvio in corso...
 echo ============================================
 echo.
-echo L'app si aprira' nel browser predefinito su http://localhost:8501
+echo L'app si aprira' nel browser predefinito su http://127.0.0.1:8501
 echo.
 echo Per chiudere l'app: chiudere questa finestra (CTRL+C o X)
 echo.
 
 call venv\Scripts\activate.bat
-python -m streamlit run app.py --server.headless false --browser.gatherUsageStats false
+rem NET-01: solo questo computer. Senza --server.address Streamlit ascolta
+rem su tutte le interfacce e l'app e' raggiungibile dalla rete locale.
+python -m streamlit run app.py --server.headless false --server.address 127.0.0.1 --browser.gatherUsageStats false
 
 pause

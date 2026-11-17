@@ -17,9 +17,11 @@ echo " Anonimizzatore PDF"
 echo " Avvio in corso..."
 echo "============================================"
 echo ""
-echo "L'app si aprirà nel browser su http://localhost:8501"
+echo "L'app si aprirà nel browser su http://127.0.0.1:8501"
 echo "Per chiudere: CTRL+C in questo terminale"
 echo ""
 
 source venv/bin/activate
-streamlit run app.py --server.headless false --browser.gatherUsageStats false
+# NET-01: solo questo computer. Senza --server.address Streamlit ascolta
+# su tutte le interfacce e l'app è raggiungibile dalla rete locale.
+streamlit run app.py --server.headless false --server.address 127.0.0.1 --browser.gatherUsageStats false

@@ -18,7 +18,7 @@ COME SI AVVIA
 -------------
 1. Doppio click sull'icona "Anonimizzatore PDF" sul Desktop
    (o dal Menu Start)
-2. Si apre il browser su http://localhost:8501
+2. Si apre il browser su http://127.0.0.1:8501
 3. Carica un PDF, configura cosa anonimizzare, premi "Anonimizza"
 4. Scarica il PDF risultante
 
