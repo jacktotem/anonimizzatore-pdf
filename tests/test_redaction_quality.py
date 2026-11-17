@@ -5,7 +5,7 @@ Copre i tre bug osservati su provvedimenti reali:
 - R-01: falsi positivi NER ("Firmato Da", "Numero", "SE'") redatti;
 - R-02: search_for oscurava sottostringhe dentro altre parole
   ("se" → "sentenza", "spese", "pretese");
-- R-03: nomi con cognomi rari ("Cabalisti Marco") mancati dal NER
+- R-03: nomi con cognomi rari ("Tavernelli Marco") mancati dal NER
   ma riconoscibili dal contesto legale ("(C.F. ...)", titoli).
 
 Nessun test qui richiede spaCy/modello italiano: si testano gli helper
@@ -47,8 +47,8 @@ def test_falsi_positivi_scartati(entity_type, text):
 
 
 @pytest.mark.parametrize("entity_type,text", [
-    ("PERSON", "Cabalisti Marco"),
-    ("PERSON", "Maria Celeste Arbia"),
+    ("PERSON", "Tavernelli Marco"),
+    ("PERSON", "Maria Celeste Bonaldi"),
     ("PERSON", "Elena Rossi Consigliere"),  # nome + ruolo: va tenuto
     ("LOCATION", "Venezia"),
 ])
@@ -73,20 +73,20 @@ def _person_spans(text):
 
 
 def test_nome_prima_del_codice_fiscale():
-    text = "e contro Cabalisti Marco (C.F. CBLMRC90L07A459F) appellato"
-    assert "Cabalisti Marco" in _person_spans(text)
+    text = "e contro Tavernelli Marco (C.F. TVRMRC90L07H501X) appellato"
+    assert "Tavernelli Marco" in _person_spans(text)
 
 
 def test_nome_dopo_titolo_avvocato():
-    text = "rappresentato e difeso dall’avv. Calogera Cusumano contro"
-    assert "Calogera Cusumano" in _person_spans(text)
+    text = "rappresentato e difeso dall’avv. Calogera Fontanesi contro"
+    assert "Calogera Fontanesi" in _person_spans(text)
 
 
 def test_titolo_con_suffisso_e_ruolo_trimmato():
     # "dott. ssa" e ruolo finale "Presidente" non devono entrare nel nome
-    text = "composta da dott. ssa Clotilde Parise Presidente e altri"
+    text = "composta da dott. ssa Clotilde Farnesi Presidente e altri"
     spans = _person_spans(text)
-    assert "Clotilde Parise" in spans
+    assert "Clotilde Farnesi" in spans
     assert all("Presidente" not in s for s in spans)
 
 
@@ -168,13 +168,13 @@ def test_propagazione_nomi(pagina_sintetica):
 
 
 def test_collect_person_tokens_esclude_stopword():
-    full_text = "Alonge Antonio contro Istituto Nazionale Lavoro"
+    full_text = "Moroni Antonio contro Istituto Nazionale Lavoro"
     results = [
-        RecognizerResult("PERSON", 0, 14, 0.85),               # Alonge Antonio
+        RecognizerResult("PERSON", 0, 14, 0.85),               # Moroni Antonio
         RecognizerResult("PERSON", 22, len(full_text), 0.85),  # Istituto ... Lavoro
     ]
     tokens = collect_person_tokens({"full_text": full_text, "results": results})
-    assert {"alonge", "antonio"} <= tokens
+    assert {"moroni", "antonio"} <= tokens
     assert not {"istituto", "nazionale", "lavoro"} & tokens
 
 
@@ -207,34 +207,34 @@ from app import CodeAssigner, apply_text_redactions as _apply  # noqa: E402
 
 def test_codici_stessa_stringa_stesso_codice():
     a = CodeAssigner()
-    c1 = a.assign("PERSON", "Alonge Antonio")
-    c2 = a.assign("PERSON", "ALONGE ANTONIO")   # case-insensitive
-    c3 = a.assign("PERSON", "Alonge Antonio,")  # punteggiatura ai bordi
+    c1 = a.assign("PERSON", "Moroni Antonio")
+    c2 = a.assign("PERSON", "MORONI ANTONIO")   # case-insensitive
+    c3 = a.assign("PERSON", "Moroni Antonio,")  # punteggiatura ai bordi
     assert c1 == c2 == c3 == "PER-01"
     assert a.mapping[0]["Occorrenze"] == 3
 
 
 def test_codici_stringhe_diverse_codici_diversi():
     a = CodeAssigner()
-    assert a.assign("PERSON", "Alonge Antonio") == "PER-01"
-    assert a.assign("PERSON", "Scardoni Aldo") == "PER-02"
-    assert a.assign("IT_FISCAL_CODE", "LNGNTN72T09D514W") == "CF-01"
+    assert a.assign("PERSON", "Moroni Antonio") == "PER-01"
+    assert a.assign("PERSON", "Tessari Aldo") == "PER-02"
+    assert a.assign("IT_FISCAL_CODE", "MRNNTN72T09H501N") == "CF-01"
     assert a.assign("TERMINE PERSONALIZZATO", "ACME S.p.A.") == "TERM-01"
 
 
 def test_codici_token_propagato_riusa_codice_persona():
     a = CodeAssigner()
-    a.assign("PERSON", "Alonge Antonio")
+    a.assign("PERSON", "Moroni Antonio")
     # il solo cognome appartiene a una sola persona -> stesso codice
-    assert a.assign("PERSON (propagato)", "Alonge") == "PER-01"
+    assert a.assign("PERSON (propagato)", "Moroni") == "PER-01"
 
 
 def test_codici_token_ambiguo_codice_nuovo():
     a = CodeAssigner()
-    a.assign("PERSON", "Criniti Francesco")
-    a.assign("PERSON", "Criniti Luisa")
-    # "Criniti" appartiene a due persone: attribuzione ambigua -> codice nuovo
-    assert a.assign("PERSON (propagato)", "Criniti") == "PER-03"
+    a.assign("PERSON", "Galvani Francesco")
+    a.assign("PERSON", "Galvani Luisa")
+    # "Galvani" appartiene a due persone: attribuzione ambigua -> codice nuovo
+    assert a.assign("PERSON (propagato)", "Galvani") == "PER-03"
 
 
 def test_pseudonimizzazione_sostituisce_con_codice(pagina_sintetica):
@@ -337,13 +337,13 @@ def test_telefono_vero_non_filtrato():
 
 
 def test_trim_bordi_entita():
-    text = "Firmato Da: FRASCA Emesso Da: TRUSTPRO"
-    start, end = text.index("FRASCA"), text.index("FRASCA") + len("FRASCA Emesso Da:")
-    assert text[slice(*trim_ner_span(text, start, end))] == "FRASCA"
+    text = "Firmato Da: BELTRAMI Emesso Da: TRUSTPRO"
+    start, end = text.index("BELTRAMI"), text.index("BELTRAMI") + len("BELTRAMI Emesso Da:")
+    assert text[slice(*trim_ner_span(text, start, end))] == "BELTRAMI"
 
-    text2 = "dott. Raffaele Frasca - Presidente dott."
-    s2 = text2.index("Raffaele")
-    assert text2[slice(*trim_ner_span(text2, s2, len(text2)))] == "Raffaele Frasca"
+    text2 = "dott. Ottavio Beltrami - Presidente dott."
+    s2 = text2.index("Ottavio")
+    assert text2[slice(*trim_ner_span(text2, s2, len(text2)))] == "Ottavio Beltrami"
 
     # entità fatta SOLO di boilerplate → None
     text3 = "Emesso Da Numero"
@@ -371,24 +371,24 @@ def test_citazioni_giurisprudenziali_riconosciute():
 
 def test_codici_ordine_nome_cognome_unificato():
     a = CodeAssigner()
-    c1 = a.assign("PERSON", "Criniti Francesco")   # epigrafe
-    c2 = a.assign("PERSON", "Francesco Criniti")   # corpo del provvedimento
+    c1 = a.assign("PERSON", "Galvani Francesco")   # epigrafe
+    c2 = a.assign("PERSON", "Francesco Galvani")   # corpo del provvedimento
     assert c1 == c2 == "PER-01"
     assert a.mapping[0]["Occorrenze"] == 2
 
     # anche con tre token
-    c3 = a.assign("PERSON", "Iorno Maria Saletta")
-    c4 = a.assign("PERSON", "Maria Saletta Iorno")
+    c3 = a.assign("PERSON", "Donati Maria Letizia")
+    c4 = a.assign("PERSON", "Maria Letizia Donati")
     assert c3 == c4 == "PER-02"
 
 
 def test_codici_persone_diverse_restano_distinte():
     a = CodeAssigner()
-    assert a.assign("PERSON", "Criniti Francesco") == "PER-01"
-    assert a.assign("PERSON", "Criniti Luisa") == "PER-02"
-    assert a.assign("PERSON", "Spezzano Francesco") == "PER-03"
-    # il solo "Criniti" è ambiguo tra più persone → codice proprio
-    assert a.assign("PERSON (propagato)", "Criniti") == "PER-04"
+    assert a.assign("PERSON", "Galvani Francesco") == "PER-01"
+    assert a.assign("PERSON", "Galvani Luisa") == "PER-02"
+    assert a.assign("PERSON", "Ruffini Francesco") == "PER-03"
+    # il solo "Galvani" è ambiguo tra più persone → codice proprio
+    assert a.assign("PERSON (propagato)", "Galvani") == "PER-04"
 
 
 def test_codici_ordine_non_applicato_alle_location():
@@ -405,31 +405,31 @@ def test_codici_ordine_non_applicato_alle_location():
 from app import collect_magistrate_tokens, is_magistrate  # noqa: E402
 
 _EPIGRAFE = (
-    "composta dai magistrati: dott. Raffaele Frasca - Presidente "
-    "dott. Marco Rossetti - Consigliere rel. "
-    "dott. ssa Anna Moscarini - Consigliere "
-    "udita la relazione svolta dal Consigliere relatore dott. Marco Rossetti "
-    "Firmato Da: RAFFAELE GAETANO ANTONIO FRASCA Emesso Da: TRUSTPRO QUALIFIED"
+    "composta dai magistrati: dott. Ottavio Beltrami - Presidente "
+    "dott. Marco Zanardi - Consigliere rel. "
+    "dott. ssa Anna Colombini - Consigliere "
+    "udita la relazione svolta dal Consigliere relatore dott. Marco Zanardi "
+    "Firmato Da: OTTAVIO LUCIANO ANTONIO BELTRAMI Emesso Da: TRUSTPRO QUALIFIED"
 )
 
 
 def test_collect_magistrate_tokens_dai_contesti():
     toks = collect_magistrate_tokens(_EPIGRAFE)
-    assert {"frasca", "raffaele", "rossetti", "marco", "moscarini", "anna"} <= toks
+    assert {"beltrami", "ottavio", "zanardi", "marco", "colombini", "anna"} <= toks
     # i ruoli e l'ente certificatore non entrano nel set
     assert not {"presidente", "consigliere", "trustpro"} & toks
 
 
 def test_is_magistrate_solo_se_tutti_i_token_sono_noti():
     toks = collect_magistrate_tokens(_EPIGRAFE)
-    assert is_magistrate("Marco Rossetti", toks) is True
-    assert is_magistrate("RAFFAELE GAETANO ANTONIO FRASCA", toks) is True
+    assert is_magistrate("Marco Zanardi", toks) is True
+    assert is_magistrate("OTTAVIO LUCIANO ANTONIO BELTRAMI", toks) is True
     # una parte non è mai magistrato
-    assert is_magistrate("Criniti Francesco", toks) is False
+    assert is_magistrate("Galvani Francesco", toks) is False
     # nome misto (un token ignoto) → si redige: prevale la protezione
     assert is_magistrate("Marco Bianchi", toks) is False
     # set vuoto → nessuno è magistrato
-    assert is_magistrate("Marco Rossetti", set()) is False
+    assert is_magistrate("Marco Zanardi", set()) is False
 
 
 def test_nome_senza_contesto_non_e_magistrato():
@@ -560,17 +560,17 @@ def test_trim_rimuove_punteggiatura_ai_bordi():
 
 
 def test_trim_ruolo_patrocinante():
-    text = "C.F.: FRRSFN65B10F205X Patrocinante in Cassazione"
-    s = text.index("FRRSFN65B10F205X")
-    span = trim_ner_span(text, s, s + len("FRRSFN65B10F205X Patrocinante"))
-    assert text[slice(*span)] == "FRRSFN65B10F205X"
+    text = "C.F.: FRTSDR65B10H501Y Patrocinante in Cassazione"
+    s = text.index("FRTSDR65B10H501Y")
+    span = trim_ner_span(text, s, s + len("FRTSDR65B10H501Y Patrocinante"))
+    assert text[slice(*span)] == "FRTSDR65B10H501Y"
 
 
 def test_trim_nome_con_via_appiccicata():
-    text = "Studio Legale Avv. Stefano Carlo Ferrari Via Stelvio 19"
-    s = text.index("Stefano")
-    span = trim_ner_span(text, s, s + len("Stefano Carlo Ferrari Via"))
-    assert text[slice(*span)] == "Stefano Carlo Ferrari"
+    text = "Studio Legale Avv. Sandro Carlo Ferretti Via Garibaldi 19"
+    s = text.index("Sandro")
+    span = trim_ner_span(text, s, s + len("Sandro Carlo Ferretti Via"))
+    assert text[slice(*span)] == "Sandro Carlo Ferretti"
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -622,9 +622,9 @@ def test_telefono_lungo_senza_separatori_resta_valido():
 
 
 def test_trim_contro_in_testa():
-    text = "Contro RONCHETTI ELENA rappresentata"
-    span = trim_ner_span(text, 0, len("Contro RONCHETTI ELENA"))
-    assert text[slice(*span)] == "RONCHETTI ELENA"
+    text = "Contro VALENTINI ELENA rappresentata"
+    span = trim_ner_span(text, 0, len("Contro VALENTINI ELENA"))
+    assert text[slice(*span)] == "VALENTINI ELENA"
 
 
 def test_trim_conserva_piazza_in_testa():
@@ -633,10 +633,10 @@ def test_trim_conserva_piazza_in_testa():
     span = trim_ner_span(text, s, s + len("Piazza delle Donne Lavoratrici"))
     assert text[slice(*span)] == "Piazza delle Donne Lavoratrici"
     # ...ma "Via" in coda a un nome viene ancora rimossa
-    t2 = "Avv. Stefano Carlo Ferrari Via Stelvio"
-    s2 = t2.index("Stefano")
-    span2 = trim_ner_span(t2, s2, s2 + len("Stefano Carlo Ferrari Via"))
-    assert t2[slice(*span2)] == "Stefano Carlo Ferrari"
+    t2 = "Avv. Sandro Carlo Ferretti Via Garibaldi"
+    s2 = t2.index("Sandro")
+    span2 = trim_ner_span(t2, s2, s2 + len("Sandro Carlo Ferretti Via"))
+    assert t2[slice(*span2)] == "Sandro Carlo Ferretti"
 
 
 @pytest.mark.parametrize("text,following,expected", [
@@ -644,7 +644,7 @@ def test_trim_conserva_piazza_in_testa():
     ("CARROZZERIA MODERNA", "S.N.C. (P.IVA", "ORGANIZATION"),
     ("MODERNA", "S.N.C.", "ORGANIZATION"),
     ("Genertel s.p.a.", "", "ORGANIZATION"),
-    ("Ronchetti Elena", "ed ITAS Mutua", "PERSON"),   # una persona resta tale
+    ("Valentini Elena", "ed ITAS Mutua", "PERSON"),   # una persona resta tale
 ])
 def test_retype_societa(text, following, expected):
     assert retype_company_as_org("PERSON", text, following) == expected
@@ -655,8 +655,8 @@ def test_veicolo_descrizione_non_redatta():
     s = t.index("Jeep")
     assert is_vehicle_description(t, s) is True
     # ma il proprietario NON è una descrizione di veicolo
-    t2 = "la vettura del sig. Ciullo Fabio parcheggiata"
-    s2 = t2.index("Ciullo")
+    t2 = "la vettura del sig. Baldini Fabio parcheggiata"
+    s2 = t2.index("Baldini")
     assert is_vehicle_description(t2, s2) is False
 
 
@@ -720,33 +720,33 @@ def test_falsi_positivi_r15(entity_type, text):
 
 
 def test_trim_intestazione_comparsa():
-    text = "Giudice Dott. Giulio Scaramuzzino COMPARSA DI COSTITUZIONE"
+    text = "Giudice Dott. Giulio Castellani COMPARSA DI COSTITUZIONE"
     s = text.index("Giulio")
-    span = trim_ner_span(text, s, s + len("Giulio Scaramuzzino COMPARSA"))
-    assert text[slice(*span)] == "Giulio Scaramuzzino"
+    span = trim_ner_span(text, s, s + len("Giulio Castellani COMPARSA"))
+    assert text[slice(*span)] == "Giulio Castellani"
 
 
 def test_trim_avvti_in_testa():
-    text = "dagli Avv.ti Andrea Girardi (C.F. ..."
+    text = "dagli Avv.ti Andrea Morosini (C.F. ..."
     s = text.index("Avv.ti")
-    span = trim_ner_span(text, s, s + len("Avv.ti Andrea Girardi"))
-    assert text[slice(*span)] == "Andrea Girardi"
+    span = trim_ner_span(text, s, s + len("Avv.ti Andrea Morosini"))
+    assert text[slice(*span)] == "Andrea Morosini"
 
 
 def test_propagazione_senza_punteggiatura(pagina_sintetica):
     """'Rossi' propagato da un'occorrenza 'Rossi,' appare pulito nel log."""
     doc = fitz.open()
     page = doc.new_page()
-    page.insert_text((72, 100), "il dott. Pieri, accertava i postumi", fontsize=11)
+    page.insert_text((72, 100), "il dott. Sartori, accertava i postumi", fontsize=11)
     full_text, entries = build_word_map(page)
     analysis = {"full_text": full_text, "entries": entries, "results": []}
     assigner = CodeAssigner()
     log = []
-    _apply(page, analysis, [], {"pieri"}, log, 1,
+    _apply(page, analysis, [], {"sartori"}, log, 1,
            redaction_mode="codes", assigner=assigner)
     doc.close()
-    assert log[0]["Testo"] == "Pieri"
-    assert assigner.mapping[0]["Testo originale"] == "Pieri"
+    assert log[0]["Testo"] == "Sartori"
+    assert assigner.mapping[0]["Testo originale"] == "Sartori"
 
 
 # ------------------------------------------------------------
@@ -925,7 +925,7 @@ def test_articoli_e_ruoli_non_entrano_nel_nome():
 # R-18: codice fiscale spezzato in gruppi da spazi
 # ------------------------------------------------------------
 # Negli atti notarili dattiloscritti il codice fiscale si scrive
-# "MNT NMR 41P46 C286B"; su PDF scansionati l'OCR restituisce quei
+# "VRD NNA 81A41 H501X"; su PDF scansionati l'OCR restituisce quei
 # gruppi come parole separate e il recognizer standard non li vede.
 
 def _cf_spans(testo):
@@ -939,12 +939,12 @@ def _cf_spans(testo):
 
 
 @pytest.mark.parametrize("testo,atteso", [
-    # i due casi reali del contratto di mutuo segnalato
-    ("codice fiscale MNT NMR 41P46 C286B, entrambi residenti",
-     "MNT NMR 41P46 C286B"),
-    ("scale BNC FNC 73B24 C286C.", "BNC FNC 73B24 C286C"),
+    # le due forme del contratto di mutuo segnalato (codici di fantasia)
+    ("codice fiscale VRD NNA 81A41 H501X, entrambi residenti",
+     "VRD NNA 81A41 H501X"),
+    ("scale BNC LGU 73B24 H501L.", "BNC LGU 73B24 H501L"),
     # forma attaccata: deve continuare a funzionare
-    ("codice fiscale MNTNMR41P46C286B, entrambi", "MNTNMR41P46C286B"),
+    ("codice fiscale VRDNNA81A41H501X, entrambi", "VRDNNA81A41H501X"),
     # raggruppamenti alternativi e a capo
     ("C.F. RSS MRA 85T10 A562S", "RSS MRA 85T10 A562S"),
     ("CF RSSMRA85T10\nA562S spezzato", "RSSMRA85T10\nA562S"),
@@ -957,7 +957,7 @@ def test_codice_fiscale_spezzato_riconosciuto(testo, atteso):
 def test_codice_fiscale_sopra_la_soglia_predefinita():
     """Il recognizer predefinito di Presidio dà 0.3 a un codice fiscale
     senza contesto: sotto la soglia di default (40%) sparirebbe."""
-    for testo in ("codice fiscale MNT NMR 41P46 C286B,", "CF BNC FNC 73B24 C286C"):
+    for testo in ("codice fiscale VRD NNA 81A41 H501X,", "CF BNC LGU 73B24 H501L"):
         assert all(score >= 0.4 for _, score in _cf_spans(testo))
 
 
@@ -1013,18 +1013,18 @@ def test_analisi_ocr_compatibile_con_la_propagazione():
 
 
 def test_nome_maiuscolo_propagato_da_una_pagina_allaltra():
-    """'Montoleone' riconosciuto in una pagina deve coprire
-    'MONTOLEONE' in un'altra, dove il NER non lo vede."""
+    """'Monteverdi' riconosciuto in una pagina deve coprire
+    'MONTEVERDI' in un'altra, dove il NER non lo vede."""
     from app import collect_person_tokens
 
     tokens = collect_person_tokens({
-        "full_text": "il Sig. Montoleone Anna Maria, nato a Castelvetrano",
+        "full_text": "il Sig. Monteverdi Anna Maria, nato a Belvedere",
         "entries": [],
         "results": [RecognizerResult("PERSON", 8, 29, 0.85)],
     })
-    assert {"montoleone", "anna", "maria"} <= tokens
+    assert {"monteverdi", "anna", "maria"} <= tokens
     # è così che la propagazione confronta le parole della pagina OCR
-    for parola in ("MONTOLEONE", "ANNA", "MARIA"):
+    for parola in ("MONTEVERDI", "ANNA", "MARIA"):
         assert parola.strip().lower() in tokens
         assert parola[:1].isupper()
 
@@ -1218,20 +1218,20 @@ def _destinatari(testo):
 
 
 @pytest.mark.parametrize("testo,attesi", [
-    # casi reali (testo OCR di lettere di messa in mora e cessione crediti,
-    # nomi sostituiti con nomi di fantasia)
-    ("RACCOMANDATA AR. SAN CATALDO, li 14/07/2010 ROSSI ANNA CONTRADA "
-     "DEI MILLE 453/D 91025 MARSALA (TP) PREG.MA SIG.RA", ["ROSSI ANNA"]),
-    ("/Spett DE LUCA MARIO BCC19 Bip: 786685 - HL IP VIA DEI PINI 26 "
-     "91020 PETROSINO(TP) Oggetto: Comunicazione", ["DE LUCA MARIO"]),
-    ("= DE LUCA MARIO BCC19 BIP: 786685 - HL IP P OSste $ VIA DEI PINI 26",
+    # forme viste nel testo OCR di lettere di messa in mora e cessione
+    # crediti; nomi, indirizzi e numeri sono di fantasia
+    ("RACCOMANDATA AR. SAN FLORIANO, li 03/05/2011 ROSSI ANNA CONTRADA "
+     "DEI MILLE 12/D 38060 BORGOVERDE (TN) PREG.MA SIG.RA", ["ROSSI ANNA"]),
+    ("/Spett DE LUCA MARIO BCC19 Bip: 100200 - HL IP VIA DEI PINI 26 "
+     "38061 FONTENUOVA(TN) Oggetto: Comunicazione", ["DE LUCA MARIO"]),
+    ("= DE LUCA MARIO BCC19 BIP: 100200 - HL IP P OSste $ VIA DEI PINI 26",
      ["DE LUCA MARIO"]),
-    ("VERDI CARLA BCC19 Bip: 786685 - HL IP CONTRADA DEI MILLE 454/P",
+    ("VERDI CARLA BCC19 Bip: 100200 - HL IP CONTRADA DEI MILLE 14/P",
      ["VERDI CARLA"]),
     # appellativi ed etichette
     ("SIG.RA ROSSI ANNA", ["ROSSI ANNA"]),
     ("Gent.mo Sig. BIANCHI CARLO", ["BIANCHI CARLO"]),
-    ("NDG 4107761 Intestata a: ROSSI ANNA Rapporto 960360015513", ["ROSSI ANNA"]),
+    ("NDG 1002003 Intestata a: ROSSI ANNA Rapporto 100200300400", ["ROSSI ANNA"]),
     ("Intestata a: ANNA Rapporto", ["ANNA"]),
     ("Destinatario DI MAIO LUIGI Via TRAVERSA VI", ["DI MAIO LUIGI"]),
 ])
@@ -1241,11 +1241,11 @@ def test_destinatario_in_maiuscolo_riconosciuto(testo, attesi):
 
 @pytest.mark.parametrize("testo", [
     # enti, città e indirizzi in maiuscolo non sono destinatari
-    "BANCA DI CREDITO COOPERATIVO G.TONIOLO DI SAN CATALDO Aderente al Fondo",
+    "BANCA DI CREDITO COOPERATIVO A.VOLTA DI SAN FLORIANO Aderente al Fondo",
     "TRIBUNALE ORDINARIO DI MILANO VIA FREGUGLIA 1",
-    "SEDE 93017 SAN CATALDO - CORSO VITTORIO EMANUELE, 171",
-    "DOSOLUTIONS C/O ISOLA DIGITALE SIN NAF CORSO MERIDIONALE, 56 80143 NAPOLI",
-    "PREG.MA SIG.RA — CONTRADA CUORE DI GESU 453/D",
+    "SEDE 38062 SAN FLORIANO - CORSO VITTORIO EMANUELE, 171",
+    "ALFASERVIZI C/O CENTRO DIGITALE SIN NAF CORSO ITALIA, 56 80100 NAPOLI",
+    "PREG.MA SIG.RA — CONTRADA DEI MILLE 12/D",
     "OGGETTO: Messa in mora rapp. di mutuo",
     "RACCOMANDATA A.R. AVVISO DI RICEVIMENTO",
 ])

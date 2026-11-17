@@ -55,7 +55,7 @@ pip install -r requirements-dev.txt  # se presente
 python -m spacy download it_core_news_lg
 
 # Avvia in modalità sviluppo
-streamlit run src/app.py
+streamlit run src/app.py --server.address 127.0.0.1 --browser.gatherUsageStats false
 ```
 
 ### Struttura del progetto

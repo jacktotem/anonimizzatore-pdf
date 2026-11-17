@@ -7,11 +7,13 @@
 #
 # CONFIGURAZIONE (una volta sola, dal proprietario del repository):
 #   gh secret set RESEND_API_KEY          # chiave API Resend
-#   gh variable set NOTIFY_EMAIL          # destinatario
-#   gh variable set NOTIFY_FROM           # mittente (dominio verificato su Resend)
+#   gh secret set NOTIFY_EMAIL            # destinatario
+#   gh secret set NOTIFY_FROM             # mittente (dominio verificato su Resend)
 #
-# L'indirizzo NON è scritto qui dentro di proposito: il repository è
-# pubblico e finirebbe raccolto dagli spambot.
+# Gli indirizzi sono SECRET, non variabili: il repository è pubblico e
+# il valore di una variabile compare in chiaro nei log di Actions (nel
+# blocco env dello step). Le variabili omonime sono lette solo come
+# ripiego per le configurazioni esistenti: vanno migrate e cancellate.
 # ============================================================
 
 name: Notifica release via email
@@ -37,11 +39,19 @@ jobs:
   notifica:
     runs-on: ubuntu-latest
     steps:
+      - name: Maschera il destinatario una tantum nei log
+        # Letto dal file dell'evento e non da ${{ inputs.* }}: così il valore
+        # non passa da un blocco env e non viene stampato prima della maschera.
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          DEST=$(jq -r '.inputs.destinatario // empty' "$GITHUB_EVENT_PATH")
+          if [ -n "$DEST" ]; then echo "::add-mask::$DEST"; fi
+
       - name: Verifica configurazione
         id: cfg
         env:
           API_KEY: ${{ secrets.RESEND_API_KEY }}
-          TO: ${{ inputs.destinatario || vars.NOTIFY_EMAIL }}
+          TO: ${{ inputs.destinatario || secrets.NOTIFY_EMAIL || vars.NOTIFY_EMAIL }}
         run: |
           if [ -z "$API_KEY" ] || [ -z "$TO" ]; then
             echo "::warning::Notifica email non configurata (manca RESEND_API_KEY o NOTIFY_EMAIL). Passo oltre senza fallire la release."
@@ -95,8 +105,8 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           # L'input ha la precedenza: consente un invio una tantum a un
           # indirizzo diverso senza toccare la configurazione permanente.
-          NOTIFY_EMAIL: ${{ inputs.destinatario || vars.NOTIFY_EMAIL }}
-          NOTIFY_FROM: ${{ vars.NOTIFY_FROM }}
+          NOTIFY_EMAIL: ${{ inputs.destinatario || secrets.NOTIFY_EMAIL || vars.NOTIFY_EMAIL }}
+          NOTIFY_FROM: ${{ secrets.NOTIFY_FROM || vars.NOTIFY_FROM }}
           TAG: ${{ steps.rel.outputs.tag }}
           PREV_TAG: ${{ steps.rel.outputs.prev_tag }}
         run: python3 .github/scripts/notifica_release.py

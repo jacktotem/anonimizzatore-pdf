@@ -19,3 +19,8 @@ tests/fixtures/
 # PDF di lavoro (mai committare documenti reali)
 *.pdf
 !docs/**/*.pdf
+
+# Prodotti di mac/installa.sh (contengono percorsi locali)
+mac/logs/
+mac/AppIcon.icns
+*.app/

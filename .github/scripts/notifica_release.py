@@ -222,7 +222,8 @@ def main():
     try:
         with urllib.request.urlopen(richiesta, timeout=TIMEOUT) as risposta:
             esito = json.load(risposta)
-        print(f"Mail inviata a {destinatario} (id: {esito.get('id', 'n/d')})")
+        # L'indirizzo non va nei log: il repository è pubblico
+        print(f"Mail inviata (id: {esito.get('id', 'n/d')})")
     except urllib.error.HTTPError as e:
         dettaglio = e.read().decode("utf-8", "replace")[:500]
         # La chiave non compare mai: si stampa solo la risposta dell'API

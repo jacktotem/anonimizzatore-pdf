@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.7] - 2026-11-17
+
+Prime correzioni dell'audit del 17 novembre 2026.
+
+### Security
+- **NET-01 — L'app era raggiungibile dalla rete locale.** Avviata
+  dall'icona (Windows e Mac), Streamlit ascoltava su tutte le
+  interfacce: chiunque sulla stessa rete poteva aprire l'app sulla
+  porta 8501, senza password. Ora `AnonimizzatorePDF.bat`, `avvia.sh` e
+  il launcher creato da `installa.sh` passano
+  `--server.address 127.0.0.1`: l'app risponde solo dal computer su cui
+  gira. La modalità server lo faceva già.
+  **Copie Mac già installate:** l'icona sul Desktop ha il comando
+  scritto dentro e non si aggiorna da sola. Con una copia `git clone`
+  basta lanciare `./aggiorna.sh` due volte: la prima scarica la nuova
+  versione, la seconda corregge l'icona. Con una copia zip, o per fare
+  subito, basta questo comando nel Terminale:
+  `sed -i '' 's/--server.headless false/--server.headless false --server.address 127.0.0.1/' ~/Desktop/"Anonimizzatore PDF.app"/Contents/MacOS/launch`
+
+### Changed
+- **Solo dati di fantasia.** Nomi, codici fiscali, indirizzi e numeri
+  di rapporto usati come esempi nei commenti del codice, nei test, nel
+  README e in questo changelog sono stati sostituiti con dati
+  inventati. La logica dell'app non cambia.
+- **Notifica di rilascio:** gli indirizzi di mittente e destinatario
+  si leggono dai secret del repository (con le variabili come ripiego)
+  e non compaiono più nei log di GitHub Actions.
+- `.gitignore` copre i prodotti di `mac/installa.sh` (log, icona,
+  cartella `.app`).
+
 ## [2.1.6] - 2026-11-11
 
 ### Fixed
@@ -97,7 +127,7 @@ firme".
 ### Fixed
 - **R-22 — Destinatari in maiuscolo nei blocchi indirizzo.** In questi
   documenti le parti compaiono solo nell'indirizzo, in maiuscolo
-  ("SIG.RA ROSSI ANNA / CONTRADA ... / 91025 MARSALA"), e il NER
+  ("SIG.RA ROSSI ANNA / CONTRADA ... / 38060 BORGOVERDE"), e il NER
   statistico non riconosce i nomi in maiuscolo. Senza un'occorrenza
   scritta normalmente altrove, neppure la propagazione poteva aiutare.
   Il nuovo `ItRecipientNameRecognizer` riconosce la struttura
@@ -108,7 +138,7 @@ firme".
   a"). Enti, città dopo il CAP, nomi di vie e destinatari "c/o" sono
   esclusi. Riconosciuto una volta, il nome si propaga al resto del
   documento.
-  La particella dei cognomi composti ("DE VITA") non viene più tolta dal
+  La particella dei cognomi composti ("DE LUCA") non viene più tolta dal
   nome: lasciava in chiaro un indizio sul cognome.
 - **R-23 — Firme incollate come immagine nei PDF digitali.** L'opzione
   firme agiva solo sulle pagine scansionate: in una lettera generata
@@ -309,8 +339,8 @@ oscurati, firme autografe leggibili.
 
 ### Fixed
 - **R-18 — Codice fiscale scritto a gruppi non veniva riconosciuto.**
-  Gli atti notarili dattiloscritti scrivono "MNT NMR 41P46 C286B"
-  invece di "MNTNMR41P46C286B"; su PDF scansionati l'OCR restituisce
+  Gli atti notarili dattiloscritti scrivono "VRD NNA 81A41 H501X"
+  invece di "VRDNNA81A41H501X"; su PDF scansionati l'OCR restituisce
   quei gruppi come parole separate, e il recognizer predefinito di
   Presidio — che pretende 16 caratteri attaccati — non trovava nulla.
   Il nuovo `ItSpacedFiscalCodeRecognizer` ricompone i token adiacenti
@@ -326,7 +356,7 @@ oscurati, firme autografe leggibili.
   dove *nessuna* pagina è testuale — quel set restava vuoto. Risultato:
   un nome letto correttamente a pagina 2 non veniva oscurato a pagina
   27, dove compariva in MAIUSCOLO e il NER statistico lo mancava
-  (spaCy etichetta "MONTOLEONE ANNA MARIA" come ORGANIZATION, non
+  (spaCy etichetta "MONTEVERDI ANNA MARIA" come ORGANIZATION, non
   PERSON). Ora `analyze_scanned_page()` e `apply_scanned_redactions()`
   sono separate e le pagine OCR partecipano alla prima passata come
   quelle testuali. L'OCR resta eseguito **una volta sola**.
@@ -458,12 +488,12 @@ Quinta iterazione di qualità, dal CSV di una comparsa di costituzione
   cessante, Polizze, indennizzo, massimale, franchigia) non vengono
   più scambiati per luoghi o persone.
 - **Ruoli tecnici:** "CTU", "CTP" non sono persone — il consulente
-  (es. "Dott. Silvio Pieri") resta ovviamente redatto.
-- **Intestazioni d'atto incollate ai nomi:** "Giulio Scaramuzzino
-  COMPARSA [DI COSTITUZIONE]" → "Giulio Scaramuzzino"; "Avv.ti Andrea
-  Girardi" → "Andrea Girardi" (che ora si unifica con le altre
+  (es. "Dott. Silvio Sartori") resta ovviamente redatto.
+- **Intestazioni d'atto incollate ai nomi:** "Giulio Castellani
+  COMPARSA [DI COSTITUZIONE]" → "Giulio Castellani"; "Avv.ti Andrea
+  Morosini" → "Andrea Morosini" (che ora si unifica con le altre
   occorrenze in un solo codice).
-- **Punteggiatura nelle propagazioni:** "Pieri," → "Pieri" nella
+- **Punteggiatura nelle propagazioni:** "Sartori," → "Sartori" nella
   tabella di accoppiamento.
 
 ## [1.9.0] - 2026-07-22
@@ -509,8 +539,8 @@ ricorso reale (tutti i 9 rilievi dell'utente risolti).
   non un telefono. I telefoni veri, anche vecchio stile con slash
   ("02/3288652"), restano rilevati.
 - **R-13 — Prefissi di indirizzo:** "Via/Piazza/Corso..." non entrano
-  più nelle entità ("Stefano Carlo Ferrari Via" → "Stefano Carlo
-  Ferrari"); l'odonimo resta protetto, il prefisso resta leggibile.
+  più nelle entità ("Sandro Carlo Ferretti Via" → "Sandro Carlo
+  Ferretti"); l'odonimo resta protetto, il prefisso resta leggibile.
 - **R-13 — Città etichettate come persone:** "Milano", "San Martino"
   e i capoluoghi vengono ri-tipizzati a LOCATION (codice [LOC-nn]
   invece di [PER-nn]) e non inquinano più la propagazione dei nomi.
@@ -576,10 +606,10 @@ ricorso reale (tutti i 9 rilievi dell'utente risolti).
 - **R-09 — Stessa persona, stesso codice:** nei provvedimenti la stessa
   persona compare sia come "Cognome Nome" (epigrafe) sia come "Nome
   Cognome" (corpo). La chiave di pseudonimizzazione è ora insensibile
-  all'ordine dei token: "Criniti Francesco" e "Francesco Criniti"
+  all'ordine dei token: "Galvani Francesco" e "Francesco Galvani"
   ricevono lo stesso codice, con le occorrenze sommate. Vale solo per
   le persone; sull'ordinanza di riferimento la tabella passa da 35 a
-  29 codici. Il solo cognome condiviso da più persone ("Criniti")
+  29 codici. Il solo cognome condiviso da più persone ("Galvani")
   mantiene correttamente un codice proprio: l'attribuzione sarebbe
   ambigua.
 
@@ -598,9 +628,9 @@ accoppiamento di un'ordinanza di Cassazione reale: da 65 codici con
   **PHONE_NUMBER con la forma di una data** ("3.9.2009") viene
   scartato: è una data, non un telefono.
 - **R-07 — Trim dei bordi delle entità NER:** il boilerplate catturato
-  per errore ai margini viene rimosso prima della redazione: "FRASCA
-  Emesso Da" → "FRASCA", "Marco Rossetti - Consigliere rel" → "Marco
-  Rossetti". Migliora anche la pseudonimizzazione: la stessa persona
+  per errore ai margini viene rimosso prima della redazione: "BELTRAMI
+  Emesso Da" → "BELTRAMI", "Marco Zanardi - Consigliere rel" → "Marco
+  Zanardi". Migliora anche la pseudonimizzazione: la stessa persona
   con e senza ruolo riceve ora lo stesso codice.
 
 ### Added
@@ -749,8 +779,8 @@ non firmato (`DEF-01`/`DEF-02`).
   chiave di re-identificazione e va custodita separatamente; il
   documento pseudonimizzato resta un dato personale ai sensi del GDPR
   finché la tabella esiste. Funziona anche sulle pagine OCR (riquadro
-  bianco con codice). Un token propagato ("Alonge") riusa il codice
-  della persona ("Alonge Antonio") quando l'attribuzione è univoca.
+  bianco con codice). Un token propagato ("Moroni") riusa il codice
+  della persona ("Moroni Antonio") quando l'attribuzione è univoca.
 - **Priorità di redazione senza sovrapposizioni**: ogni parola riceve
   una sola redazione — termini personalizzati (codice TERM coerente),
   poi entità deterministiche (CF, IBAN...), poi NER, poi propagazione.
@@ -795,7 +825,7 @@ su provvedimenti reali (sentenze d'appello e ordinanze di Cassazione).
 ### Added
 - **R-03 — Recognizer nomi in contesto legale:** nuove regole
   deterministiche per i nomi che il NER statistico manca (es. cognomi
-  rari come "Cabalisti"): un nome seguito da "(C.F. ...)" o preceduto
+  rari come "Tavernelli"): un nome seguito da "(C.F. ...)" o preceduto
   da un titolo (avv., dott., sig., prof., ing., ...) è una persona.
 - **R-04 — Propagazione dei nomi:** i token dei nomi di persona
   rilevati in qualunque pagina vengono oscurati in **tutto** il

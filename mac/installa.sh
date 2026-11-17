@@ -316,7 +316,7 @@ fi
 osascript <<APPLESCRIPT
 tell application "Terminal"
     activate
-    do script "cd '\$INSTALL_DIR' && source venv/bin/activate && streamlit run app.py --server.headless false --browser.gatherUsageStats false"
+    do script "cd '\$INSTALL_DIR' && source venv/bin/activate && streamlit run app.py --server.headless false --server.address 127.0.0.1 --browser.gatherUsageStats false"
 end tell
 APPLESCRIPT
 EOF
