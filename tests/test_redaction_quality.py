@@ -547,9 +547,9 @@ def test_falsi_positivi_r13(entity_type, text):
 
 
 def test_telefono_vecchio_stile_con_slash_resta_valido():
-    # "02/3288652" è un telefono: lo slash non è seguito da un anno
-    assert is_false_positive("PHONE_NUMBER", "02/3288652") is False
-    assert is_false_positive("PHONE_NUMBER", "02.3288652") is False
+    # "02/5550123" è un telefono: lo slash non è seguito da un anno
+    assert is_false_positive("PHONE_NUMBER", "02/5550123") is False
+    assert is_false_positive("PHONE_NUMBER", "02.5550123") is False
 
 
 def test_trim_rimuove_punteggiatura_ai_bordi():
@@ -661,9 +661,9 @@ def test_veicolo_descrizione_non_redatta():
 
 
 def test_targa_congiunzione_vagante():
-    # "targate X e FP185GN": la "e" non entra nella targa
-    assert "FP185GN" in _plates("le vetture targate e FP185GN in colonna")
-    assert "EFP185GN" not in _plates("le vetture targate e FP185GN in colonna")
+    # "targate X e ZZ185WW": la "e" non entra nella targa
+    assert "ZZ185WW" in _plates("le vetture targate e ZZ185WW in colonna")
+    assert "EZZ185WW" not in _plates("le vetture targate e ZZ185WW in colonna")
 
 
 def test_collect_org_tokens_da_coppie_di_parole():

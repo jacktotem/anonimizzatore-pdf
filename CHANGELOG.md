@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Altri due esempi nei commenti, nei test e in questo changelog (una
+  targa e un numero di telefono) sostituiti con dati di fantasia.
+
 ## [2.1.7] - 2026-11-17
 
 Prime correzioni dell'audit del 17 novembre 2026.
@@ -522,8 +526,8 @@ tutti i 6 rilievi dell'utente risolti (R-14).
   Lavoratrici"); in coda ai nomi i prefissi di via restano trimmati.
 - **Marca/modello del veicolo:** "automezzo Jeep Compass" non produce
   una persona "Jeep" (la targa resta protetta a parte).
-- **Targhe con congiunzione vagante:** "targate e FP185GN" cattura
-  "FP185GN", non "EFP185GN".
+- **Targhe con congiunzione vagante:** "targate e ZZ185WW" cattura
+  "ZZ185WW", non "EZZ185WW".
 
 ## [1.8.1] - 2026-07-21
 
@@ -537,7 +541,7 @@ ricorso reale (tutti i 9 rilievi dell'utente risolti).
 - **R-13 — Numeri di ruolo scambiati per telefoni:** un numero che
   termina con /anno ("3 26972/2008", "12908/2004") è una citazione,
   non un telefono. I telefoni veri, anche vecchio stile con slash
-  ("02/3288652"), restano rilevati.
+  ("02/5550123"), restano rilevati.
 - **R-13 — Prefissi di indirizzo:** "Via/Piazza/Corso..." non entrano
   più nelle entità ("Sandro Carlo Ferretti Via" → "Sandro Carlo
   Ferretti"); l'odonimo resta protetto, il prefisso resta leggibile.
