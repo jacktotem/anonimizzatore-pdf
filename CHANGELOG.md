@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Correzioni dell'audit del 17 novembre 2026: il PDF prodotto contiene
+solo ciò che l'analisi ha visto.
+
+### Security
+- **A1 — Campi modulo.** I valori digitati in un PDF compilabile
+  restavano nel file, estraibili, mentre il riepilogo li dichiarava
+  ripuliti: lo svuotamento non aveva effetto. Ora i campi diventano
+  testo della pagina prima dell'analisi e vengono oscurati come il
+  resto; nomi dei campi, suggerimenti, dati XFA e firme digitali non
+  vengono copiati. Il file prodotto non è più compilabile.
+- **A2 — Scansioni con testo digitale a margine.** Una pagina-immagine
+  con una riga di testo vero (timbro di deposito, protocollo) veniva
+  trattata come testuale e usciva interamente in chiaro. In modalità
+  Automatica una grande immagine con quasi nessuna parola sopra ora
+  passa dall'OCR, qualunque sia la quantità di testo sulla pagina.
+- **A3 — Errore su una pagina.** Se l'analisi o l'OCR di una pagina
+  andava in errore, la pagina finiva nel PDF senza oscuramenti e
+  l'esito restava "completato". Ora esce nera, compare nel report e in
+  un avviso che resta a schermo.
+- **A4 — Livelli nascosti.** Il contenuto di un livello spento non
+  veniva analizzato ma nel PDF prodotto diventava visibile. Ora i
+  livelli vengono resi visibili prima dell'analisi.
+- **A5 — Pagine ritagliate.** Il testo fuori dal ritaglio restava nel
+  file. Ora si analizza l'intera pagina fisica; la pagina prodotta
+  resta ritagliata come l'originale.
+- **A6 — Link.** Restavano nelle pagine senza redazioni (per esempio
+  un `mailto:` con nome e cognome). Non vengono più copiati.
+- **A8 — ZIP senza la chiave.** "Scarica tutto" metteva nello stesso
+  archivio i PDF pseudonimizzati e le tabelle di accoppiamento. Ora
+  contiene solo i PDF.
+- **A11 — Pulizia finale.** Se la rimozione di metadati, commenti o
+  allegati fallisce, il documento non viene prodotto.
+
+### Fixed
+- **C1 — Parole delle righe vicine cancellate.** Con interlinea
+  stretta, o con caratteri dal riquadro alto, la redazione cancellava
+  anche parole non sensibili sopra e sotto, lasciando spazi bianchi.
+  Il testo ora viene rimosso con una fascia centrale stretta e il
+  riquadro nero si disegna a parte, a piena altezza. Corregge anche le
+  parole mutilate accanto ai riquadri con PyMuPDF 2.x.
+- **C3 —** La rimozione di JavaScript azzerava qualunque oggetto il
+  cui testo contenesse "/JS", per esempio un carattere chiamato
+  `JSABCD+Helvetica`. Ora guarda le chiavi dell'oggetto.
+- **PDF protetti o illeggibili:** messaggio chiaro al posto della
+  traccia d'errore; gli altri documenti del lotto vengono elaborati.
+- **Risultati non aggiornati:** cambiando categorie, termini o
+  modalità dopo un'elaborazione restavano a schermo i download del
+  giro precedente. Ora vengono invalidati.
+- Due file con lo stesso nome nello stesso lotto non danno più errore.
+
+### Changed
+- **Avvisi che restano a schermo.** Pagine non analizzate, scansioni
+  non lette e immagini non passate dall'OCR sono elencate per numero
+  di pagina accanto al download, e non spariscono al primo clic.
+  L'avviso sulle immagini scatta dal 2% della pagina (prima dal 5%).
+- **A9 — Nome del file.** Se il nome del file originale contiene un
+  dato oscurato nel documento ("Ricorso Rossi c. Bianchi.pdf"), il PDF
+  viene scaricato con un nome neutro.
+- La tabella di accoppiamento in CSV neutralizza le celle che un
+  foglio di calcolo eseguirebbe come formula.
+- `redact_pdf` restituisce anche gli avvisi (`pdf, log, mapping,
+  avvisi`) e solleva `DocumentoNonElaborabile` per i PDF che non si
+  possono trattare in modo sicuro.
+- PyMuPDF minimo 1.24.5. **Windows:** l'elenco delle librerie cambia,
+  quindi l'aggiornamento ricostruisce l'ambiente; in modalità server
+  fermare prima l'attività "AnonimizzatorePDF Server".
+
+### Added
+- Test dell'intero percorso (`tests/test_percorso_completo.py`): dal
+  PDF d'ingresso al PDF prodotto, cercando i dati nel testo, nei byte
+  e nell'immagine. Test dell'interfaccia (`tests/test_interfaccia.py`).
+
 ### Changed
 - Altri due esempi nei commenti, nei test e in questo changelog (una
   targa e un numero di telefono) sostituiti con dati di fantasia.

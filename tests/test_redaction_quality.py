@@ -802,8 +802,8 @@ def test_zip_contiene_pdf_e_tabelle_per_documento():
     ]
     zf = zipfile.ZipFile(BytesIO(build_results_zip(risultati)))
     nomi = set(zf.namelist())
-    assert {"pseudonimizzato_uno.pdf", "pseudonimizzato_due.pdf",
-            "accoppiamento_uno.csv", "accoppiamento_due.csv"} == nomi
+    # A8: nello ZIP solo i PDF, mai le tabelle di accoppiamento
+    assert {"pseudonimizzato_uno.pdf", "pseudonimizzato_due.pdf"} == nomi
     assert zf.read("pseudonimizzato_due.pdf") == b"%PDF-2"
 
 
@@ -818,9 +818,9 @@ def test_zip_con_tabella_condivisa_unica():
                "Occorrenze": 3, "Documenti": "uno.pdf · due.pdf"}]
     zf = zipfile.ZipFile(BytesIO(build_results_zip(risultati, shared)))
     nomi = set(zf.namelist())
-    assert "accoppiamento_fascicolo.csv" in nomi
-    # con la tabella condivisa NON ci sono le tabelle per documento
-    assert not any(n.startswith("accoppiamento_uno") for n in nomi)
+    # A8: la tabella del fascicolo si scarica a parte, non con i PDF
+    assert not any(n.startswith("accoppiamento") for n in nomi)
+    assert nomi == {"pseudonimizzato_uno.pdf", "pseudonimizzato_due.pdf"}
 
 
 def test_zip_blackout_senza_csv():

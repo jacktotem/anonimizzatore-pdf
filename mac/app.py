@@ -3,8 +3,8 @@ Anonimizzatore PDF
 Basato su Microsoft Presidio + PyMuPDF + Tesseract OCR
 Anonimizzazione locale di documenti legali italiani (testo + scansioni).
 
-Versione: 1.1.1
 Licenza: GNU AGPL v3.0
+(la versione è in __version__, più sotto)
 """
 
 import streamlit as st
@@ -17,6 +17,7 @@ import logging
 import zipfile
 from io import BytesIO, StringIO
 from collections import Counter
+from typing import NamedTuple
 from presidio_analyzer import (
     AnalyzerEngine,
     RecognizerRegistry,
@@ -35,6 +36,27 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger("anonimizzatore-pdf")
+
+
+class DocumentoNonElaborabile(Exception):
+    """Il PDF non si può elaborare in modo sicuro (protetto da password,
+    illeggibile, pulizia finale non riuscita). Il messaggio è pensato per
+    l'utente e non contiene mai testo del documento."""
+
+
+class EsitoRedazione(NamedTuple):
+    """Risultato di redact_pdf. Si spacchetta per posizione:
+    pdf, log, mapping, avvisi = redact_pdf(...)."""
+    pdf: bytes
+    log: list
+    mapping: list
+    # Tutto ciò che l'utente deve sapere prima di fidarsi del file:
+    #   pagine_fallite            analisi o OCR in errore → oscurate per intero
+    #   pagine_ocr                pagine lette con l'OCR e ricostruite come immagine
+    #   pagine_immagini_non_lette pagine testuali con immagini non passate all'OCR
+    #   pagine_senza_ocr          scansioni non lette (Tesseract assente o "Mai OCR")
+    #   campi_modulo              campi compilabili trasformati in testo
+    avvisi: dict
 
 
 # ============================================================
@@ -659,6 +681,26 @@ def shrink_redact_rect(rect):
     return fitz.Rect(rect.x0 + h, rect.y0 + v, rect.x1 - h, rect.y1 - v)
 
 
+def text_removal_rect(rect):
+    """
+    C1: fascia centrale della parola, usata SOLO per rimuovere il testo.
+
+    Con interlinea stretta, o con caratteri dal riquadro alto, i riquadri
+    delle parole si sovrappongono a quelli delle righe vicine per più dei
+    2 punti che shrink_redact_rect toglie: apply_redactions cancellava
+    così anche parole non sensibili delle righe sopra e sotto, lasciando
+    spazi bianchi. Tutti i caratteri della parola attraversano la fascia
+    centrale (il loro riquadro va dall'ascendente al discendente del
+    carattere), quindi vengono rimossi comunque; quelli delle righe
+    vicine non la toccano. Il riquadro nero si disegna a parte, a piena
+    altezza (vedi apply_redaction_plan).
+    """
+    h = min(0.3, rect.width * 0.05)
+    centro = (rect.y0 + rect.y1) / 2
+    mezza = max(0.5, rect.height * 0.15)
+    return fitz.Rect(rect.x0 + h, centro - mezza, rect.x1 - h, centro + mezza)
+
+
 # Token "nome proprio": iniziale maiuscola + almeno un altro carattere
 # (usato dal recognizer R-03 e dai contesti magistrato R-10)
 _NAME_TOKEN = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-Þà-öø-ÿ'’\-]+"
@@ -887,37 +929,98 @@ def _fit_fontsize(text, rect):
     return max(4, size)
 
 
-def add_redaction_for_hits(page, entries, word_hits, mode, code=None):
+def add_redaction_for_hits(page, entries, word_hits, mode, code=None, piano=None):
     """
-    Aggiunge le redact-annotation per le parole di un'occorrenza.
+    Prepara la redazione delle parole di un'occorrenza.
 
     - mode "blackout": rettangolo nero per parola (comportamento storico).
     - mode "codes": il testo viene rimosso e sostituito dal codice
       "[XXX-nn]" sul primo segmento di riga; gli eventuali segmenti
       successivi (entità che va a capo) restano vuoti.
+
+    Con `piano` (lista) le coperture vengono solo annotate lì: le applica
+    apply_redaction_plan in due passate, rimozione del testo con una
+    fascia stretta e poi riquadri a piena altezza (C1). Senza `piano`
+    la redazione viene aggiunta subito alla pagina, come un tempo.
     """
+    coperture = []
     if mode != "codes":
         for _idx, rect in word_hits:
-            page.add_redact_annot(shrink_redact_rect(rect), fill=(0, 0, 0))
+            coperture.append({"rect": rect, "fill": (0, 0, 0)})
+    else:
+        label = f"[{code}]"
+        for gi, group in enumerate(group_hits_by_line(entries, word_hits)):
+            union = fitz.Rect()
+            for _idx, rect in group:
+                union |= rect
+            coperture.append({
+                "rect": union, "fill": (1, 1, 1),
+                "text": label if gi == 0 else "", "label": label,
+            })
+    if piano is not None:
+        piano.extend(coperture)
         return
+    for c in coperture:
+        _add_cover_annot(page, c)
 
-    label = f"[{code}]"
-    for gi, group in enumerate(group_hits_by_line(entries, word_hits)):
-        union = fitz.Rect()
-        for _idx, rect in group:
-            union |= rect
-        union = shrink_redact_rect(union)
-        text = label if gi == 0 else ""
-        page.add_redact_annot(
-            union,
-            text=text,
-            fontname="helv",
-            fontsize=_fit_fontsize(label, union),
-            align=fitz.TEXT_ALIGN_CENTER,
-            fill=(1, 1, 1),
-            text_color=(0, 0, 0),
-            cross_out=False,
-        )
+
+def _add_cover_annot(page, copertura):
+    """Annotazione di redazione a piena altezza: riquadro nero o codice."""
+    rect = (copertura["rect"] if copertura.get("tutto")
+            else shrink_redact_rect(copertura["rect"]))
+    if "text" not in copertura:
+        page.add_redact_annot(rect, fill=copertura["fill"])
+        return
+    page.add_redact_annot(
+        rect,
+        text=copertura["text"],
+        fontname="helv",
+        fontsize=_fit_fontsize(copertura["label"], rect),
+        align=fitz.TEXT_ALIGN_CENTER,
+        fill=copertura["fill"],
+        text_color=(0, 0, 0),
+        cross_out=False,
+    )
+
+
+# Il parametro `text` di apply_redactions esiste da PyMuPDF 1.24.2, le
+# costanti con il nome solo da versioni successive: i valori sono 0 e 1.
+_REDACT_TEXT_REMOVE = getattr(fitz, "PDF_REDACT_TEXT_REMOVE", 0)
+_REDACT_TEXT_NONE = getattr(fitz, "PDF_REDACT_TEXT_NONE", 1)
+
+
+def apply_redaction_plan(page, piano):
+    """
+    C1: applica le redazioni raccolte in `piano` in due passate.
+
+    1. Rimozione del testo con la fascia centrale di ogni copertura:
+       spariscono i caratteri della parola, non quelli delle righe
+       vicine. Immagini e grafica non vengono toccate.
+    2. Riquadri a piena altezza: disegnano il nero (o il codice) e
+       cancellano i pixel delle immagini sottostanti, senza rimuovere
+       altro testo. Nelle scansioni con strato di testo è questa
+       passata a togliere le lettere dall'immagine: con la sola fascia
+       ne resterebbero la parte alta e la parte bassa.
+
+    Le coperture con "tutto": True (aree di firma) rimuovono anche il
+    testo su tutta l'area, come prima.
+    """
+    if not piano:
+        return
+    for c in piano:
+        fascia = c["rect"] if c.get("tutto") else text_removal_rect(c["rect"])
+        page.add_redact_annot(fascia, fill=False, cross_out=False)
+    page.apply_redactions(
+        images=fitz.PDF_REDACT_IMAGE_NONE,
+        graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+        text=_REDACT_TEXT_REMOVE,
+    )
+    for c in piano:
+        _add_cover_annot(page, c)
+    page.apply_redactions(
+        images=fitz.PDF_REDACT_IMAGE_PIXELS,
+        text=_REDACT_TEXT_NONE,
+    )
 
 
 def find_custom_term_matches(term, entries):
@@ -1687,7 +1790,7 @@ def initialize_analyzer():
 # SANITIZZAZIONE PDF (M-01, M-03)
 # ============================================================
 
-def sanitize_pdf_metadata(doc):
+def sanitize_pdf_metadata(doc, strict=False):
     """
     M-01: Rimuove TUTTI i metadata del PDF (autore, titolo, oggetto,
     creator, producer) e l'XMP metadata stream.
@@ -1712,15 +1815,45 @@ def sanitize_pdf_metadata(doc):
         logger.info("Metadata sanitizzati")
     except Exception as e:
         logger.warning("Sanitizzazione metadata fallita: %s", e)
+        if strict:
+            # A11: redact_pdf non consegna un file che non ha potuto pulire
+            raise
 
 
-def sanitize_pdf_objects(doc):
+def _is_javascript_object(doc, xref):
     """
-    M-03: Rimuove annotazioni, allegati, AcroForm e JavaScript.
+    C3: True se l'oggetto è un'azione JavaScript o ne porta il codice.
+
+    Si guardano le CHIAVI del dizionario, non il testo dell'oggetto: la
+    vecchia ricerca della sottostringa "/JS" azzerava anche oggetti
+    innocenti, per esempio un carattere chiamato "/JSABCD+Helvetica".
+    """
+    try:
+        chiavi = doc.xref_get_keys(xref)
+    except Exception:
+        return False
+    if "JS" in chiavi or "JavaScript" in chiavi:
+        return True
+    if "S" in chiavi:
+        try:
+            return doc.xref_get_key(xref, "S") == ("name", "/JavaScript")
+        except Exception:
+            return False
+    return False
+
+
+def sanitize_pdf_objects(doc, strict=False):
+    """
+    M-03: Rimuove annotazioni, link, campi modulo, allegati e JavaScript.
 
     Per documenti legali è critico: i commenti spesso contengono nomi,
     gli allegati possono essere CV/contratti, i campi form contengono
-    dati inseriti, JavaScript può estrarre informazioni.
+    dati inseriti, i link indirizzi email e percorsi di file, JavaScript
+    può estrarre informazioni.
+
+    Con strict=True (lo usa redact_pdf) un errore, o qualcosa che resta
+    dopo la pulizia, solleva un'eccezione invece di finire solo nel log:
+    il documento non viene consegnato (A11).
     """
     annotations_removed = 0
     forms_cleared = 0
@@ -1737,20 +1870,36 @@ def sanitize_pdf_objects(doc):
                 except Exception as e:
                     logger.warning("Rimozione annotazione fallita: %s", e)
 
-        # 2. AcroForm fields (valori inseriti nei moduli)
+        # 2. Campi modulo. A1: vanno ELIMINATI, non svuotati —
+        # `widget.field_value = ""` seguito da update() non cancella nulla
+        # (PyMuPDF ignora la stringa vuota), e resterebbero comunque nome
+        # del campo e suggerimento. redact_pdf li ha già trasformati in
+        # testo della pagina prima dell'analisi; qui si toglie ciò che
+        # fosse rimasto, e il modulo dal catalogo.
         for page in doc:
-            try:
-                widgets = list(page.widgets() or [])
-                for widget in widgets:
-                    try:
-                        # Svuota il valore del campo
-                        widget.field_value = ""
-                        widget.update()
-                        forms_cleared += 1
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            for widget in list(page.widgets() or []):
+                try:
+                    page.delete_widget(widget)
+                    forms_cleared += 1
+                except Exception as e:
+                    logger.warning("Rimozione campo modulo fallita: %s", type(e).__name__)
+        try:
+            catalogo = doc.pdf_catalog()
+            if doc.xref_get_key(catalogo, "AcroForm")[0] != "null":
+                doc.xref_set_key(catalogo, "AcroForm", "null")
+        except Exception as e:
+            logger.warning("Rimozione AcroForm fallita: %s", type(e).__name__)
+            if strict:
+                raise
+
+        # 2b. A6: link (mailto con nome e cognome, percorsi di file...).
+        # page.annots() non li comprende: vanno tolti a parte.
+        for page in doc:
+            for link in list(page.get_links() or []):
+                try:
+                    page.delete_link(link)
+                except Exception as e:
+                    logger.warning("Rimozione link fallita: %s", type(e).__name__)
 
         # 3. Allegati embedded (file collegati al PDF)
         attachments_removed = 0
@@ -1783,8 +1932,7 @@ def sanitize_pdf_objects(doc):
         # direttamente e logghiamo le singole eccezioni invece di nasconderle.
         for xref in range(1, doc.xref_length()):
             try:
-                obj = doc.xref_object(xref)
-                if "/JavaScript" in obj or "/JS" in obj:
+                if _is_javascript_object(doc, xref):
                     # Sostituisce il contenuto con dict vuoto
                     doc.update_object(xref, "<<>>")
                     js_removed += 1
@@ -1840,6 +1988,15 @@ def sanitize_pdf_objects(doc):
             annotations_removed, forms_cleared, attachments_removed, js_removed
         )
 
+        if strict:
+            # A11: controllo finale — nulla di ciò che andava tolto resta
+            for page in doc:
+                if (list(page.annots() or []) or list(page.widgets() or [])
+                        or page.get_links()):
+                    raise RuntimeError("annotazioni, campi o link residui dopo la pulizia")
+            if doc.embfile_count() > 0:
+                raise RuntimeError("allegati residui dopo la pulizia")
+
         return {
             "annotations": annotations_removed,
             "forms": forms_cleared,
@@ -1849,6 +2006,8 @@ def sanitize_pdf_objects(doc):
 
     except Exception as e:
         logger.warning("Sanitizzazione oggetti fallita: %s", e)
+        if strict:
+            raise
         return {"annotations": 0, "forms": 0, "attachments": 0, "javascript": 0}
 
 
@@ -1905,6 +2064,193 @@ def has_inline_images(page, min_image_area_ratio=0.05):
         return False
 
 
+# Soglie per le immagini nelle pagine con testo (audit A2, A7).
+# - Un'immagine che copre almeno un quarto della pagina e ha pochissimo
+#   testo sopra è una scansione, anche se la pagina ha del testo vero a
+#   margine (timbro di deposito, numero di protocollo, glifo di firma).
+# - Sopra il 2% della pagina un'immagine può contenere dati (firma,
+#   timbro con nome, foto di un documento): se non passa dall'OCR, la
+#   pagina va segnalata. Sotto restano i loghi piccoli.
+AREA_IMMAGINE_DOMINANTE = 0.25
+COPERTURA_TESTO_MINIMA = 0.03
+AREA_IMMAGINE_DA_SEGNALARE = 0.02
+
+
+def _immagini_della_pagina(page):
+    """Rettangoli delle immagini visibili sulla pagina."""
+    rettangoli = []
+    try:
+        for info in page.get_image_info():
+            r = fitz.Rect(info["bbox"]) & page.rect
+            if not r.is_empty and r.width > 1 and r.height > 1:
+                rettangoli.append(r)
+    except Exception as e:
+        logger.warning("Elenco immagini fallito: %s", type(e).__name__)
+    return rettangoli
+
+
+def has_image_dominated_content(page):
+    """
+    A2: True se la pagina è in sostanza una scansione, qualunque sia la
+    quantità di testo estraibile.
+
+    La vecchia regola guardava solo i caratteri: bastavano 50 caratteri
+    di testo vero (un timbro "Copia conforme... depositato nel fascicolo
+    telematico") perché una pagina-immagine fosse trattata come testuale
+    e uscisse interamente in chiaro. Qui si guarda la copertura: una
+    grande immagine con quasi nessuna parola sopra va letta con l'OCR.
+    Una pagina digitale con un'immagine di sfondo (carta intestata) ha
+    invece molto testo sopra l'immagine e resta testuale.
+    """
+    area_pagina = abs(page.rect.width * page.rect.height)
+    if area_pagina <= 0:
+        return False
+    grandi = [r for r in _immagini_della_pagina(page)
+              if abs(r.width * r.height) / area_pagina >= AREA_IMMAGINE_DOMINANTE]
+    if not grandi:
+        return False
+    try:
+        parole = [fitz.Rect(w[:4]) for w in page.get_text("words")]
+    except Exception:
+        return True   # nel dubbio, OCR
+    for img in grandi:
+        coperta = 0.0
+        for w in parole:
+            inter = w & img
+            if not inter.is_empty:
+                coperta += abs(inter.width * inter.height)
+        if coperta / abs(img.width * img.height) < COPERTURA_TESTO_MINIMA:
+            return True
+    return False
+
+
+def open_source_document(input_bytes):
+    """
+    Apre il PDF da elaborare. Solleva DocumentoNonElaborabile, con un
+    messaggio per l'utente, invece di lasciar arrivare all'interfaccia
+    un'eccezione con la traccia dello stack.
+    """
+    try:
+        doc = fitz.open(stream=input_bytes, filetype="pdf")
+    except Exception as e:
+        logger.error("Apertura PDF fallita: %s", type(e).__name__)
+        raise DocumentoNonElaborabile(
+            "il file non è un PDF leggibile (potrebbe essere danneggiato)") from None
+    if doc.needs_pass:
+        doc.close()
+        raise DocumentoNonElaborabile(
+            "il PDF è protetto da una password di apertura: "
+            "rimuovila e carica di nuovo il file")
+    return doc
+
+
+def prepare_source_document(doc):
+    """
+    Porta nel contenuto delle pagine tutto ciò che l'estrazione del testo
+    altrimenti non vedrebbe, così che venga analizzato come il resto.
+
+    Regola dell'intero percorso: il PDF prodotto contiene solo ciò che
+    l'analisi ha visto.
+
+    - A4 livelli nascosti: vengono resi visibili. Nel PDF prodotto la
+      definizione dei livelli non c'è più, quindi il loro contenuto
+      sarebbe comunque visibile: deve passare dall'analisi.
+    - A1/A10 campi modulo: i valori digitati in un modulo compilabile
+      vivono nei campi, non nella pagina. Svuotarli non funzionava (e
+      avrebbe restituito un modulo in bianco): qui diventano testo della
+      pagina, che viene poi analizzato e oscurato come ogni altro testo.
+      Il modulo interattivo sparisce, e con lui nomi dei campi,
+      suggerimenti, dati XFA e dizionari di firma digitale.
+
+    Ritorna (documento, numero di campi trasformati in testo). Il
+    documento può essere una NUOVA istanza: dopo queste modifiche viene
+    riletto da capo, perché MuPDF tiene in memoria lo stato dei livelli
+    e le pagine già caricate.
+    """
+    modificato = False
+
+    # I livelli per primi, prima che qualunque pagina venga caricata.
+    try:
+        # Senza /OCProperties tutto il contenuto è visibile: è lo stato in
+        # cui si troverà il PDF prodotto (set_layer non basta: l'estrazione
+        # del testo continua a ignorare i livelli spenti).
+        catalogo = doc.pdf_catalog()
+        if doc.xref_get_key(catalogo, "OCProperties")[0] != "null":
+            doc.xref_set_key(catalogo, "OCProperties", "null")
+            modificato = True
+    except Exception as e:
+        logger.error("Attivazione livelli fallita: %s", type(e).__name__)
+        raise DocumentoNonElaborabile(
+            "il PDF contiene livelli nascosti che non si possono "
+            "rendere visibili: stampalo in PDF e carica la copia") from None
+
+    campi = 0
+    try:
+        for page in doc:
+            campi += sum(1 for _ in (page.widgets() or []))
+    except Exception as e:
+        logger.warning("Conteggio campi modulo fallito: %s", type(e).__name__)
+        campi = -1   # ignoto: si procede comunque con l'appiattimento
+
+    if campi != 0:
+        try:
+            doc.bake(annots=False, widgets=True)
+            modificato = True
+        except Exception as e:
+            logger.error("Appiattimento campi modulo fallito: %s", type(e).__name__)
+            raise DocumentoNonElaborabile(
+                "il modulo compilabile contenuto nel PDF non si può "
+                "trasformare in testo: stampalo in PDF e carica la copia") from None
+        campi = max(campi, 0)
+
+    if modificato:
+        try:
+            riletto = fitz.open(stream=doc.tobytes(), filetype="pdf")
+        except Exception as e:
+            logger.error("Rilettura dopo la preparazione fallita: %s", type(e).__name__)
+            raise DocumentoNonElaborabile(
+                "il PDF non si può preparare per l'analisi: "
+                "stampalo in PDF e carica la copia") from None
+        doc.close()
+        doc = riletto
+    return doc, campi
+
+
+def expand_to_full_page(page):
+    """
+    A5: porta l'area visibile a coincidere con la pagina fisica.
+
+    In una pagina ritagliata (con Anteprima o Acrobat) il testo fuori dal
+    ritaglio non si vede e non veniva estratto, ma restava nel file e
+    ricompariva togliendo il ritaglio. Analizzando l'intera pagina fisica
+    viene oscurato come il resto. Ritorna il ritaglio originale, da
+    ripristinare sulla pagina prodotta, oppure None se non c'era.
+    """
+    try:
+        originale = fitz.Rect(page.cropbox)
+        mb = page.mediabox
+        # set_cropbox misura la y dal bordo superiore della pagina fisica
+        intera = fitz.Rect(mb.x0, 0, mb.x1, mb.y1 - mb.y0)
+        if (abs(originale.x0 - intera.x0) < 0.5 and abs(originale.y0 - intera.y0) < 0.5
+                and abs(originale.x1 - intera.x1) < 0.5 and abs(originale.y1 - intera.y1) < 0.5):
+            return None
+        page.set_cropbox(intera)
+        return originale
+    except Exception as e:
+        logger.warning("Estensione area visibile fallita: %s", type(e).__name__)
+        return None
+
+
+def restore_crop(page, originale):
+    """Rimette il ritaglio originale sulla pagina (vedi expand_to_full_page)."""
+    if originale is None:
+        return
+    try:
+        page.set_cropbox(originale)
+    except Exception as e:
+        logger.warning("Ripristino ritaglio fallito: %s", type(e).__name__)
+
+
 def safe_error_message(action, exception):
     """
     L-03: Restituisce un messaggio di errore SENZA esporre dettagli
@@ -1939,6 +2285,7 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
     raw_count = 0
     results = []
     dropped_fp = 0
+    failed = False
 
     if full_text.strip() and selected_entities:
         try:
@@ -2002,9 +2349,12 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
                 results.append(r)
 
         except Exception as e:
-            # L-03: messaggio sanitizzato, dettagli solo nei log
+            # L-03: messaggio sanitizzato, dettagli solo nei log.
+            # A3: la pagina NON va avanti senza analisi — redact_pdf la
+            # oscura per intero e la riporta tra le pagine fallite.
             st.error(safe_error_message(f"Analisi pagina {page_num}", e))
             results = []
+            failed = True
 
     return {
         "full_text": full_text,
@@ -2013,6 +2363,7 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
         "raw": raw_count,
         "filtered": len(results),
         "dropped_fp": dropped_fp,
+        "failed": failed,
     }
 
 
@@ -2101,6 +2452,7 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
     entries = analysis["entries"]
     use_codes = redaction_mode == "codes" and assigner is not None
     redacted_word_idx = set()
+    piano = []   # coperture da applicare in due passate (C1)
 
     def _log(tipo, testo, confidenza, code):
         row = {
@@ -2130,7 +2482,7 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
         for match_indexes in find_custom_term_matches(term, entries):
             word_hits = [(i, entries[i]["rect"]) for i in match_indexes]
             code = assigner.assign("TERMINE PERSONALIZZATO", term) if use_codes else None
-            add_redaction_for_hits(page, entries, word_hits, redaction_mode, code)
+            add_redaction_for_hits(page, entries, word_hits, redaction_mode, code, piano)
             redacted_word_idx.update(match_indexes)
             _log("TERMINE PERSONALIZZATO", term, "100%", code)
 
@@ -2160,7 +2512,7 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
                 and is_false_positive(result.entity_type, remaining_text)):
             continue
         code = assigner.assign(result.entity_type, found_text) if use_codes else None
-        add_redaction_for_hits(page, entries, word_hits, redaction_mode, code)
+        add_redaction_for_hits(page, entries, word_hits, redaction_mode, code, piano)
         redacted_word_idx.update(idx for idx, _r in word_hits)
         _log(result.entity_type, found_text, f"{result.score:.0%}", code)
 
@@ -2183,7 +2535,7 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
         display = entry["text"].strip(_TOKEN_PUNCT)
         code = assigner.assign(prop_type, display) if use_codes else None
         add_redaction_for_hits(
-            page, entries, [(idx, entry["rect"])], redaction_mode, code
+            page, entries, [(idx, entry["rect"])], redaction_mode, code, piano
         )
         redacted_word_idx.add(idx)
         _log(prop_type, display, "—", code)
@@ -2193,10 +2545,10 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
     #    scansioni: una firma non ha un testo da accoppiare a un codice).
     if redact_handwriting:
         for area in detect_handwriting_on_text_page(page, entries):
-            page.add_redact_annot(area, fill=(0, 0, 0))
+            piano.append({"rect": area, "fill": (0, 0, 0), "tutto": True})
             _log("FIRMA / SCRITTA A MANO", "(immagine)", "—", None)
 
-    page.apply_redactions()
+    apply_redaction_plan(page, piano)
 
 
 # ============================================================
@@ -2576,6 +2928,8 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
         "words": [], "entries": [], "full_text": "", "word_positions": [],
         "results": [], "raw": 0, "filtered": 0, "dropped_fp": 0,
         "ocr_failed": words is None,
+        # A3: OCR in errore = pagina non analizzata, va oscurata per intero
+        "failed": words is None,
     }
     if not words:
         return empty
@@ -2596,6 +2950,7 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
     raw_count = 0
     dropped_fp = 0
     results = []
+    failed = False
 
     if selected_entities and full_text.strip():
         try:
@@ -2659,6 +3014,7 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
             # L-03: messaggio sanitizzato
             st.warning(safe_error_message(f"Presidio OCR pagina {page_num}", e))
             results = []
+            failed = True
 
     return {
         "words": words,
@@ -2673,6 +3029,7 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
         "filtered": len(results),
         "dropped_fp": dropped_fp,
         "ocr_failed": False,
+        "failed": failed,
     }
 
 
@@ -2852,12 +3209,22 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     redact_handwriting: R-20/R-23 — oscura anche firme, sigle e timbri:
         sulle pagine scansionate e, nei PDF digitali, sulle immagini.
 
-    Ritorna (bytes_pdf, log, mapping) dove mapping è la tabella di
-    accoppiamento codice↔testo (vuota in modalità blackout).
+    Ritorna un EsitoRedazione (pdf, log, mapping, avvisi): mapping è la
+    tabella di accoppiamento codice↔testo (vuota in modalità blackout),
+    avvisi dice che cosa l'utente deve sapere prima di fidarsi del file.
+    Solleva DocumentoNonElaborabile se il PDF non si può trattare in
+    modo sicuro (password, file illeggibile, pulizia finale fallita).
+
+    Regola: il PDF prodotto contiene solo ciò che l'analisi ha visto.
     """
-    src_doc = fitz.open(stream=input_bytes, filetype="pdf")
+    src_doc = open_source_document(input_bytes)
+    src_doc, campi_modulo = prepare_source_document(src_doc)
     out_doc = fitz.open()
     log = []
+    pagine_fallite = []
+    pagine_ocr_elenco = []
+    pagine_immagini_non_lette = []
+    pagine_senza_ocr = []
     if redaction_mode == "codes" and assigner is None:
         assigner = CodeAssigner()
     elif redaction_mode != "codes":
@@ -2896,12 +3263,17 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         progress_bar.progress((page_index + 1) / (total_pages * 2))
         status_text.text(f"🧠 Analisi pagina {page_num}/{total_pages}...")
 
-        scanned = is_scanned_page(src_page)
+        # A5: si analizza l'intera pagina fisica, non solo il ritaglio
+        ritaglio = expand_to_full_page(src_page)
 
-        # M-02: rileva immagini inline significative in pagine testuali
+        # A2: scansione = poco testo OPPURE una grande immagine con quasi
+        # nessuna parola sopra (scansione con timbro o protocollo a margine)
+        scanned = is_scanned_page(src_page) or has_image_dominated_content(src_page)
+
+        # M-02/A7: immagini che possono contenere dati in pagine testuali
         has_images = False
         if not scanned:
-            has_images = has_inline_images(src_page)
+            has_images = has_inline_images(src_page, AREA_IMMAGINE_DA_SEGNALARE)
             if has_images:
                 pages_with_inline_images += 1
 
@@ -2912,6 +3284,10 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         )
 
         if use_ocr:
+            # L'OCR lavora sull'immagine della pagina: fuori dal ritaglio
+            # non resta nulla nel file, quindi si torna al ritaglio originale
+            restore_crop(src_page, ritaglio)
+            ritaglio = None
             status_text.text(f"🔍 OCR pagina {page_num}/{total_pages}...")
             analysis = analyze_scanned_page(
                 src_page, selected_entities, analyzer, min_score,
@@ -2936,6 +3312,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             "scanned": scanned,
             "has_images": has_images,
             "analysis": analysis,
+            "ritaglio": ritaglio,
+            "failed": bool(analysis.get("failed")),
         }
 
     # I termini personalizzati non vanno propagati come nomi, ma i
@@ -2985,7 +3363,28 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         plan = page_plans[page_index]
         progress_bar.progress(0.5 + (page_index + 1) / (total_pages * 2))
 
+        if plan["failed"]:
+            # A3: pagina non analizzata (errore del motore o dell'OCR).
+            # Non esce in chiaro: al suo posto una pagina nera della
+            # stessa misura, riportata nel report e tra gli avvisi.
+            restore_crop(src_page, plan["ritaglio"])
+            nera = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
+            nera.draw_rect(nera.rect, color=(0, 0, 0), fill=(0, 0, 0))
+            pagine_fallite.append(page_num)
+            riga = {
+                "Pagina": page_num,
+                "Tipo": "PAGINA NON ANALIZZATA (oscurata per intero)",
+                "Testo": "—",
+                "Confidenza": "—",
+                "Metodo": "Errore",
+            }
+            if redaction_mode == "codes":
+                riga["Codice"] = "—"
+            log.append(riga)
+            continue
+
         if plan["use_ocr"]:
+            pagine_ocr_elenco.append(page_num)
             status_text.text(f"🖊️ Redazione pagina {page_num}/{total_pages}...")
             apply_scanned_redactions(
                 src_page, out_doc, plan["analysis"], custom_terms,
@@ -2997,14 +3396,20 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             )
             pages_ocr += 1
         else:
-            if plan["scanned"] and not TESSERACT_AVAILABLE:
-                status_text.text(f"⚠️ Pagina {page_num}/{total_pages} scansionata ma OCR non disponibile")
-            elif plan["has_images"] and ocr_mode == "auto":
+            if plan["scanned"]:
+                # scansione non letta: Tesseract assente o "Mai OCR"
+                pagine_senza_ocr.append(page_num)
+                status_text.text(f"⚠️ Pagina {page_num}/{total_pages} scansionata ma non letta con l'OCR")
+            elif plan["has_images"]:
+                pagine_immagini_non_lette.append(page_num)
                 status_text.text(f"📄 Pagina {page_num}/{total_pages} (⚠️ contiene immagini)")
             else:
                 status_text.text(f"📄 Pagina {page_num}/{total_pages}...")
 
-            out_doc.insert_pdf(src_doc, from_page=page_index, to_page=page_index)
+            # A6: link e annotazioni non vengono copiati. I link restavano
+            # nelle pagine senza redazioni ("mailto:nome.cognome@...").
+            out_doc.insert_pdf(src_doc, from_page=page_index, to_page=page_index,
+                               links=False, annots=False)
             new_page = out_doc[-1]
             apply_text_redactions(
                 new_page, plan["analysis"], custom_terms,
@@ -3014,24 +3419,26 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                 known_org_tokens=org_tokens,
                 redact_handwriting=redact_handwriting,
             )
+            # A5: la pagina torna ritagliata come l'originale
+            restore_crop(new_page, plan["ritaglio"])
             pages_text += 1
 
     progress_bar.empty()
     status_text.empty()
 
-    # M-02: warning se ci sono immagini inline in modalità auto
-    if pages_with_inline_images > 0 and ocr_mode == "auto":
-        st.warning(
-            f"⚠️ **Attenzione:** rilevate immagini significative in {pages_with_inline_images} pagine "
-            f"testuali (firme scansionate, foto di documenti, timbri...). "
-            f"Queste immagini **NON sono state OCRate**. Se possono contenere dati sensibili, "
-            f"rilancia l'anonimizzazione in modalità **'Forza OCR su tutto'**."
-        )
-
-    # M-01 + M-03: sanitizzazione PDF di output
+    # M-01 + M-03: sanitizzazione PDF di output.
+    # A11: se la pulizia fallisce il documento non viene consegnato.
     status_text.text("🧹 Sanitizzazione metadata e oggetti residui...")
-    sanitize_pdf_metadata(out_doc)
-    sanitize_stats = sanitize_pdf_objects(out_doc)
+    try:
+        sanitize_pdf_metadata(out_doc, strict=True)
+        sanitize_stats = sanitize_pdf_objects(out_doc, strict=True)
+    except Exception as e:
+        logger.error("Pulizia finale fallita: %s", type(e).__name__)
+        out_doc.close()
+        src_doc.close()
+        raise DocumentoNonElaborabile(
+            "la pulizia finale del PDF (metadati, commenti, allegati) "
+            "non è riuscita: il file non viene prodotto") from None
     status_text.empty()
 
     # Riepilogo
@@ -3067,7 +3474,14 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     src_doc.close()
     output_bytes.seek(0)
     mapping = assigner.mapping if assigner else []
-    return output_bytes.getvalue(), log, mapping
+    avvisi = {
+        "pagine_fallite": pagine_fallite,
+        "pagine_ocr": pagine_ocr_elenco,
+        "pagine_immagini_non_lette": pagine_immagini_non_lette,
+        "pagine_senza_ocr": pagine_senza_ocr,
+        "campi_modulo": campi_modulo,
+    }
+    return EsitoRedazione(output_bytes.getvalue(), log, mapping, avvisi)
 
 
 # ============================================================
@@ -3381,10 +3795,9 @@ st.divider()
 
 # --- AZIONE ---
 # N-03 (#7): guard difensivo contro OOM silenzioso su PDF molto grandi.
-# Il limite reale è imposto da .streamlit/config.toml -> server.maxUploadSize
-# (Streamlit blocca prima ancora di raggiungere Python). Questo check protegge
-# il caso in cui qualcuno esegua `streamlit run` senza il config (es. fuori
-# dal repo). Tenere MAX_PDF_BYTES in sync con il valore di config.toml.
+# Streamlit accetta di suo fino a 200 MB (server.maxUploadSize): questo
+# controllo ferma prima i file oltre i 100 MB, che l'app elabora tutta in
+# memoria.
 MAX_PDF_BYTES = 100 * 1024 * 1024  # 100 MB
 
 
@@ -3397,24 +3810,128 @@ def mapping_to_csv_bytes(mapping, with_document=False):
     writer = csv.DictWriter(buf, fieldnames=fields, delimiter=";",
                             extrasaction="ignore")
     writer.writeheader()
-    writer.writerows(mapping)
+    writer.writerows(
+        {k: _safe_csv_cell(v) for k, v in riga.items()} for riga in mapping
+    )
     return buf.getvalue().encode("utf-8-sig")
 
 
+def _safe_csv_cell(valore):
+    """
+    Neutralizza le celle che un foglio di calcolo eseguirebbe come
+    formula: il testo oscurato viene dal documento (o dal nome del file)
+    e può cominciare con "=" o "@". L'apostrofo iniziale lo fa trattare
+    come testo. I numeri con segno ("+39 0461...") restano come sono.
+    """
+    if not isinstance(valore, str) or not valore:
+        return valore
+    primo = valore[0]
+    if primo in "=@\t\r" or (primo in "+-" and len(valore) > 1
+                             and not (valore[1].isdigit() or valore[1] == " ")):
+        return "'" + valore
+    return valore
+
+
+_PAROLA_NOME_FILE = re.compile(r"[^\W\d_]{3,}")
+
+
+def nome_file_uscita(res, indice, estensione=".pdf", prefisso=None):
+    """
+    A9: nome del file da scaricare.
+
+    Di norma resta il nome originale con il prefisso, comodo per
+    ritrovare l'atto. Ma "Ricorso Rossi c. Bianchi.pdf" porterebbe i nomi
+    delle parti nel nome del file anonimizzato: se una parola del nome
+    coincide con un testo oscurato in quel documento, si usa un nome
+    neutro ("anonimizzato_documento_1.pdf").
+    Il nome è sempre ridotto al solo file, senza cartelle.
+    """
+    if prefisso is None:
+        prefisso = "pseudonimizzato" if res.get("redaction_mode") == "codes" else "anonimizzato"
+    nome = os.path.basename(str(res.get("source_name") or "").replace("\\", "/"))
+    base = os.path.splitext(nome)[0] or f"documento_{indice}"
+    oscurati = set()
+    for riga in res.get("log") or []:
+        oscurati.update(_PAROLA_NOME_FILE.findall(str(riga.get("Testo", "")).lower()))
+    for riga in res.get("mapping") or []:
+        oscurati.update(_PAROLA_NOME_FILE.findall(str(riga.get("Testo originale", "")).lower()))
+    if oscurati & set(_PAROLA_NOME_FILE.findall(base.lower())):
+        base = f"documento_{indice}"
+    return f"{prefisso}_{base}{estensione}"
+
+
+def _elenco_pagine(pagine):
+    """[1, 2, 3, 7] -> "1-3, 7"."""
+    gruppi, inizio, prec = [], None, None
+    for n in sorted(set(pagine)):
+        if inizio is None:
+            inizio = prec = n
+        elif n == prec + 1:
+            prec = n
+        else:
+            gruppi.append((inizio, prec))
+            inizio = prec = n
+    if inizio is not None:
+        gruppi.append((inizio, prec))
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in gruppi)
+
+
+def messaggi_avvisi(avvisi):
+    """
+    Trasforma gli avvisi di redact_pdf in messaggi per l'utente.
+    Ritorna una lista di (livello, testo), con livello "error", "warning"
+    o "info". I messaggi restano a schermo insieme ai risultati: prima
+    comparivano un istante durante l'elaborazione e sparivano al primo
+    clic su un download.
+    """
+    avvisi = avvisi or {}
+    messaggi = []
+    if avvisi.get("pagine_fallite"):
+        messaggi.append(("error",
+            f"**Pagine non analizzate per un errore: {_elenco_pagine(avvisi['pagine_fallite'])}.** "
+            "Nel PDF sono state sostituite da pagine nere, per non lasciarle in chiaro. "
+            "Riprova; se l'errore si ripete, prova la modalità OCR \"Forza OCR su tutto\"."))
+    if avvisi.get("pagine_senza_ocr"):
+        messaggi.append(("error",
+            f"**Pagine scansionate NON lette: {_elenco_pagine(avvisi['pagine_senza_ocr'])}.** "
+            "Sono immagini e l'OCR non era attivo o disponibile: tutto ciò che contengono "
+            "è rimasto in chiaro. Installa Tesseract o scegli una modalità OCR, poi rilancia."))
+    if avvisi.get("pagine_immagini_non_lette"):
+        messaggi.append(("warning",
+            f"**Immagini non lette alle pagine: {_elenco_pagine(avvisi['pagine_immagini_non_lette'])}.** "
+            "Firme, timbri o foto di documenti dentro pagine di testo non passano dall'OCR "
+            "in modalità Automatica. Se possono contenere dati, rilancia con "
+            "\"Forza OCR su tutto\" (o attiva \"Oscura firme e scritte a mano\")."))
+    if avvisi.get("campi_modulo"):
+        messaggi.append(("info",
+            f"Il PDF era un modulo compilabile ({avvisi['campi_modulo']} campi): i valori "
+            "sono diventati testo della pagina e sono stati analizzati come il resto. "
+            "Il file prodotto non è più compilabile."))
+    return messaggi
+
+
 def build_results_zip(risultati, shared_mapping=None):
-    """R-16: ZIP con tutti i PDF elaborati (+ tabelle di accoppiamento)."""
+    """
+    R-16: ZIP con tutti i PDF elaborati.
+
+    A8: le tabelle di accoppiamento NON entrano nello ZIP. Sono la chiave
+    di re-identificazione: chi inoltrava lo ZIP consegnava documenti e
+    chiave insieme, contro l'avvertenza mostrata a schermo. Si scaricano
+    a parte, con i loro pulsanti. `shared_mapping` resta nella firma per
+    compatibilità e non viene usato.
+    I documenti non prodotti (errore) vengono saltati.
+    """
     zip_buf = BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for res in risultati:
-            prefix = "pseudonimizzato" if res["redaction_mode"] == "codes" else "anonimizzato"
-            zf.writestr(f"{prefix}_{res['source_name']}", res["output_bytes"])
-            if shared_mapping is None and res["mapping"]:
-                base = os.path.splitext(res["source_name"])[0]
-                zf.writestr(f"accoppiamento_{base}.csv",
-                            mapping_to_csv_bytes(res["mapping"]))
-        if shared_mapping:
-            zf.writestr("accoppiamento_fascicolo.csv",
-                        mapping_to_csv_bytes(shared_mapping, with_document=True))
+        usati = set()
+        for indice, res in enumerate(risultati, start=1):
+            if not res.get("output_bytes"):
+                continue
+            nome = nome_file_uscita(res, indice)
+            if nome in usati:   # due file caricati con lo stesso nome
+                nome = nome_file_uscita(res, indice).replace(".pdf", f"_{indice}.pdf")
+            usati.add(nome)
+            zf.writestr(nome, res["output_bytes"])
     return zip_buf.getvalue()
 
 
@@ -3425,7 +3942,7 @@ if uploaded_files:
             "⚠️ PDF troppo grandi (limite "
             f"{MAX_PDF_BYTES // 1024**2} MB): "
             + ", ".join(f"{f.name} ({f.size / 1024**2:.0f} MB)" for f in troppo_grandi)
-            + ". Suddividili o aumenta `maxUploadSize` in `.streamlit/config.toml`."
+            + ". Suddividili in più file."
         )
         st.stop()
     if not selected_entities and not custom_terms:
@@ -3434,8 +3951,16 @@ if uploaded_files:
         n_docs = len(uploaded_files)
         etichetta = ("🔒 Anonimizza documento" if n_docs == 1
                      else f"🔒 Anonimizza {n_docs} documenti")
-        # firma del set di file: cambia → i vecchi risultati non valgono più
-        firma_upload = [(f.name, f.size) for f in uploaded_files]
+        # Firma di file E impostazioni: se cambia una qualunque delle due
+        # i risultati a schermo non valgono più. Prima contavano solo i
+        # file: aggiungendo un termine o una categoria restavano visibili
+        # "completata" e i download del giro precedente.
+        firma_upload = [
+            [(f.name, f.size) for f in uploaded_files],
+            sorted(selected_entities), [t.strip() for t in custom_terms],
+            min_score, ocr_mode, ocr_dpi, redaction_mode,
+            exclude_magistrates, redact_handwriting, shared_codes,
+        ]
 
         if st.button(etichetta, type="primary", use_container_width=True):
 
@@ -3457,26 +3982,41 @@ if uploaded_files:
                     st.markdown(f"##### 📄 {i}/{n_docs} — {f.name}")
                 if assigner_condiviso is not None:
                     assigner_condiviso.current_document = f.name
-                output_bytes, log, mapping = redact_pdf(
-                    f.read(),
-                    selected_entities,
-                    custom_terms,
-                    analyzer,
-                    min_score=min_score,
-                    ocr_mode=ocr_mode,
-                    ocr_dpi=ocr_dpi,
-                    ocr_lang="ita" if ITALIAN_AVAILABLE else "eng",
-                    redaction_mode=redaction_mode,
-                    exclude_magistrates=exclude_magistrates,
-                    assigner=assigner_condiviso,
-                    redact_handwriting=redact_handwriting,
-                )
+                # Un documento che non si può elaborare non ferma gli altri
+                # e non mostra tracce dello stack: viene riportato come
+                # errore, senza file da scaricare.
+                try:
+                    output_bytes, log, mapping, avvisi = redact_pdf(
+                        f.read(),
+                        selected_entities,
+                        custom_terms,
+                        analyzer,
+                        min_score=min_score,
+                        ocr_mode=ocr_mode,
+                        ocr_dpi=ocr_dpi,
+                        ocr_lang="ita" if ITALIAN_AVAILABLE else "eng",
+                        redaction_mode=redaction_mode,
+                        exclude_magistrates=exclude_magistrates,
+                        assigner=assigner_condiviso,
+                        redact_handwriting=redact_handwriting,
+                    )
+                    errore = None
+                except DocumentoNonElaborabile as e:
+                    output_bytes, log, mapping, avvisi = None, [], [], {}
+                    errore = str(e)
+                except Exception as e:
+                    output_bytes, log, mapping, avvisi = None, [], [], {}
+                    logger.error("Elaborazione fallita: %s — %s",
+                                 type(e).__name__, str(e)[:200])
+                    errore = f"errore imprevisto ({type(e).__name__}); il file non viene prodotto"
                 # con codici condivisi il mapping cresce a ogni documento:
                 # teniamo traccia di quali codici sono NUOVI in questo file
                 risultati.append({
                     "output_bytes": output_bytes,
                     "log": log,
                     "mapping": mapping,
+                    "avvisi": avvisi,
+                    "errore": errore,
                     "redaction_mode": redaction_mode,
                     "source_name": f.name,
                 })
@@ -3501,17 +4041,37 @@ if uploaded_files:
         # --- RISULTATI (persistenti tra i rerun dei download) ---
         stato = st.session_state.get("risultati")
         if stato is not None and stato.get("firma") != firma_upload:
-            stato = None  # i file caricati sono cambiati
+            stato = None  # file o impostazioni sono cambiati
             st.session_state.pop("risultati", None)
+            st.info("File o impostazioni sono cambiati: premi di nuovo il "
+                    "pulsante per rielaborare con le scelte attuali.")
 
         if stato is not None:
-            risultati = stato["docs"]
+            tutti = stato["docs"]
             mapping_condiviso = stato["shared_mapping"]
-            res_mode = risultati[0]["redaction_mode"]
+            res_mode = tutti[0]["redaction_mode"]
+
+            # documenti non prodotti: errore chiaro, nessun download
+            for res in tutti:
+                if res.get("errore"):
+                    st.error(f"❌ **{res['source_name']}** non elaborato: {res['errore']}.")
+            risultati = [r for r in tutti if r.get("output_bytes")]
+            for res in risultati:
+                res["indice"] = tutti.index(res) + 1
+
             tot_redazioni = sum(len(r["log"]) for r in risultati)
             docs_con_esito = [r for r in risultati if r["log"]]
 
-            if tot_redazioni:
+            # avvisi dei documenti senza redazioni (gli altri li mostrano
+            # nel proprio riquadro, qui sotto)
+            for res in risultati:
+                if not res["log"]:
+                    for livello, testo in messaggi_avvisi(res.get("avvisi")):
+                        getattr(st, livello)(f"**{res['source_name']}** — {testo}")
+
+            if not risultati:
+                pass
+            elif tot_redazioni:
                 n_codici = (len(mapping_condiviso) if mapping_condiviso is not None
                             else sum(len(r["mapping"]) for r in risultati))
                 if res_mode == "codes":
@@ -3533,8 +4093,8 @@ if uploaded_files:
                     col_z1, col_z2 = st.columns([1, 1])
                     with col_z1:
                         st.download_button(
-                            label=f"📦 Scarica tutto ({len(risultati)} PDF, ZIP)",
-                            data=build_results_zip(risultati, mapping_condiviso),
+                            label=f"📦 Scarica tutti i PDF ({len(risultati)}, ZIP senza tabelle)",
+                            data=build_results_zip(risultati),
                             file_name="documenti_anonimizzati.zip",
                             mime="application/zip",
                             type="primary",
@@ -3554,7 +4114,7 @@ if uploaded_files:
                 for res in risultati:
                     res_log = res["log"]
                     res_mapping = res["mapping"]
-                    base_name = os.path.splitext(res["source_name"])[0]
+                    idx_doc = res["indice"]
                     if not res_log:
                         st.warning(
                             f"⚠️ **{res['source_name']}**: nessuna entità sensibile "
@@ -3567,25 +4127,35 @@ if uploaded_files:
                     contenitore = (st.expander(intestazione, expanded=len(risultati) <= 2)
                                    if intestazione else st.container())
                     with contenitore:
+                        # avvisi che restano a schermo insieme al download
+                        for livello, testo in messaggi_avvisi(res.get("avvisi")):
+                            getattr(st, livello)(testo)
+                        nome_pdf = nome_file_uscita(res, idx_doc)
+                        if not nome_pdf.endswith(f"_{os.path.splitext(res['source_name'])[0]}.pdf"):
+                            st.caption(
+                                "Il nome del file originale conteneva un dato oscurato: "
+                                f"il PDF viene scaricato come `{nome_pdf}`."
+                            )
                         col_a, col_b = st.columns([1, 2])
                         with col_a:
                             st.download_button(
                                 label="📥 Scarica PDF",
                                 data=res["output_bytes"],
-                                file_name=f"{prefix}_{res['source_name']}",
+                                file_name=nome_pdf,
                                 mime="application/pdf",
                                 type="primary" if len(risultati) == 1 else "secondary",
                                 use_container_width=True,
-                                key=f"dl_pdf_{base_name}",
+                                key=f"dl_pdf_{idx_doc}",
                             )
                             if res_mapping and mapping_condiviso is None:
                                 st.download_button(
                                     label="🔑 Scarica tabella di accoppiamento (CSV)",
                                     data=mapping_to_csv_bytes(res_mapping),
-                                    file_name=f"accoppiamento_{base_name}.csv",
+                                    file_name=nome_file_uscita(
+                                        res, idx_doc, ".csv", "accoppiamento"),
                                     mime="text/csv",
                                     use_container_width=True,
-                                    key=f"dl_csv_{base_name}",
+                                    key=f"dl_csv_{idx_doc}",
                                 )
                         with col_b:
                             types_count = Counter(item["Tipo"] for item in res_log)
@@ -3642,7 +4212,11 @@ with st.expander("ℹ️ Informazioni e avvertenze"):
 
     **Redazione scansioni (OCR):** il PDF viene rasterizzato e ricostruito come immagine con rettangoli neri (la pagina diventa solo immagine, non selezionabile).
 
-    **Sanitizzazione automatica (v1.1+):** il PDF di output viene ripulito da metadata (autore, titolo), annotazioni, allegati, campi form e JavaScript.
+    **Sanitizzazione automatica (v1.1+):** il PDF di output viene ripulito da metadata (autore, titolo), annotazioni, link, allegati e JavaScript.
+
+    **Moduli compilabili, livelli, pagine ritagliate (v2.2+):** i valori dei campi di un modulo diventano testo della pagina e vengono analizzati come il resto (il file prodotto non è più compilabile); i livelli nascosti vengono resi visibili e analizzati; il testo fuori dal ritaglio di una pagina viene analizzato e la pagina resta ritagliata.
+
+    **Pagine non analizzate (v2.2+):** se l'analisi o l'OCR di una pagina va in errore, la pagina esce **nera** e viene segnalata: non resta mai in chiaro.
 
     **Precisione (v1.2+):**
     - La redazione avviene alle **coordinate esatte** dell'occorrenza rilevata:
@@ -3659,7 +4233,8 @@ with st.expander("ℹ️ Informazioni e avvertenze"):
     - L'OCR può perdere parole con scansioni di bassa qualità.
     - Nomi inusuali possono sfuggire — usa sempre i "termini specifici" per certezza.
     - Date disabilitate di default perché spesso rilevanti nei documenti legali.
-    - Per documenti che contengono firme scansionate, foto di documenti d'identità o timbri all'interno di pagine altrimenti testuali, usa la modalità **"Forza OCR su tutto"**.
+    - In modalità Automatica le pagine-immagine vengono lette con l'OCR anche se hanno un po' di testo vero a margine (timbro, protocollo). Le immagini più piccole dentro pagine di testo (firme, timbri, foto di documenti) **non** vengono lette: l'app le segnala pagina per pagina; per leggerle usa **"Forza OCR su tutto"**.
+    - Lo ZIP "Scarica tutti i PDF" non contiene le tabelle di accoppiamento: si scaricano a parte.
     - Le filigrane diagonali (es. "copia comunicata ai soli fini...") possono
       perdere le lettere che attraversano fisicamente un'area oscurata.
 

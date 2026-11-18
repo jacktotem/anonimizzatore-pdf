@@ -706,7 +706,7 @@ function Install-Tesseract {
 # I-01: presidio-anonymizer rimosso (non usato, redazione fatta da PyMuPDF)
 $script:PythonPackages = @(
     "streamlit>=1.37.0,<2.0.0",
-    "pymupdf>=1.24.0,<2.0.0",
+    "pymupdf>=1.24.5,<2.0.0",
     "presidio-analyzer>=2.2.0,<3.0.0",
     "spacy>=3.7.0,<3.8.0",
     "pytesseract>=0.3.10,<1.0.0",
