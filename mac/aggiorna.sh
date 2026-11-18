@@ -59,7 +59,7 @@ main() {
     else
         if ! git diff --quiet || ! git diff --cached --quiet; then
             echo "❌ In questa cartella ci sono file del programma modificati a mano:"
-            git status --short | sed 's/^/     /'
+            git status --short --untracked-files=no | sed 's/^/     /'
             echo "   Per non sovrascriverli mi fermo. Rimetti a posto quei file"
             echo "   (o scarica una copia nuova) e rilancia."
             exit 1
