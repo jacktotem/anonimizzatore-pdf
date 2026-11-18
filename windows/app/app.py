@@ -1319,7 +1319,7 @@ def _plate_span_after(text, pos):
     """
     window = text[pos:pos + _PLATE_LOOKAHEAD]
     # R-14: salta una congiunzione/lettera vagante subito dopo la
-    # parola-spia ("le auto targate X e FP185GN" → non catturare "e")
+    # parola-spia ("le auto targate X e ZZ185WW" → non catturare "e")
     lead = re.match(r"\s*[A-Za-z]\s+", window)
     if lead:
         pos += lead.end()
