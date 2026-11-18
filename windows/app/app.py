@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import logging
+import unicodedata
 import zipfile
 from io import BytesIO, StringIO
 from collections import Counter
@@ -27,6 +28,7 @@ from presidio_analyzer import (
     RecognizerResult,
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_analyzer.predefined_recognizers import PhoneRecognizer
 
 __version__ = "2.1.7"
 
@@ -56,6 +58,9 @@ class EsitoRedazione(NamedTuple):
     #   pagine_immagini_non_lette pagine testuali con immagini non passate all'OCR
     #   pagine_senza_ocr          scansioni non lette (Tesseract assente o "Mai OCR")
     #   campi_modulo              campi compilabili trasformati in testo
+    #   pagine_ocr_incerto        pagine OCR con molte parole lette male e scartate
+    #   termini_non_trovati       termini specifici senza alcun riscontro
+    #   cognomi_non_propagati     cognomi oscurati solo accanto al nome
     avvisi: dict
 
 
@@ -289,6 +294,91 @@ def _is_substantive_token(token):
     return True
 
 
+# B1: parole della stoplist che sono anche cognomi italiani diffusi.
+# "Mario Piazza", "Giuseppe Giudice", "Anna Corso", "Rosa Italiano":
+# tagliare il bordo dell'entità lasciava in chiaro il cognome (e, non
+# essendo propagato, lo lasciava in chiaro in tutto l'atto).
+_STOPWORDS_ANCHE_COGNOMI = {
+    "piazza", "corso", "strada", "largo", "giudice", "corte", "camera",
+    "consiglio", "italiano", "italia", "signore", "causa", "comune",
+    "civile", "generale", "capitale", "garante", "popolo", "giustizia",
+    "notaio", "merito", "lavoro", "stato", "vero",
+}
+# dopo un prefisso di via, l'indirizzo prosegue: "Piazza Dante 3",
+# "Corso Italia 12", "Piazza delle Donne Lavoratrici"
+_ADDRESS_CONTINUES_RE = re.compile(
+    r"\s*,?\s*(?:(?:di|del|della|dello|dei|degli|delle)\s+)?(?:[A-ZÀ-Ý]|\d)")
+_APOSTROFI = str.maketrans({"’": "'", "‘": "'", "`": "'", "´": "'"})
+# forme elise: "dell'Alonzi", "all'Amico", "D'Alonzi"
+_ELISIONE_RE = re.compile(r"^(?:d|l|dell|all|nell|sull|dall|coll)'(.+)$", re.IGNORECASE)
+
+
+def _norm_token(token):
+    """Token normalizzato per i confronti: apostrofi tipografici resi
+    dritti, punteggiatura ai bordi tolta, minuscolo."""
+    return unicodedata.normalize("NFKC", token).translate(_APOSTROFI).strip(_TOKEN_PUNCT).lower()
+
+
+def _is_short_name_token(token):
+    """Cognome di due lettere ("Re", "Fo", "Hu", "Li"): iniziale
+    maiuscola, solo lettere, non una preposizione della stoplist."""
+    grezzo = token.strip(_TOKEN_PUNCT)
+    return (len(grezzo) == 2 and grezzo.isalpha() and grezzo[:1].isupper()
+            and grezzo.lower() not in FALSE_POSITIVE_STOPWORDS)
+
+
+def _is_surname_like_stopword(token, following=""):
+    """
+    True se una parola della stoplist qui fa da cognome: iniziale
+    maiuscola, è tra quelle che sono anche cognomi e — se è un prefisso
+    di via — l'indirizzo non prosegue ("Mario Piazza in udienza" sì,
+    "Mario Piazza Dante 3" no).
+    """
+    grezzo = token.strip(_TOKEN_PUNCT)
+    pulito = grezzo.lower()
+    if not grezzo[:1].isupper() or pulito not in _STOPWORDS_ANCHE_COGNOMI:
+        return False
+    if pulito in _STREET_PREFIXES and _ADDRESS_CONTINUES_RE.match(following):
+        return False
+    return True
+
+
+def _keeps_name_whole(tokens, indice, following=""):
+    """
+    B1: il token al bordo va tenuto perché è il cognome (o il nome) di
+    un'entità di due parole: toglierlo lascerebbe un solo token.
+    Vale per le parole comuni che sono anche cognomi e per i cognomi di
+    due lettere. Con tre o più token il bordo è boilerplate come prima
+    ("Giulio Castellani Giudice" → "Giulio Castellani").
+    """
+    if len(tokens) != 2:
+        return False
+    token = tokens[indice].group()
+    altro = tokens[1 - indice].group()
+    if not (_is_substantive_token(altro) and altro.strip(_TOKEN_PUNCT)[:1].isupper()):
+        return False
+    if _is_short_name_token(token):
+        return True
+    # le parole comuni si salvano solo in coda: in testa "Giudice Rossi",
+    # "Notaio Verdi" sono quasi sempre ruolo + cognome
+    return indice == 1 and _is_surname_like_stopword(token, following)
+
+
+def _is_name_remainder(text):
+    """
+    B1: ciò che resta di un'entità già in parte oscurata è ancora un
+    pezzo di nome? "Giudice" dopo che "Giuseppe" è stato coperto da
+    un'altra entità è il cognome, non boilerplate: il resto dell'entità
+    ha superato i filtri proprio perché quella parola fa da cognome.
+    """
+    parole = text.split()
+    return bool(parole) and all(
+        _is_short_name_token(t)
+        or (t.strip(_TOKEN_PUNCT)[:1].isupper()
+            and t.strip(_TOKEN_PUNCT).lower() in _STOPWORDS_ANCHE_COGNOMI)
+        for t in parole)
+
+
 def is_false_positive(entity_type, text):
     """
     R-01: True se l'entità rilevata è quasi certamente un falso positivo.
@@ -317,7 +407,12 @@ def is_false_positive(entity_type, text):
         return False
     if len(stripped) < MIN_TOKEN_LEN:
         return True
-    return not any(_is_substantive_token(t) for t in stripped.split())
+    parole = stripped.split()
+    # B1: due o più cognomi corti di fila sono un nome ("Hu Bo")
+    if (entity_type == "PERSON" and len(parole) >= 2
+            and all(_is_short_name_token(t) for t in parole)):
+        return False
+    return not any(_is_substantive_token(t) for t in parole)
 
 
 # R-14: i prefissi di indirizzo restano nell'entità quando sono in
@@ -342,9 +437,15 @@ def trim_ner_span(full_text, start, end):
     Ritorna (start, end) aggiustati, o None se non resta nulla.
     """
     tokens = list(re.finditer(r"\S+", full_text[start:end]))
+    # B1: "Hu Bo" — solo cognomi corti, nessun token "sostanziale"
+    if len(tokens) >= 2 and all(_is_short_name_token(t.group()) for t in tokens):
+        return start + tokens[0].start(), start + tokens[-1].end()
     while tokens and not _is_substantive_token(tokens[0].group()):
         # R-14: "Piazza/Via/..." in testa apre un indirizzo: si tiene
         if _clean_token(tokens[0].group()) in _STREET_PREFIXES:
+            break
+        # B1: "Hu Wei" — il nome di due lettere resta con il cognome
+        if _keeps_name_whole(tokens, 0):
             break
         # R-22: la particella di un cognome composto resta nel nome
         # ("DE LUCA MARIO", "Di Pietro"): toglierla lascerebbe in
@@ -355,6 +456,11 @@ def trim_ner_span(full_text, start, end):
             break
         tokens.pop(0)
     while tokens and not _is_substantive_token(tokens[-1].group()):
+        # B1: "Mario Piazza", "Giuseppe Giudice", "Giovanni Re" — la
+        # parola comune (o di due lettere) qui è il cognome
+        dopo = full_text[start + tokens[-1].end():start + tokens[-1].end() + 24]
+        if _keeps_name_whole(tokens, len(tokens) - 1, dopo):
+            break
         tokens.pop()
     if not tokens:
         return None
@@ -385,21 +491,46 @@ _ECJ_CASE_RE = re.compile(r"\bC\s?[-‑]\s?\d{1,4}\s?/\s?\d{0,4}")
 # R-13: aggiunti i marcatori delle citazioni nazionali — "Cass., n.
 # 12908/2004; Trib. Bari, 25.05.2005" è giurisprudenza, non un luogo
 # da proteggere.
-_CITATION_MARKER_RE = re.compile(
-    r"\b(CGUE|CEDU|Corte\s+giust\w*|in\s+causa|cause\s+riunite"
-    r"|Cass\.|Trib\.|Sez\.\s*Un)", re.IGNORECASE
+#
+# B2: i marcatori sono di due tipi, con regole diverse.
+# - Europei (CGUE, CEDU, "cause riunite", numero di causa): i precedenti
+#   si citano col NOME ("Köbler"), quindi valgono per le persone, in una
+#   finestra di 90 caratteri.
+# - Nazionali ("Cass.", "Trib.", "Sez. Un."): si citano con la sede e la
+#   data ("Trib. Bari, 25.05.2005"), mai col nome di una persona. Valgono
+#   solo per luoghi e date, e solo se il marcatore sta SUBITO PRIMA.
+#   Prima bastava un "Trib." entro 90 caratteri — da una parte o
+#   dall'altra — per lasciare in chiaro il nome di una parte ("Trib.
+#   Trento, R.G. 123/2024 - ricorrente Carla Nerozzi").
+# "in causa" non è più un marcatore: "la chiamata in causa di Giovanni
+# Verdolin" è un atto del processo, non una citazione; le cause europee
+# sono già riconosciute dal numero ("nella causa C-224/01").
+_EU_CITATION_MARKER_RE = re.compile(
+    r"\b(CGUE|CEDU|Corte\s+giust\w*|cause\s+riunite)", re.IGNORECASE
+)
+_NATIONAL_CITATION_MARKER_RE = re.compile(
+    r"\b(Cass\.|Trib\.|Sez\.\s*Un)", re.IGNORECASE
 )
 _VERSUS_RE = re.compile(r"\s[cC]\.\s")
 _CITATION_WINDOW = 90
+_NATIONAL_CITATION_BEFORE = 40
 
 
-def is_case_citation(full_text, start, end):
-    """True se l'entità è (quasi certamente) il nome di un precedente."""
+def is_case_citation(full_text, start, end, entity_type=None):
+    """
+    True se l'entità è (quasi certamente) parte di un precedente citato.
+    `entity_type` "PERSON" esclude i marcatori nazionali (vedi sopra).
+    """
     span = full_text[start:end]
     if _VERSUS_RE.search(span):
         return True  # "Farrell c. Whitty", "FY c. Profi Credit Polska"
     window = full_text[max(0, start - _CITATION_WINDOW):end + _CITATION_WINDOW]
-    return bool(_ECJ_CASE_RE.search(window) or _CITATION_MARKER_RE.search(window))
+    if _ECJ_CASE_RE.search(window) or _EU_CITATION_MARKER_RE.search(window):
+        return True
+    if entity_type == "PERSON":
+        return False
+    prima = full_text[max(0, start - _NATIONAL_CITATION_BEFORE):start]
+    return bool(_NATIONAL_CITATION_MARKER_RE.search(prima))
 
 
 # ============================================================
@@ -478,9 +609,40 @@ _VEHICLE_BEFORE_RE = re.compile(
 )
 
 
-def is_vehicle_description(full_text, start):
-    """True se l'entità è preceduta direttamente da una parola-veicolo."""
-    return bool(_VEHICLE_BEFORE_RE.search(full_text[max(0, start - 25):start]))
+# B2: marche e modelli diffusi. Dopo "autovettura" può venire una marca
+# ("autovettura Fiat Panda") ma anche una persona ("il conducente
+# dell'autovettura Luigi Bianchetti"): un'entità di più parole senza
+# una marca nota è una persona e va oscurata.
+_MARCHE_VEICOLI = {
+    "abarth", "alfa", "romeo", "audi", "bmw", "byd", "chevrolet", "citroen",
+    "citroën", "cupra", "dacia", "daewoo", "daihatsu", "ducati", "ferrari",
+    "fiat", "ford", "honda", "hyundai", "iveco", "jaguar", "jeep", "kawasaki",
+    "kia", "ktm", "lamborghini", "lancia", "land", "rover", "lexus", "maserati",
+    "mazda", "mercedes", "mercedes-benz", "mini", "mitsubishi", "nissan",
+    "opel", "peugeot", "piaggio", "porsche", "renault", "seat", "skoda",
+    "smart", "ssangyong", "subaru", "suzuki", "tesla", "toyota", "vespa",
+    "volkswagen", "volvo", "yamaha",
+    # modelli che il NER scambia più spesso per nomi
+    "panda", "punto", "tipo", "compass", "renegade", "golf", "polo", "clio",
+    "corsa", "fiesta", "focus", "giulia", "giulietta", "stelvio", "ypsilon",
+    "duster", "sandero", "qashqai", "yaris", "ducato", "doblo", "doblò",
+}
+
+
+def is_vehicle_description(full_text, start, end=None):
+    """
+    True se l'entità è marca/modello di un veicolo: segue direttamente
+    una parola-veicolo e — conoscendone la fine — è una parola sola
+    ("il veicolo Punto") oppure contiene una marca nota.
+    """
+    if not _VEHICLE_BEFORE_RE.search(full_text[max(0, start - 25):start]):
+        return False
+    if end is None:
+        return True
+    parole = [t for t in (_clean_token(t) for t in full_text[start:end].split()) if t]
+    if len(parole) <= 1:
+        return True
+    return any(t in _MARCHE_VEICOLI for t in parole)
 
 
 # Parole che precedono un marcatore societario senza essere il nome
@@ -802,6 +964,7 @@ ENTITY_CODE_PREFIXES = {
     "IT_PASSPORT": "PASS",
     "IT_LICENSE_PLATE": "TARGA",
     "IT_BIRTH_DATE": "NASCITA",
+    "IT_ADDRESS": "IND",
     "IT_POLICY_NUMBER": "POLIZZA",
     "IBAN_CODE": "IBAN",
     "CREDIT_CARD": "CARTA",
@@ -1023,23 +1186,52 @@ def apply_redaction_plan(page, piano):
     )
 
 
+def _token_forms(token):
+    """
+    Forme con cui una parola del documento può corrispondere a un termine
+    o a un nome noto: la parola intera, la parte dopo un'elisione
+    ("dell'Amico" → "amico") e le parti di un doppio cognome
+    ("Rossignoli-Bianchetti" → "rossignoli", "bianchetti").
+    Sempre parole intere, mai frammenti.
+    """
+    base = _norm_token(token)
+    if not base:
+        return set()
+    forme = {base}
+    m = _ELISIONE_RE.match(base)
+    if m:
+        forme.add(m.group(1))
+    if "-" in base:
+        forme.update(parte for parte in base.split("-") if parte)
+    return forme
+
+
 def find_custom_term_matches(term, entries):
     """
     Cerca un termine personalizzato come sequenza di PAROLE INTERE
     (case-insensitive, ignorando la punteggiatura ai bordi).
     Ritorna una lista di gruppi di indici parola corrispondenti.
-    Niente più match di sottostringhe dentro altre parole.
+    Niente match di sottostringhe dentro altre parole.
+
+    B4: l'utente si affida ai termini specifici "per certezza", quindi
+    le varianti tipografiche non devono farli fallire in silenzio:
+    - apostrofo dritto e tipografico sono la stessa cosa ("D'Amico"
+      trova "D’AMICO");
+    - trova la forma elisa ("Amico" trova "dell'Amico") e la parte di un
+      doppio cognome ("Rossignoli" trova "Rossignoli-Bianchetti");
+    - la punteggiatura isolata nel testo ("Via Roma, 12 - Milano") non
+      interrompe la sequenza.
     """
-    term_tokens = [_clean_token(t) for t in term.split()]
-    term_tokens = [t for t in term_tokens if t]
+    term_tokens = [t for t in (_norm_token(t) for t in term.split()) if t]
     if not term_tokens:
         return []
-    doc_tokens = [_clean_token(e["text"]) for e in entries]
+    doc = [(i, _token_forms(e["text"])) for i, e in enumerate(entries)]
+    doc = [(i, forme) for i, forme in doc if forme]
     n = len(term_tokens)
     matches = []
-    for i in range(len(doc_tokens) - n + 1):
-        if doc_tokens[i:i + n] == term_tokens:
-            matches.append(list(range(i, i + n)))
+    for k in range(len(doc) - n + 1):
+        if all(term_tokens[j] in doc[k + j][1] for j in range(n)):
+            matches.append([doc[k + j][0] for j in range(n)])
     return matches
 
 
@@ -1098,6 +1290,10 @@ class ItLegalNameRecognizer(EntityRecognizer):
         span = text[start:end]
         tokens = list(re.finditer(r"\S+", span))
         while tokens and _clean_token(tokens[-1].group()) in FALSE_POSITIVE_STOPWORDS:
+            # B1: "sig. Mario Piazza", "avv. Giuseppe Giudice"
+            dopo = text[start + tokens[-1].end():start + tokens[-1].end() + 24]
+            if _keeps_name_whole(tokens, len(tokens) - 1, dopo):
+                break
             tokens.pop()
         if not tokens:
             return None
@@ -1613,10 +1809,25 @@ class ItBirthDateRecognizer(EntityRecognizer):
     restano leggibili, perché quasi sempre servono a capire la vicenda.
     """
 
+    # B3: forme comuni che la prima versione non copriva — "nato a Roma
+    # l'11/08/1975", toponimi con particelle minuscole ("Bassano del
+    # Grappa"), abbreviazioni ("S. Giovanni in Persiceto"), doppio nome
+    # ("Bolzano/Bozen"), sigla della provincia, "nato/a", "n. a", e
+    # l'etichetta dei moduli "Data di nascita:".
+    _LUOGO_INIZIO = r"(?:[A-ZÀ-Ý]\.|[A-ZÀ-Ý][\w'’\-/]*)"
+    _LUOGO_SEGUITO = (
+        r"(?:[A-ZÀ-Ý]\.|[A-ZÀ-Ý][\w'’\-/]*|\([A-Za-z]{2}\)|d['’][A-ZÀ-Ý][\w'’\-]*"
+        r"|(?:di|del|della|dello|dei|degli|delle|in|sul|sulla|al|alla|de|la|lo|le)"
+        r"(?=\s+[A-ZÀ-Ý]))"
+    )
     REGEX = re.compile(
-        r"\b(?i:nat[oaie])"
-        r"(?:\s+(?i:a|in|ad)\s+[A-ZÀ-Ý][\w'’\-]*(?:\s+[A-ZÀ-Ý(][\w'’\-)]*){0,3})?"
-        r"\s*,?\s*(?:(?i:il|in\s+data|in\s+data\s+del|addì|lì)\s+)?"
+        r"(?:\b(?i:nat[oaie])(?:/[aei])?|\b[nN]\.(?=\s+(?:a|in|ad)\s+[A-ZÀ-Ý]))"
+        rf"(?:\s+(?i:a|in|ad)\s+{_LUOGO_INIZIO}(?:\s+{_LUOGO_SEGUITO}){{0,5}})?"
+        r"\s*,?\s*(?:(?i:il|in\s+data(?:\s+del)?|addì|lì)\s+|[lL]['’]\s*)?"
+        rf"({_DATE_FULL_RE.pattern})"
+    )
+    REGEX_ETICHETTA = re.compile(
+        r"\b(?i:data\s+(?:di\s+)?nascita)\s*[:\-–]?\s*"
         rf"({_DATE_FULL_RE.pattern})"
     )
     SCORE = 0.9
@@ -1631,9 +1842,13 @@ class ItBirthDateRecognizer(EntityRecognizer):
     def analyze(self, text, entities, nlp_artifacts=None):
         if entities and "IT_BIRTH_DATE" not in entities:
             return []
-        return [RecognizerResult(entity_type="IT_BIRTH_DATE", start=m.start(1),
-                                 end=m.end(1), score=self.SCORE)
-                for m in self.REGEX.finditer(text)]
+        trovate = {}
+        for regex in (self.REGEX, self.REGEX_ETICHETTA):
+            for m in regex.finditer(text):
+                trovate[(m.start(1), m.end(1))] = None
+        return [RecognizerResult(entity_type="IT_BIRTH_DATE", start=a, end=b,
+                                 score=self.SCORE)
+                for a, b in sorted(trovate)]
 
 
 class ItDateRecognizer(EntityRecognizer):
@@ -1743,6 +1958,53 @@ class ItLocalityRecognizer(EntityRecognizer):
         return out
 
 
+class ItStreetAddressRecognizer(EntityRecognizer):
+    """
+    B5: numero civico e CAP di un indirizzo.
+
+    La casella "Località e indirizzi" oscurava il nome della via e il
+    comune ma lasciava "27/B, 38051": abbastanza, con il resto dell'atto,
+    per ritrovare l'abitazione. Qui si riconoscono il civico che segue
+    un odonimo ("via Giuseppe Verdi n. 27/B", "Piazza Dante 3") e il CAP
+    che segue il civico. L'odonimo deve cominciare con la maiuscola (o
+    con una particella seguita da maiuscola): "il corso di formazione
+    2021" e "così via 3 volte" non sono indirizzi.
+    """
+
+    _STRADA = (r"(?:[Vv]ia|[Vv]iale|[Vv]\.le|[Pp]iazza|[Pp]\.zza|[Pp]iazzale|[Cc]orso"
+               r"|[Cc]\.so|[Ll]argo|[Vv]icolo|[Ss]trada|[Cc]ontrada|[Cc]\.da"
+               r"|[Ll]ocalit[àa]|[Ff]razione|[Tt]raversa"
+               r"|VIA|VIALE|PIAZZA|PIAZZALE|CORSO|LARGO|VICOLO|STRADA|CONTRADA|TRAVERSA)")
+    _ODONIMO = (r"(?:[A-ZÀ-Ý][\w'’\-.]*"
+                r"|(?:di|del|della|dello|dei|degli|delle|de)(?=\s+[A-ZÀ-Ý]))")
+    REGEX = re.compile(
+        rf"\b{_STRADA}\s+{_ODONIMO}(?:\s+{_ODONIMO}){{0,4}}?"
+        r"\s*,?\s*(?:(?i:n\.?|nr\.?|num\.?|civico)\s*)?"
+        r"(?P<civico>\d{1,4}(?:\s?/\s?[A-Za-z0-9]{1,3}|[A-Za-z](?![A-Za-zÀ-ÿ]))?)(?!\d)"
+        r"(?:\s*[,\-–]?\s*(?P<cap>\d{5})(?!\d))?"
+    )
+    SCORE = 0.6
+
+    def __init__(self):
+        super().__init__(supported_entities=["IT_ADDRESS"],
+                         supported_language="it", name="ItStreetAddressRecognizer")
+
+    def load(self):
+        pass
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "IT_ADDRESS" not in entities:
+            return []
+        risultati = []
+        for m in self.REGEX.finditer(text):
+            for gruppo in ("civico", "cap"):
+                if m.group(gruppo):
+                    risultati.append(RecognizerResult(
+                        entity_type="IT_ADDRESS", start=m.start(gruppo),
+                        end=m.end(gruppo), score=self.SCORE))
+        return risultati
+
+
 def build_license_plate_recognizer():
     """Recognizer per targhe di veicoli (entità IT_LICENSE_PLATE)."""
     return ItLicensePlateRecognizer()
@@ -1777,6 +2039,13 @@ def initialize_analyzer():
     registry.add_recognizer(ItDateRecognizer())
     registry.add_recognizer(ItPolicyNumberRecognizer())
     registry.add_recognizer(ItLocalityRecognizer())
+    # B5: numero civico e CAP
+    registry.add_recognizer(ItStreetAddressRecognizer())
+    # B6: il riconoscitore di telefoni predefinito copre US, GB, DE, FR,
+    # IL, IN, CA, BR — non l'Italia: i numeri senza +39 venivano presi
+    # solo se per caso validi in uno di quei Paesi.
+    registry.add_recognizer(PhoneRecognizer(
+        supported_regions=("IT",), supported_language="it"))
 
     analyzer = AnalyzerEngine(
         nlp_engine=nlp_engine,
@@ -2332,12 +2601,12 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
                     continue
                 # R-08: non redigere le citazioni giurisprudenziali
                 if (r.entity_type in NER_ENTITY_TYPES
-                        and is_case_citation(full_text, r.start, r.end)):
+                        and is_case_citation(full_text, r.start, r.end, r.entity_type)):
                     dropped_fp += 1
                     continue
                 # R-14: marca/modello dopo "automezzo/vettura/..." non si redige
                 if (r.entity_type in NER_ENTITY_TYPES
-                        and is_vehicle_description(full_text, r.start)):
+                        and is_vehicle_description(full_text, r.start, r.end)):
                     dropped_fp += 1
                     continue
                 # R-13/R-14: città → LOCATION, società → ORGANIZATION
@@ -2367,11 +2636,27 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
     }
 
 
+def _name_token_ok(pulito):
+    """Token di nome propagabile: almeno tre lettere, fatto di lettere
+    (con eventuali apostrofi o trattini interni), non boilerplate."""
+    lettere = "".join(c for c in pulito if c.isalpha())
+    return (len(lettere) >= MIN_TOKEN_LEN
+            and pulito not in FALSE_POSITIVE_STOPWORDS
+            and all(c.isalpha() or c in "'-" for c in pulito))
+
+
 def collect_person_tokens(analysis):
     """
     R-04: raccoglie i token dei nomi di persona rilevati, per
     propagarli a tutto il documento (es. "Tavernelli" rilevato a
     pagina 1 viene oscurato anche dove il NER lo manca).
+
+    B8: entrano anche i cognomi con apostrofo o trattino ("D'Alonzi",
+    "Rossignoli-Bianchetti"), insieme alle loro parti, così da coprire
+    "Alonzi" e "Rossignoli" scritti da soli.
+    Restano fuori le parole comuni che sono anche cognomi ("Piazza") e
+    i cognomi di due lettere ("Re"): propagati da soli coprirebbero
+    ogni piazza e ogni re dell'atto. Vedi collect_ambiguous_surnames.
     """
     tokens = set()
     full_text = analysis["full_text"]
@@ -2379,15 +2664,61 @@ def collect_person_tokens(analysis):
         if r.entity_type != "PERSON":
             continue
         for token in full_text[r.start:r.end].split():
-            clean = _clean_token(token)
-            if (
-                len(clean) >= MIN_TOKEN_LEN
-                and clean not in FALSE_POSITIVE_STOPWORDS
-                and token[:1].isupper()
-                and clean.isalpha()
-            ):
-                tokens.add(clean)
+            if not token.strip(_TOKEN_PUNCT)[:1].isupper():
+                continue
+            for forma in _token_forms(token):
+                if _name_token_ok(forma):
+                    tokens.add(forma)
     return tokens
+
+
+def collect_ambiguous_surnames(analysis):
+    """
+    B1: cognomi rilevati che NON vengono propagati al resto dell'atto,
+    perché coincidono con una parola comune ("Piazza", "Giudice") o
+    hanno due lettere ("Re"). Dove compaiono col nome vengono oscurati;
+    scritti da soli ("il Piazza") no. L'elenco serve ad avvisare
+    l'utente, che può aggiungerli ai termini specifici.
+    """
+    ambigui = set()
+    full_text = analysis["full_text"]
+    for r in analysis["results"]:
+        if r.entity_type != "PERSON":
+            continue
+        parole = full_text[r.start:r.end].split()
+        if len(parole) < 2:
+            continue
+        for parola in parole:
+            grezzo = parola.strip(_TOKEN_PUNCT)
+            if _is_short_name_token(parola) or (
+                    grezzo[:1].isupper() and grezzo.lower() in _STOPWORDS_ANCHE_COGNOMI):
+                ambigui.add(grezzo)
+    return ambigui
+
+
+def propagation_type(text, known_person_tokens, known_org_tokens):
+    """
+    R-04/R-14: tipo di propagazione per una parola del documento, o None.
+    Solo parole intere con iniziale maiuscola, mai sottostringhe.
+    B8: valgono anche la parte dopo un'elisione ("dell'Alonzi") e le
+    parti di un doppio cognome, purché a loro volta maiuscole.
+    """
+    grezzo = unicodedata.normalize("NFKC", text).translate(_APOSTROFI).strip(_TOKEN_PUNCT)
+    candidati = []
+    if grezzo[:1].isupper():
+        candidati.append(grezzo.lower())
+    m = _ELISIONE_RE.match(grezzo)
+    if m and m.group(1)[:1].isupper():
+        candidati.append(m.group(1).lower())
+    if "-" in grezzo:
+        candidati.extend(p.lower() for p in grezzo.split("-") if p[:1].isupper())
+    for c in candidati:
+        if c in known_org_tokens:
+            return "ORGANIZATION (propagato)"
+    for c in candidati:
+        if c in known_person_tokens:
+            return "PERSON (propagato)"
+    return None
 
 
 def detect_handwriting_on_text_page(page, entries, dpi=300):
@@ -2509,7 +2840,9 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
         # (es. "(C.F." dopo che il codice fiscale è già stato redatto), salta
         remaining_text = " ".join(entries[i]["text"] for i, _r in word_hits)
         if (result.entity_type in NER_ENTITY_TYPES
-                and is_false_positive(result.entity_type, remaining_text)):
+                and is_false_positive(result.entity_type, remaining_text)
+                and not (len(found_text.split()) == 2
+                         and _is_name_remainder(remaining_text))):
             continue
         code = assigner.assign(result.entity_type, found_text) if use_codes else None
         add_redaction_for_hits(page, entries, word_hits, redaction_mode, code, piano)
@@ -2522,14 +2855,8 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
     for idx, entry in enumerate(entries):
         if idx in redacted_word_idx:
             continue
-        clean = _clean_token(entry["text"])
-        if not entry["text"][:1].isupper():
-            continue
-        if clean in known_org_tokens:
-            prop_type = "ORGANIZATION (propagato)"
-        elif clean in known_person_tokens:
-            prop_type = "PERSON (propagato)"
-        else:
+        prop_type = propagation_type(entry["text"], known_person_tokens, known_org_tokens)
+        if prop_type is None:
             continue
         # R-15: nel log/tabella niente punteggiatura appiccicata ("Sartori," → "Sartori")
         display = entry["text"].strip(_TOKEN_PUNCT)
@@ -2896,12 +3223,15 @@ def _ocr_page_words(src_page, dpi, lang, page_num):
         return img, None
 
     words = []
+    scartate = 0
     for i in range(len(ocr_data["text"])):
         word = ocr_data["text"][i].strip()
         try:
             conf = int(ocr_data["conf"][i])
         except (ValueError, TypeError):
             conf = 0
+        if word and conf <= 30 and sum(c.isalpha() for c in word) >= 3:
+            scartate += 1   # B8: parola letta male, non analizzata
         if word and conf > 30:
             words.append({
                 "text": word,
@@ -2911,6 +3241,7 @@ def _ocr_page_words(src_page, dpi, lang, page_num):
                 "h": ocr_data["height"][i],
                 "conf": conf,
             })
+    _ocr_page_words.ultime_scartate = scartate
     return img, words
 
 
@@ -2922,7 +3253,9 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
     del documento. Il dict restituito ha le stesse chiavi di
     analyze_text_page(), per poter riusare i filtri a valle.
     """
+    _ocr_page_words.ultime_scartate = 0
     _, words = _ocr_page_words(src_page, dpi, lang, page_num)
+    ocr_scartate = _ocr_page_words.ultime_scartate
 
     empty = {
         "words": [], "entries": [], "full_text": "", "word_positions": [],
@@ -2930,6 +3263,7 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
         "ocr_failed": words is None,
         # A3: OCR in errore = pagina non analizzata, va oscurata per intero
         "failed": words is None,
+        "ocr_scartate": ocr_scartate,
     }
     if not words:
         return empty
@@ -2987,12 +3321,12 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
                     continue
                 # R-08: citazioni giurisprudenziali
                 if (r.entity_type in NER_ENTITY_TYPES
-                        and is_case_citation(full_text, r.start, r.end)):
+                        and is_case_citation(full_text, r.start, r.end, r.entity_type)):
                     dropped_fp += 1
                     continue
                 # R-14: marca/modello dopo "automezzo/vettura/..."
                 if (r.entity_type in NER_ENTITY_TYPES
-                        and is_vehicle_description(full_text, r.start)):
+                        and is_vehicle_description(full_text, r.start, r.end)):
                     dropped_fp += 1
                     continue
                 # R-13/R-14: città → LOCATION, società → ORGANIZATION
@@ -3030,6 +3364,7 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
         "dropped_fp": dropped_fp,
         "ocr_failed": False,
         "failed": failed,
+        "ocr_scartate": ocr_scartate,
     }
 
 
@@ -3131,17 +3466,13 @@ def apply_scanned_redactions(src_page, out_doc, analysis, custom_terms,
             term = term.strip()
             if not term:
                 continue
-            term_words = term.split()
-            for i in range(len(words) - len(term_words) + 1):
-                match = all(
-                    _clean_token(words[i + j]["text"]) == _clean_token(term_words[j])
-                    for j in range(len(term_words))
-                )
-                if match:
-                    code = assigner.assign("TERMINE PERSONALIZZATO", term) if use_codes else None
-                    draw_redaction(words[i:i + len(term_words)], code)
-                    drawn_idx.update(range(i, i + len(term_words)))
-                    _log_ocr("TERMINE PERSONALIZZATO", term, "100%", code)
+            # B4: stesso cercatore delle pagine testuali (apostrofi,
+            # forme elise, doppi cognomi, punteggiatura isolata)
+            for indici in find_custom_term_matches(term, words):
+                code = assigner.assign("TERMINE PERSONALIZZATO", term) if use_codes else None
+                draw_redaction([words[i] for i in indici], code)
+                drawn_idx.update(indici)
+                _log_ocr("TERMINE PERSONALIZZATO", term, "100%", code)
 
         # 2-3. Entità rilevate (prima deterministiche, poi NER)
         pattern_results = [r for r in results if r.entity_type not in NER_ENTITY_TYPES]
@@ -3157,7 +3488,9 @@ def apply_scanned_redactions(src_page, out_doc, analysis, custom_terms,
                 found_text = full_text[result.start:result.end]
                 remaining_text = " ".join(words[i]["text"] for i in matching_idx)
                 if (result.entity_type in NER_ENTITY_TYPES
-                        and is_false_positive(result.entity_type, remaining_text)):
+                        and is_false_positive(result.entity_type, remaining_text)
+                        and not (len(found_text.split()) == 2
+                                 and _is_name_remainder(remaining_text))):
                     continue
                 code = assigner.assign(result.entity_type, found_text) if use_codes else None
                 draw_redaction([words[i] for i in matching_idx], code)
@@ -3169,14 +3502,8 @@ def apply_scanned_redactions(src_page, out_doc, analysis, custom_terms,
         for idx, w in enumerate(words):
             if idx in drawn_idx:
                 continue
-            clean = _clean_token(w["text"])
-            if not w["text"][:1].isupper():
-                continue
-            if clean in known_org_tokens:
-                prop_type = "ORGANIZATION (propagato)"
-            elif clean in known_person_tokens:
-                prop_type = "PERSON (propagato)"
-            else:
+            prop_type = propagation_type(w["text"], known_person_tokens, known_org_tokens)
+            if prop_type is None:
                 continue
             display = w["text"].strip(_TOKEN_PUNCT)
             code = assigner.assign(prop_type, display) if use_codes else None
@@ -3225,6 +3552,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     pagine_ocr_elenco = []
     pagine_immagini_non_lette = []
     pagine_senza_ocr = []
+    pagine_ocr_incerto = []
+    cognomi_ambigui = set()
     if redaction_mode == "codes" and assigner is None:
         assigner = CodeAssigner()
     elif redaction_mode != "codes":
@@ -3300,6 +3629,9 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             )
 
         known_person_tokens |= collect_person_tokens(analysis)
+        cognomi_ambigui |= collect_ambiguous_surnames(analysis)
+        if analysis.get("ocr_scartate", 0) >= max(5, 0.1 * len(analysis.get("words") or [])):
+            pagine_ocr_incerto.append(page_num)
         org_tokens |= collect_org_tokens(analysis)
         if exclude_magistrates:
             magistrate_tokens |= collect_magistrate_tokens(analysis["full_text"])
@@ -3474,12 +3806,19 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     src_doc.close()
     output_bytes.seek(0)
     mapping = assigner.mapping if assigner else []
+    # B4: un termine specifico che non trova nulla va detto all'utente
+    trovati = {r["Testo"] for r in log if r["Tipo"] == "TERMINE PERSONALIZZATO"}
+    termini_non_trovati = [t.strip() for t in custom_terms
+                           if t.strip() and t.strip() not in trovati]
     avvisi = {
         "pagine_fallite": pagine_fallite,
         "pagine_ocr": pagine_ocr_elenco,
         "pagine_immagini_non_lette": pagine_immagini_non_lette,
         "pagine_senza_ocr": pagine_senza_ocr,
+        "pagine_ocr_incerto": pagine_ocr_incerto,
         "campi_modulo": campi_modulo,
+        "termini_non_trovati": termini_non_trovati,
+        "cognomi_non_propagati": sorted(cognomi_ambigui),
     }
     return EsitoRedazione(output_bytes.getvalue(), log, mapping, avvisi)
 
@@ -3582,8 +3921,13 @@ with st.sidebar:
     st.subheader("🎚️ Soglia di confidenza")
     min_score = st.slider(
         "Sensibilità del rilevamento",
-        min_value=0.1, max_value=1.0, value=0.4, step=0.05,
-        help="Più alto = meno falsi positivi ma rischio di perdere occorrenze.",
+        min_value=0.1, max_value=0.6, value=0.4, step=0.05,
+        help=(
+            "Più alto = meno falsi positivi ma più dati persi. "
+            "Sopra 0,40 non vengono più oscurati i numeri di telefono; "
+            "il massimo è 0,60 perché oltre si perderebbero targhe, codici "
+            "fiscali letti male dall'OCR e, da 0,90, tutti i nomi."
+        ),
     )
 
     st.divider()
@@ -3658,6 +4002,7 @@ entity_map = [
     (use_email, "EMAIL_ADDRESS"),
     (use_phone, "PHONE_NUMBER"),
     (use_location, "LOCATION"),
+    (use_location, "IT_ADDRESS"),   # B5: civico e CAP con "Località e indirizzi"
     (use_date, "DATE_TIME"),
     (use_birth, "IT_BIRTH_DATE"),
     (use_cf, "IT_FISCAL_CODE"),
@@ -3902,6 +4247,24 @@ def messaggi_avvisi(avvisi):
             "Firme, timbri o foto di documenti dentro pagine di testo non passano dall'OCR "
             "in modalità Automatica. Se possono contenere dati, rilancia con "
             "\"Forza OCR su tutto\" (o attiva \"Oscura firme e scritte a mano\")."))
+    if avvisi.get("pagine_ocr_incerto"):
+        messaggi.append(("warning",
+            f"**Lettura OCR incerta alle pagine: {_elenco_pagine(avvisi['pagine_ocr_incerto'])}.** "
+            "Molte parole sono state lette male e non analizzate (scansione sbiadita, "
+            "timbri sovrapposti, scrittura a mano): possono essere rimasti dati in chiaro. "
+            "Controlla quelle pagine o riprova con una risoluzione OCR più alta."))
+    if avvisi.get("termini_non_trovati"):
+        elenco = ", ".join(f"«{t}»" for t in avvisi["termini_non_trovati"])
+        messaggi.append(("warning",
+            f"**Termini specifici non trovati in questo documento: {elenco}.** "
+            "Controlla come sono scritti nel testo (refusi, abbreviazioni, a capo)."))
+    if avvisi.get("cognomi_non_propagati"):
+        elenco = ", ".join(f"«{t}»" for t in avvisi["cognomi_non_propagati"])
+        messaggi.append(("warning",
+            f"**Cognomi oscurati solo accanto al nome: {elenco}.** "
+            "Coincidono con parole comuni o sono molto corti, quindi dove compaiono "
+            "da soli non vengono oscurati automaticamente. Se serve, aggiungili ai "
+            "termini specifici."))
     if avvisi.get("campi_modulo"):
         messaggi.append(("info",
             f"Il PDF era un modulo compilabile ({avvisi['campi_modulo']} campi): i valori "
@@ -4232,6 +4595,8 @@ with st.expander("ℹ️ Informazioni e avvertenze"):
     **Limiti:**
     - L'OCR può perdere parole con scansioni di bassa qualità.
     - Nomi inusuali possono sfuggire — usa sempre i "termini specifici" per certezza.
+    - I cognomi che coincidono con parole comuni ("Piazza", "Giudice", "Corso") o di due lettere ("Re") vengono oscurati accanto al nome, non quando compaiono da soli: l'app li elenca e puoi aggiungerli ai termini specifici.
+    - I termini specifici che non trovano nulla nel documento vengono segnalati.
     - Date disabilitate di default perché spesso rilevanti nei documenti legali.
     - In modalità Automatica le pagine-immagine vengono lette con l'OCR anche se hanno un po' di testo vero a margine (timbro, protocollo). Le immagini più piccole dentro pagine di testo (firme, timbri, foto di documenti) **non** vengono lette: l'app le segnala pagina per pagina; per leggerle usa **"Forza OCR su tutto"**.
     - Lo ZIP "Scarica tutti i PDF" non contiene le tabelle di accoppiamento: si scaricano a parte.

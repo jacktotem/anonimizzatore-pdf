@@ -861,14 +861,13 @@ def test_trim_org_scarta_le_sole_forme_giuridiche():
     assert is_false_positive("ORGANIZATION", residuo) is True
 
 
-def test_trim_org_non_usa_la_stoplist_delle_persone():
-    """'Italia' è in stoplist per le persone ma è parte del nome sociale:
-    il trim generico lo toglierebbe, quello per le organizzazioni no."""
+def test_trim_generico_tiene_una_parola_comune_che_fa_da_cognome():
+    """B1: con due sole parole la parola comune è il cognome ('Italia' è
+    anche un cognome); prima restava solo 'MONDI'."""
     t = "Società MONDI ITALIA SRL"
-    generico = t[slice(*trim_ner_span(t, 0, len(t)))]
-    org = t[slice(*trim_org_span(t, 0, len(t)))]
-    assert generico == "MONDI"          # comportamento del trim persone
-    assert org == "MONDI ITALIA"        # trim organizzazioni: nome intero
+    assert t[slice(*trim_ner_span(t, 0, len(t)))] == "MONDI ITALIA"
+    # il trim per le organizzazioni lo teneva già
+    assert t[slice(*trim_org_span(t, 0, len(t)))] == "MONDI ITALIA"
 
 
 def _org_tokens_da_testo(testo):

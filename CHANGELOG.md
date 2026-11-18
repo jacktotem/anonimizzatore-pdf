@@ -40,6 +40,33 @@ solo ciò che l'analisi ha visto.
 - **A11 — Pulizia finale.** Se la rimozione di metadati, commenti o
   allegati fallisce, il documento non viene prodotto.
 
+- **B1 — Cognomi uguali a parole comuni.** "Mario Piazza", "Giuseppe
+  Giudice", "Anna Corso", "Rosa Italiano", "Giovanni Re", "Hu Wei": il
+  filtro contro i falsi positivi tagliava il cognome e lo lasciava in
+  chiaro. Ora, in un nome di due parole, la parola comune (con
+  l'iniziale maiuscola) o di due lettere resta nel nome. Questi cognomi
+  non vengono propagati da soli al resto dell'atto — coprirebbero ogni
+  "Piazza" e ogni "Giudice" — ma vengono elencati in un avviso.
+- **B2 — Nomi vicino a una citazione.** Bastava un "Trib.", un "Cass."
+  o un "in causa" entro 90 caratteri perché il nome di una parte non
+  venisse oscurato ("Trib. Trento, R.G. 123/2024 - ricorrente …", "la
+  chiamata in causa di …"). I marcatori nazionali ora valgono solo per
+  luoghi e date subito dopo il marcatore; per le persone restano i soli
+  precedenti europei. Dopo "autovettura" si escludono solo marche e
+  modelli noti, non più il nome del conducente.
+- **B3 — Date di nascita.** Riconosciute anche "nato a Roma
+  l'11/08/1975", i toponimi con particelle o abbreviazioni ("Bassano
+  del Grappa", "S. Giovanni in Persiceto", "Bolzano/Bozen"), "nato/a",
+  "n. a" e l'etichetta "Data di nascita:".
+- **B4 — Termini specifici.** Un apostrofo tipografico, una forma elisa
+  ("dell'Amico"), un doppio cognome o un trattino isolato bastavano a
+  non trovare il termine, senza alcun avviso. Ora queste varianti
+  vengono trovate e i termini senza riscontro sono segnalati.
+- **B5 — Numero civico e CAP.** Con "Località e indirizzi" vengono
+  oscurati anche il civico dopo il nome della via e il CAP che lo segue.
+- **B6 — Telefoni italiani.** Il riconoscitore predefinito non copriva
+  l'Italia: alcuni cellulari senza +39 restavano in chiaro.
+
 ### Fixed
 - **C1 — Parole delle righe vicine cancellate.** Con interlinea
   stretta, o con caratteri dal riquadro alto, la redazione cancellava
@@ -65,6 +92,11 @@ solo ciò che l'analisi ha visto.
 - **A9 — Nome del file.** Se il nome del file originale contiene un
   dato oscurato nel documento ("Ricorso Rossi c. Bianchi.pdf"), il PDF
   viene scaricato con un nome neutro.
+- **Soglia di confidenza** limitata a 0,60: oltre si spegnevano intere
+  categorie (targhe, codici fiscali letti male, da 0,90 tutti i nomi).
+- **Propagazione dei nomi** estesa ai cognomi con apostrofo o trattino
+  e alle forme elise ("dell'Alonzi"); le pagine con molte parole OCR
+  lette male vengono segnalate.
 - La tabella di accoppiamento in CSV neutralizza le celle che un
   foglio di calcolo eseguirebbe come formula.
 - `redact_pdf` restituisce anche gli avvisi (`pdf, log, mapping,
