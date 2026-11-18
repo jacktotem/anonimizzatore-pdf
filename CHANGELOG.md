@@ -82,8 +82,9 @@ e riavviarla da solo).
   Il testo ora viene rimosso con una fascia centrale stretta e il
   riquadro nero si disegna a parte, a piena altezza. Il testo ruotato
   o in diagonale (timbri, filigrane, pagine scritte di lato) viene
-  rimosso con l'intero riquadro, e dopo la rimozione un controllo
-  verifica che sotto nessun riquadro sia rimasto un carattere.
+  rimosso con l'intero riquadro. Dopo la rimozione un controllo
+  cerca i caratteri rimasti sotto i riquadri e li ripassa; se del
+  testo resta comunque, la pagina esce nera e viene segnalata.
 - **C3 —** La rimozione di JavaScript azzerava qualunque oggetto il
   cui testo contenesse "/JS", per esempio un carattere chiamato
   `JSABCD+Helvetica`. Ora guarda le chiavi dell'oggetto.

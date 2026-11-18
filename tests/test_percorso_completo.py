@@ -459,6 +459,31 @@ def test_filigrana_diagonale_rimossa_per_intero():
     assert not _nei_byte(out, COGNOME)
 
 
+def test_testo_che_non_si_riesce_a_togliere_pagina_nera(monkeypatch):
+    """Se dopo il secondo passaggio resta testo sotto un riquadro, la
+    pagina non esce con il dato estraibile: esce nera ed e' segnalata."""
+    vero = fitz.Page.apply_redactions
+
+    def non_toglie_il_testo(self, *args, **kwargs):
+        if kwargs.get("text") == app._REDACT_TEXT_REMOVE:
+            for annot in list(self.annots() or []):
+                self.delete_annot(annot)
+            return False
+        return vero(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Page, "apply_redactions", non_toglie_il_testo)
+    doc, _ = _pagina()
+    doc.new_page().insert_text(
+        (72, 90), "Atto di citazione. Le parti hanno concluso come da verbale di udienza del giorno.",
+        fontsize=12)
+    esito, out = _esegui(doc)
+    assert esito.avvisi["pagine_fallite"] == [1]
+    assert esito.avvisi["pagine_ocr"] == []
+    assert len(out) == 2
+    assert COGNOME not in out[0].get_text() and not _nei_byte(out, COGNOME)
+    assert "verbale di udienza" in out[1].get_text()      # le altre pagine restano
+
+
 def test_nessun_testo_resta_sotto_un_riquadro():
     """Rete di sicurezza: anche se la parola è marcata orizzontale per
     errore, sotto la copertura non resta testo estraibile."""

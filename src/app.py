@@ -124,6 +124,11 @@ class DocumentoNonElaborabile(Exception):
     l'utente e non contiene mai testo del documento."""
 
 
+class TestoResiduo(Exception):
+    """Dopo la redazione resta testo estraibile sotto un riquadro: la
+    pagina non può uscire così e viene oscurata per intero."""
+
+
 class EsitoRedazione(NamedTuple):
     """Risultato di redact_pdf. Si spacchetta per posizione:
     pdf, log, mapping, avvisi = redact_pdf(...)."""
@@ -1301,7 +1306,9 @@ def apply_redaction_plan(page, piano):
     resta ancora del testo (un carattere il cui centro cade nel riquadro),
     quella copertura viene ripassata con l'intero rettangolo. Sotto un
     riquadro nero non deve restare testo estraibile, qualunque sia il
-    motivo per cui la fascia non è bastata.
+    motivo per cui la fascia non è bastata. Se ne resta anche dopo il
+    secondo passaggio la funzione solleva TestoResiduo: chi chiama
+    oscura l'intera pagina (come per le pagine non analizzate, A3).
     """
     if not piano:
         return
@@ -1324,27 +1331,29 @@ def apply_redaction_plan(page, piano):
         for c in piano
     ])
 
-    # Si guardano i singoli caratteri, non le parole: dopo una rimozione
-    # le parole ai lati del vuoto possono essere riunite in un'unica
-    # "parola" il cui centro cade proprio nel riquadro.
-    try:
-        centri = []
-        for blocco in page.get_text("rawdict").get("blocks", []):
-            for riga in blocco.get("lines", []):
-                for tratto in riga.get("spans", []):
-                    for car in tratto.get("chars", []):
-                        if car.get("c", "").strip():
-                            x0, y0, x1, y1 = car["bbox"]
-                            centri.append(fitz.Point((x0 + x1) / 2, (y0 + y1) / 2))
-    except Exception:
-        centri = None
-    if centri is None:
-        ancora = [_zona(c) for c in piano]          # nel dubbio, tutte
-    else:
-        ancora = [_zona(c) for c in piano
-                  if any(_zona(c).contains(p) for p in centri)]
+    def _con_testo(zone):
+        """Le zone in cui cade ancora il centro di un carattere.
+        Si guardano i singoli caratteri, non le parole: dopo una
+        rimozione le parole ai lati del vuoto possono essere riunite in
+        un'unica "parola" il cui centro cade proprio nel riquadro."""
+        try:
+            centri = []
+            for blocco in page.get_text("rawdict").get("blocks", []):
+                for riga in blocco.get("lines", []):
+                    for tratto in riga.get("spans", []):
+                        for car in tratto.get("chars", []):
+                            if car.get("c", "").strip():
+                                x0, y0, x1, y1 = car["bbox"]
+                                centri.append(fitz.Point((x0 + x1) / 2, (y0 + y1) / 2))
+        except Exception:
+            return list(zone)                       # nel dubbio, tutte
+        return [z for z in zone if any(z.contains(p) for p in centri)]
+
+    ancora = _con_testo([_zona(c) for c in piano])
     if ancora:
         _rimuovi_testo(ancora)
+        if _con_testo(ancora):
+            raise TestoResiduo("testo estraibile rimasto sotto un riquadro")
     for c in piano:
         _add_cover_annot(page, c)
     page.apply_redactions(
@@ -3870,10 +3879,10 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         plan = page_plans[page_index]
         progress_bar.progress(0.5 + (page_index + 1) / (total_pages * 2))
 
-        if plan["failed"]:
-            # A3: pagina non analizzata (errore del motore o dell'OCR).
-            # Non esce in chiaro: al suo posto una pagina nera della
-            # stessa misura, riportata nel report e tra gli avvisi.
+        def _pagina_nera():
+            # A3: la pagina non esce in chiaro: al suo posto una pagina
+            # nera della stessa misura, riportata nel report e tra gli
+            # avvisi.
             restore_crop(src_page, plan["ritaglio"])
             nera = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
             nera.draw_rect(nera.rect, color=(0, 0, 0), fill=(0, 0, 0))
@@ -3888,6 +3897,10 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             if redaction_mode == "codes":
                 riga["Codice"] = "—"
             log.append(riga)
+
+        if plan["failed"]:
+            # pagina non analizzata (errore del motore o dell'OCR)
+            _pagina_nera()
             continue
 
         if plan["use_ocr"]:
@@ -3920,14 +3933,24 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             out_doc.insert_pdf(src_doc, from_page=page_index, to_page=page_index,
                                links=False, annots=False)
             new_page = out_doc[-1]
-            apply_text_redactions(
-                new_page, plan["analysis"], custom_terms,
-                known_person_tokens, log, page_num,
-                redaction_mode=redaction_mode,
-                assigner=assigner,
-                known_org_tokens=org_tokens,
-                redact_handwriting=redact_handwriting,
-            )
+            try:
+                apply_text_redactions(
+                    new_page, plan["analysis"], custom_terms,
+                    known_person_tokens, log, page_num,
+                    redaction_mode=redaction_mode,
+                    assigner=assigner,
+                    known_org_tokens=org_tokens,
+                    redact_handwriting=redact_handwriting,
+                )
+            except TestoResiduo:
+                # Sotto un riquadro è rimasto testo che non si riesce a
+                # togliere: la pagina copiata si butta e al suo posto va
+                # una pagina nera.
+                logger.error("Pagina %d: testo residuo sotto un riquadro", page_num)
+                new_page = None
+                out_doc.delete_page(-1)
+                _pagina_nera()
+                continue
             # A5: la pagina torna ritagliata come l'originale
             restore_crop(new_page, plan["ritaglio"])
             pages_text += 1
