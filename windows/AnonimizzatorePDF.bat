@@ -29,6 +29,11 @@ echo Per chiudere l'app: chiudere questa finestra (CTRL+C o X)
 echo.
 
 call venv\Scripts\activate.bat
+rem Al primo avvio Streamlit si fermerebbe a chiedere un indirizzo email
+rem (che poi invia ai propri server): non serve. Le versioni che non
+rem conoscono l'opzione la ignorano.
+set STREAMLIT_SERVER_SHOW_EMAIL_PROMPT=false
+
 rem NET-01: solo questo computer. Senza --server.address Streamlit ascolta
 rem su tutte le interfacce e l'app e' raggiungibile dalla rete locale.
 python -m streamlit run app.py --server.headless false --server.address 127.0.0.1 --browser.gatherUsageStats false

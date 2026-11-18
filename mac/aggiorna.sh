@@ -2,77 +2,105 @@
 # ============================================================
 # Anonimizzatore PDF - Aggiornamento all'ultima versione (macOS)
 #
-# Scarica l'ultima versione dal repository e aggiorna le librerie
-# SOLO se sono cambiate. Tipicamente ci mette pochi secondi.
+# Porta questa copia all'ULTIMA VERSIONE RILASCIATA e allinea le
+# librerie. Tipicamente ci mette pochi secondi.
 #
 # Uso:  ./aggiorna.sh
 # ============================================================
 
-set -e
+set -eo pipefail
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
-cd "$REPO_ROOT"
+# Tutto dentro una funzione: bash legge il file man mano che lo esegue,
+# e l'aggiornamento sostituisce proprio questo file.
+main() {
+    local SCRIPT_DIR REPO_ROOT
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+    REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+    cd "$REPO_ROOT"
 
-echo ""
-echo "============================================"
-echo " Anonimizzatore PDF - Aggiornamento"
-echo "============================================"
-echo ""
-
-if [[ ! -d .git ]]; then
-    echo "❌ Questa copia non è stata scaricata con git clone, quindi non"
-    echo "   può aggiornarsi da sola. Scarica l'ultima versione da:"
     echo ""
-    echo "   https://github.com/jacktotem/anonimizzatore-pdf/releases/latest"
+    echo "============================================"
+    echo " Anonimizzatore PDF - Aggiornamento"
+    echo "============================================"
     echo ""
-    exit 1
-fi
 
-if [[ ! -f "$SCRIPT_DIR/venv/bin/activate" ]]; then
-    echo "❌ App non ancora installata. Lancia prima installa.sh"
-    exit 1
-fi
+    if [[ ! -d .git ]]; then
+        echo "❌ Questa copia non è stata scaricata con git clone, quindi non"
+        echo "   può aggiornarsi da sola. Scarica l'ultima versione da:"
+        echo ""
+        echo "   https://github.com/jacktotem/anonimizzatore-pdf/releases/latest"
+        echo ""
+        echo "   poi lancia installa.sh nella nuova cartella."
+        exit 1
+    fi
 
-# NET-01: l'icona sul Desktop ha il comando di avvio scritto dentro e
-# viene ricreata solo da installa.sh. Le copie installate prima della
-# 2.1.7 vanno corrette qui, altrimenti l'app continuerebbe ad ascoltare
-# su tutta la rete. Sta PRIMA del controllo di versione: così vale
-# anche quando non c'è nulla da scaricare.
-LAUNCHER="$HOME/Desktop/Anonimizzatore PDF.app/Contents/MacOS/launch"
-if [[ -f "$LAUNCHER" ]] && ! grep -q -- "--server.address" "$LAUNCHER"; then
-    sed -i '' 's/--server.headless false/--server.headless false --server.address 127.0.0.1/' "$LAUNCHER"
-    echo "🔒 Icona sul Desktop corretta: l'app ora risponde solo da questo computer."
+    if [[ ! -f "$SCRIPT_DIR/venv/bin/activate" ]]; then
+        echo "❌ App non ancora installata. Lancia prima installa.sh"
+        exit 1
+    fi
+
+    # --- 1. Programma: ultima versione RILASCIATA, non l'ultimo commit ---
+    # Prima si scaricava il ramo main: qualunque modifica appena unita,
+    # anche non ancora rilasciata né provata, arrivava subito sui Mac.
+    echo "📥 Controllo l'ultima versione rilasciata..."
+    git fetch -q --tags origin
+
+    local ULTIMA ATTUALE META
+    ULTIMA="$(git tag -l 'v[0-9]*' --sort=-v:refname | sed -n 1p)"
+    if [[ -z "$ULTIMA" ]]; then
+        echo "❌ Non trovo versioni rilasciate. Controlla la connessione e riprova."
+        exit 1
+    fi
+    ATTUALE="$(git rev-parse HEAD)"
+    META="$(git rev-parse "$ULTIMA^{commit}")"
+
+    if [[ "$ATTUALE" == "$META" ]]; then
+        echo "✅ Il programma è già all'ultima versione ($ULTIMA)."
+    else
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "❌ In questa cartella ci sono file del programma modificati a mano:"
+            git status --short --untracked-files=no | sed 's/^/     /'
+            echo "   Per non sovrascriverli mi fermo. Rimetti a posto quei file"
+            echo "   (o scarica una copia nuova) e rilancia."
+            exit 1
+        fi
+        echo "📦 Passo alla versione $ULTIMA..."
+        git checkout -q --detach "$ULTIMA"
+    fi
+
+    # --- 2. Librerie: allineate a requirements.txt ---
+    # Si confronta con l'impronta dell'ultima installazione RIUSCITA, non
+    # con lo stato di git: se un aggiornamento precedente si è interrotto
+    # a metà, qui viene ripreso invece di dire "sei già aggiornato".
+    local REQ MARCA
+    REQ="$(shasum -a 256 "$REPO_ROOT/requirements.txt" | awk '{print $1}')"
+    MARCA="$SCRIPT_DIR/venv/.requirements-installati"
+    if [[ ! -f "$MARCA" || "$(cat "$MARCA")" != "$REQ" ]]; then
+        echo "🔧 Allineo le librerie (può volerci qualche minuto)..."
+        # shellcheck disable=SC1091
+        source "$SCRIPT_DIR/venv/bin/activate"
+        pip install --only-binary=:all: -r "$REPO_ROOT/requirements.txt"
+        python -c "import streamlit, pyarrow, fitz, pytesseract, spacy; from presidio_analyzer import AnalyzerEngine"
+        echo "$REQ" > "$MARCA"
+        echo "✓ Librerie aggiornate."
+    else
+        echo "✓ Librerie già allineate: nessun download necessario."
+    fi
+
+    # --- 3. Icona sul Desktop ---
+    # Ha il comando di avvio scritto dentro: va rigenerata, altrimenti
+    # resterebbe quello della versione con cui è stata creata. Solo se
+    # l'icona c'è già: chi l'ha tolta non se la ritrova.
+    if [[ -d "$HOME/Desktop/Anonimizzatore PDF.app" && -f "$SCRIPT_DIR/crea-icona.sh" ]]; then
+        bash "$SCRIPT_DIR/crea-icona.sh" > /dev/null
+        echo "✓ Icona sul Desktop aggiornata."
+    fi
+
+    local VERSIONE
+    VERSIONE="$(grep -m1 '^__version__' "$SCRIPT_DIR/app.py" | sed 's/[^0-9.]*//g')"
     echo ""
-fi
+    echo "✅ Fatto: versione ${VERSIONE:-più recente}."
+    echo "   Se l'app era aperta, chiudila e rilanciala."
+}
 
-echo "📥 Controllo l'ultima versione..."
-git fetch origin main
-
-LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/main)
-
-if [[ "$LOCAL" == "$REMOTE" ]]; then
-    echo "✅ Sei già all'ultima versione."
-    exit 0
-fi
-
-REQ_BEFORE=$(shasum "$REPO_ROOT/requirements.txt" | awk '{print $1}')
-
-echo "📦 Scarico gli aggiornamenti..."
-git pull --ff-only origin main
-
-REQ_AFTER=$(shasum "$REPO_ROOT/requirements.txt" | awk '{print $1}')
-
-if [[ "$REQ_BEFORE" != "$REQ_AFTER" ]]; then
-    echo "🔧 Le librerie sono cambiate: le aggiorno (può volerci qualche minuto)..."
-    source "$SCRIPT_DIR/venv/bin/activate"
-    pip install -r "$REPO_ROOT/requirements.txt"
-else
-    echo "✓ Librerie invariate: nessun download necessario."
-fi
-
-VERSIONE=$(grep -m1 '__version__' "$REPO_ROOT/src/app.py" | sed 's/[^0-9.]*//g')
-echo ""
-echo "✅ Aggiornamento completato: ora sei alla versione ${VERSIONE:-più recente}."
-echo "   Se l'app era aperta, chiudila e rilanciala con avvia.sh"
+main "$@"; exit $?

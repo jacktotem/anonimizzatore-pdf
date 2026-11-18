@@ -7,6 +7,182 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-18
+
+Correzioni dell'audit del 17 novembre 2026: il PDF prodotto contiene
+solo ciò che l'analisi ha visto.
+
+**Prima di aggiornare un server Windows** fermare l'attività
+"AnonimizzatorePDF Server": l'elenco delle librerie cambia e il setup
+ricostruisce l'ambiente dell'app (dalla 2.2.0 il setup prova a fermarla
+e riavviarla da solo).
+
+### Security
+- **A1 — Campi modulo.** I valori digitati in un PDF compilabile
+  restavano nel file, estraibili, mentre il riepilogo li dichiarava
+  ripuliti: lo svuotamento non aveva effetto. Ora i campi diventano
+  testo della pagina prima dell'analisi e vengono oscurati come il
+  resto; nomi dei campi, suggerimenti, dati XFA e firme digitali non
+  vengono copiati. Il file prodotto non è più compilabile.
+- **A2 — Scansioni con testo digitale a margine.** Una pagina-immagine
+  con una riga di testo vero (timbro di deposito, protocollo) veniva
+  trattata come testuale e usciva interamente in chiaro. In modalità
+  Automatica una grande immagine con quasi nessuna parola sopra ora
+  passa dall'OCR, qualunque sia la quantità di testo sulla pagina.
+- **A3 — Errore su una pagina.** Se l'analisi o l'OCR di una pagina
+  andava in errore, la pagina finiva nel PDF senza oscuramenti e
+  l'esito restava "completato". Ora esce nera, compare nel report e in
+  un avviso che resta a schermo.
+- **A4 — Livelli nascosti.** Il contenuto di un livello spento non
+  veniva analizzato ma nel PDF prodotto diventava visibile. Ora i
+  livelli vengono resi visibili prima dell'analisi.
+- **A5 — Pagine ritagliate.** Il testo fuori dal ritaglio restava nel
+  file. Ora si analizza l'intera pagina fisica; la pagina prodotta
+  resta ritagliata come l'originale. Se una pagina ritagliata non si
+  riesce a estendere, l'app lo segnala con un errore invece di tacere.
+- **A6 — Link.** Restavano nelle pagine senza redazioni (per esempio
+  un `mailto:` con nome e cognome). Non vengono più copiati.
+- **A8 — ZIP senza la chiave.** "Scarica tutto" metteva nello stesso
+  archivio i PDF pseudonimizzati e le tabelle di accoppiamento. Ora
+  contiene solo i PDF.
+- **A11 — Pulizia finale.** Se la rimozione di metadati, commenti o
+  allegati fallisce, il documento non viene prodotto.
+
+- **B1 — Cognomi uguali a parole comuni.** "Mario Piazza", "Giuseppe
+  Giudice", "Anna Corso", "Rosa Italiano", "Giovanni Re", "Hu Wei": il
+  filtro contro i falsi positivi tagliava il cognome e lo lasciava in
+  chiaro. Ora, in un nome di due parole, la parola comune (con
+  l'iniziale maiuscola) o di due lettere resta nel nome. Questi cognomi
+  non vengono propagati da soli al resto dell'atto — coprirebbero ogni
+  "Piazza" e ogni "Giudice" — ma vengono elencati in un avviso.
+- **B2 — Nomi vicino a una citazione.** Bastava un "Trib.", un "Cass."
+  o un "in causa" entro 90 caratteri perché il nome di una parte non
+  venisse oscurato ("Trib. Trento, R.G. 123/2024 - ricorrente …", "la
+  chiamata in causa di …"). I marcatori nazionali ora valgono solo per
+  luoghi e date subito dopo il marcatore; per le persone restano i soli
+  precedenti europei. Dopo "autovettura" si escludono solo marche e
+  modelli noti, non più il nome del conducente.
+- **B3 — Date di nascita.** Riconosciute anche "nato a Roma
+  l'11/08/1975", i toponimi con particelle o abbreviazioni ("Bassano
+  del Grappa", "S. Giovanni in Persiceto", "Bolzano/Bozen"), "nato/a",
+  "n. a" e l'etichetta "Data di nascita:".
+- **B4 — Termini specifici.** Un apostrofo tipografico, una forma elisa
+  ("dell'Amico"), un doppio cognome o un trattino isolato bastavano a
+  non trovare il termine, senza alcun avviso. Ora queste varianti
+  vengono trovate e i termini senza riscontro sono segnalati.
+- **B5 — Numero civico e CAP.** Con "Località e indirizzi" vengono
+  oscurati anche il civico dopo il nome della via e il CAP che lo segue.
+- **B6 — Telefoni italiani.** Il riconoscitore predefinito non copriva
+  l'Italia: alcuni cellulari senza +39 restavano in chiaro.
+
+### Fixed
+- **C1 — Parole delle righe vicine cancellate.** Con interlinea
+  stretta, o con caratteri dal riquadro alto, la redazione cancellava
+  anche parole non sensibili sopra e sotto, lasciando spazi bianchi.
+  Il testo ora viene rimosso con una fascia centrale stretta e il
+  riquadro nero si disegna a parte, a piena altezza. Il testo ruotato
+  o in diagonale (timbri, filigrane, pagine scritte di lato) viene
+  rimosso con l'intero riquadro. Dopo la rimozione un controllo
+  cerca i caratteri rimasti sotto i riquadri e li ripassa; se del
+  testo resta comunque, la pagina esce nera e viene segnalata.
+- **C3 —** La rimozione di JavaScript azzerava qualunque oggetto il
+  cui testo contenesse "/JS", per esempio un carattere chiamato
+  `JSABCD+Helvetica`. Ora guarda le chiavi dell'oggetto.
+- **PDF protetti o illeggibili:** messaggio chiaro al posto della
+  traccia d'errore; gli altri documenti del lotto vengono elaborati.
+- **Risultati non aggiornati:** cambiando categorie, termini o
+  modalità dopo un'elaborazione restavano a schermo i download del
+  giro precedente. Ora vengono invalidati.
+- Due file con lo stesso nome nello stesso lotto non danno più errore.
+
+### Changed
+- **Avvisi che restano a schermo.** Pagine non analizzate, scansioni
+  non lette e immagini non passate dall'OCR sono elencate per numero
+  di pagina accanto al download, e non spariscono al primo clic.
+  L'avviso sulle immagini scatta dal 2% della pagina (prima dal 5%).
+- **A9 — Nome del file.** Se il nome del file originale contiene un
+  dato oscurato nel documento ("Ricorso Rossi c. Bianchi.pdf"), il PDF
+  viene scaricato con un nome neutro.
+- **Soglia di confidenza** limitata a 0,60: oltre si spegnevano intere
+  categorie (targhe, codici fiscali letti male, da 0,90 tutti i nomi).
+- **Propagazione dei nomi** estesa ai cognomi con apostrofo o trattino
+  e alle forme elise ("dell'Alonzi"); le pagine con molte parole OCR
+  lette male vengono segnalate.
+- La tabella di accoppiamento in CSV neutralizza le celle che un
+  foglio di calcolo eseguirebbe come formula.
+- `redact_pdf` restituisce anche gli avvisi (`pdf, log, mapping,
+  avvisi`) e solleva `DocumentoNonElaborabile` per i PDF che non si
+  possono trattare in modo sicuro.
+- PyMuPDF 2.x non è supportato (dopo una redazione sposta il testo
+  che segue sulla riga): `requirements.txt` lo esclude e, se l'app si
+  trova comunque a girare con una versione fuori dall'intervallo
+  provato, lo dice con un avviso in cima alla pagina.
+- PyMuPDF minimo 1.24.5. **Windows:** l'elenco delle librerie cambia,
+  quindi l'aggiornamento ricostruisce l'ambiente; in modalità server
+  fermare prima l'attività "AnonimizzatorePDF Server".
+
+### Fixed (installazione e rilascio)
+- **F1 — Mac: librerie fuori dai limiti.** `installa.sh` aveva un
+  proprio elenco di librerie, senza i limiti di `requirements.txt`: un
+  Mac appena installato riceveva PyMuPDF 2.x e Pillow 13, versioni che
+  il progetto esclude. Ora legge `requirements.txt`, come Windows e
+  `aggiorna.sh`. Il modello linguistico si scarica dal rilascio
+  ufficiale con impronta SHA256 verificata, come su Windows.
+- **F2 — Mac: "installazione completata" anche in caso di errore.** Lo
+  stato dei comandi era quello di `tee`: un `pip` o un download falliti
+  non fermavano nulla. Ora lo script si ferma al primo errore con un
+  messaggio chiaro, e verifica che le librerie lavorino insieme e che
+  Tesseract abbia l'italiano.
+- **Mac: `aggiorna.sh`** porta all'ultima versione *rilasciata* (prima
+  scaricava il ramo `main`, quindi anche modifiche non ancora
+  rilasciate), riprende un aggiornamento delle librerie interrotto a
+  metà e rigenera l'icona sul Desktop.
+- **Mac: icona sul Desktop** funziona anche se la cartella ha un
+  apostrofo nel nome, trova Tesseract anche se Homebrew non è nel PATH
+  e riporta la versione vera. Si può ricreare con `crea-icona.sh`.
+- **Richiesta dell'email al primo avvio:** Streamlit si fermava in
+  console a chiedere un indirizzo, che avrebbe inviato ai propri
+  server. Disattivata negli avvii di Windows e Mac.
+- **Build dell'installer:** compila sempre dal tag indicato e non
+  sostituisce più l'exe di una release già pubblicata. La mail di
+  notifica aspetta che l'installer sia allegato e non parte per le
+  pre-release.
+- `windows/README-UTENTE.txt` riportava "scrivi a: [inserire email]".
+
+### Changed (rete, file temporanei, documentazione)
+- **Nessuna chiamata di rete durante l'analisi.** Il riconoscitore di
+  email scaricava, al primo uso, l'elenco dei suffissi di dominio da
+  `publicsuffix.org`. Ora usa la copia inclusa nella libreria, senza
+  rete e senza cache. L'unica connessione resta la verifica degli
+  aggiornamenti, su richiesta.
+- **File temporanei dell'OCR** in una cartella dedicata all'app; quelli
+  rimasti da un'esecuzione interrotta vengono cancellati al riavvio.
+- **OCR senza italiano:** se Tesseract non ha la lingua italiana, l'app
+  lo segnala accanto al risultato invece di procedere in silenzio.
+- **Server Windows:** il setup ferma l'attività prima di ricostruire
+  l'ambiente e la riavvia alla fine; il collegamento punta a
+  `127.0.0.1`. Il README del server spiega i rischi dell'account SYSTEM,
+  delle cartelle scrivibili e della doppia icona, e corregge l'ordine
+  dei passaggi di aggiornamento.
+- **Documentazione allineata:** privacy (unica connessione, file
+  temporanei), FAQ ("il testo può essere recuperato?", più documenti),
+  versioni supportate, architettura, guida per chi contribuisce (test,
+  solo dati di fantasia), guida Mac (aggiornamento) e guida al rilascio,
+  riscritta sulla procedura reale.
+
+### Added
+- **Test automatici in CI** (`.github/workflows/test.yml`): a ogni PR
+  la suite completa con la versione minima e con l'ultima di PyMuPDF,
+  il confronto delle tre copie di `app.py` e i controlli di rilascio
+  (ora anche versione coerente tra `app.py`, installer e changelog).
+- **Prova di installazione su Mac** in CI: esegue `installa.sh`,
+  verifica le librerie, avvia l'app e fa girare la suite nel suo
+  ambiente. La prova Windows ora esegue la suite nell'ambiente
+  installato e parte anche quando cambiano l'app o le librerie.
+- Test dell'intero percorso (`tests/test_percorso_completo.py`): dal
+  PDF d'ingresso al PDF prodotto, cercando i dati nel testo, nei byte
+  e nell'immagine. Test dell'interfaccia (`tests/test_interfaccia.py`).
+
 ### Changed
 - Altri due esempi nei commenti, nei test e in questo changelog (una
   targa e un numero di telefono) sostituiti con dati di fantasia.

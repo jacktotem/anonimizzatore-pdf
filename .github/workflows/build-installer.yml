@@ -33,23 +33,27 @@ jobs:
       - name: Determina il tag
         id: tag
         shell: bash
+        # I valori arrivano come variabili d'ambiente, non scritti dentro
+        # lo script: un tag costruito apposta non può diventare un comando.
+        env:
+          TAG_RELEASE: ${{ github.event.release.tag_name }}
+          TAG_MANUALE: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-          else
-            TAG="${{ inputs.tag }}"
+          TAG="${TAG_RELEASE:-$TAG_MANUALE}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag non valido: deve avere la forma v1.2.3"
+            exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      # Per l'evento release compiliamo dal tag; per il dispatch
-      # manuale compiliamo dal branch corrente (es. main): serve per
-      # release già pubblicate il cui tag non contiene ancora questo
-      # workflow o il guard #ifndef in installer.iss.
+      # Si compila SEMPRE dal tag indicato. Prima l'avvio manuale compilava
+      # dal ramo corrente: un exe chiamato "v2.1.4" poteva contenere il
+      # codice di main di oggi.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event_name == 'release' && steps.tag.outputs.tag || github.ref }}
+          ref: ${{ steps.tag.outputs.tag }}
 
       - name: "Sincronizza app.py (fonte di verità: src/)"
         shell: bash
@@ -57,10 +61,13 @@ jobs:
 
       - name: Compila installer con Inno Setup
         shell: pwsh
+        env:
+          VERSIONE: ${{ steps.tag.outputs.version }}
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-            /DMyAppVersion=${{ steps.tag.outputs.version }} `
+            "/DMyAppVersion=$env:VERSIONE" `
             windows\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Compilazione dell'installer fallita" }
           Get-ChildItem windows\installer
 
       # DEF-02: pubblichiamo lo SHA256 accanto all'exe così chi scarica
@@ -68,8 +75,10 @@ jobs:
       # quarantena antivirus e per la segnalazione dei falsi positivi).
       - name: Calcola SHA256 dell'installer
         shell: pwsh
+        env:
+          VERSIONE: ${{ steps.tag.outputs.version }}
         run: |
-          $name = "AnonimizzatorePDF-Setup-v${{ steps.tag.outputs.version }}.exe"
+          $name = "AnonimizzatorePDF-Setup-v$env:VERSIONE.exe"
           $exe = "windows/installer/$name"
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
           "$hash  $name" | Set-Content -NoNewline "$exe.sha256"
@@ -79,12 +88,16 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSIONE: ${{ steps.tag.outputs.version }}
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          NAME="AnonimizzatorePDF-Setup-v${{ steps.tag.outputs.version }}.exe"
+          NAME="AnonimizzatorePDF-Setup-v$VERSIONE.exe"
           EXE="windows/installer/$NAME"
           ls -la "$EXE" "$EXE.sha256"
-          gh release upload "$TAG" "$EXE" "$EXE.sha256" --clobber
+          # Senza --clobber: l'installer di una release già pubblicata non
+          # si sostituisce. Se esiste già, il caricamento fallisce e
+          # l'exe pubblicato (con la sua impronta) resta quello.
+          gh release upload "$TAG" "$EXE" "$EXE.sha256"
 
           # Aggiunge l'hash alle note della release (se non già presente)
           HASH=$(cut -d' ' -f1 "$EXE.sha256")

@@ -30,6 +30,11 @@ on:
   pull_request:
     paths:
       - "windows/**"
+      # l'app e le sue librerie: una modifica che tocca solo questi file
+      # prima non faceva partire nessuna prova di installazione
+      - "src/app.py"
+      - "requirements.txt"
+      - "tests/**"
       - ".github/workflows/test-installazione-windows.yml"
 
 permissions:
@@ -49,7 +54,7 @@ jobs:
       PY_EXE: C:\Program Files\Python312\python.exe
       APP_DIR: C:\Program Files\AnonimizzatorePDF
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: "Sincronizza app.py (fonte di verità: src/)"
         shell: bash
@@ -227,6 +232,23 @@ jobs:
           }
           Write-Host "Scenario ${{ matrix.scenario }}: OK"
 
+      # Il setup controlla che le librerie si importino. Qui si usa davvero
+      # l'app installata: la suite completa (redazione di PDF, OCR con il
+      # Tesseract appena installato, interfaccia) gira nel suo ambiente.
+      # Un guasto come quello della 2.1.5 — librerie che si importano ma
+      # non funzionano insieme — si ferma qui e non dall'utente.
+      - name: L'app installata funziona (suite di test nel suo ambiente)
+        if: matrix.scenario == 'pulito'
+        shell: pwsh
+        run: |
+          $py = Join-Path $env:APP_DIR "venv\Scripts\python.exe"
+          & $py -m pip freeze | Select-String -Pattern '^(pymupdf|pillow|streamlit|numpy|pandas|pyarrow|spacy|presidio)' -CaseSensitive:$false
+          & $py -m pip install --quiet "pytest>=8.0,<9.0"
+          if ($LASTEXITCODE -ne 0) { throw "pytest non si installa nell'ambiente dell'app" }
+          $env:PYTHONUTF8 = "1"
+          & $py -m pytest -q -rs
+          if ($LASTEXITCODE -ne 0) { throw "La suite di test fallisce nell'ambiente installato" }
+
       - name: Raccogli i log
         if: always()
         shell: pwsh
@@ -239,7 +261,7 @@ jobs:
 
       - name: Allega i log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: log-${{ matrix.scenario }}
           path: log-raccolti/

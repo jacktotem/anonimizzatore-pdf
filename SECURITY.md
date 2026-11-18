@@ -4,8 +4,8 @@
 
 | Versione | Supportata |
 |----------|------------|
-| 1.x      | ✅         |
-| < 1.0    | ❌         |
+| 2.x (ultima versione rilasciata) | ✅ |
+| 1.x      | ❌         |
 
 ## Segnalare una vulnerabilità
 
@@ -41,9 +41,10 @@ I ricercatori che segnalano responsabilmente le vulnerabilità saranno ringrazia
 L'app processa **documenti legali sensibili**. Cose da sapere:
 
 1. **Tutto è locale** — i PDF non vengono mai inviati a server esterni
-2. **Niente persistenza** — i documenti non vengono salvati su disco se non come output volontario
-3. **Niente telemetria** — Streamlit usage stats è disabilitato esplicitamente
-4. **Verifica sempre** — l'AI non è infallibile, controlla il PDF finale prima dell'invio
+2. **Niente persistenza** — i documenti restano in memoria; solo l'OCR usa file temporanei, cancellati a fine pagina (dettagli in `docs/PRIVACY-GDPR.md`)
+3. **Niente telemetria** — le statistiche d'uso di Streamlit sono disattivate negli avvii forniti
+4. **Solo in locale** — l'app ascolta su `127.0.0.1`, non è raggiungibile dalla rete
+5. **Verifica sempre** — il riconoscimento automatico non è infallibile, controlla il PDF finale prima dell'invio
 
 ### Dipendenze
 

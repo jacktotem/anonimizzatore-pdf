@@ -19,7 +19,10 @@
 streamlit>=1.37.0,<2.0.0
 
 # Manipolazione PDF
-pymupdf>=1.24.0,<2.0.0
+# >= 1.24.5: prima manca ciò che serve alla redazione in due passate
+# (rimozione del testo con una fascia stretta, riquadro a piena altezza)
+# e all'appiattimento dei moduli compilabili. Con la 1.24.2 i test falliscono.
+pymupdf>=1.24.5,<2.0.0
 
 # NLP e riconoscimento entità
 # NOTA: presidio-anonymizer NON serve (la redazione la fa PyMuPDF)

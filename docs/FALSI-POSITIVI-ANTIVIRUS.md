@@ -20,8 +20,8 @@ Ogni download resta comunque **verificabile**: il codice sorgente è tutto in qu
    ```
    Il valore deve coincidere con quello pubblicato nella pagina della release (file `.sha256` e sezione "Verifica integrità"). Se non coincide, **non eseguire il file** e riscaricalo.
 2. **Avviso SmartScreen** ("PC protetto da Windows"): *Ulteriori informazioni* → *Esegui comunque*.
-3. **File rimosso/quarantenato**: *Sicurezza di Windows* → *Protezione da virus e minacce* → *Cronologia protezione* → seleziona la rilevazione → *Azioni* → *Ripristina* (o *Consenti nel dispositivo*).
-4. In ambienti gestiti (studio con IT): chiedete all'IT di aggiungere un'esclusione o di distribuire l'app dal server condiviso (`windows/server/`), così nessuno deve scaricare l'exe.
+3. **File rimosso/quarantenato**: *Sicurezza di Windows* → *Protezione da virus e minacce* → *Cronologia protezione* → seleziona la rilevazione → *Azioni* → *Ripristina*. Ripristina il singolo file solo dopo aver verificato l'impronta al punto 1.
+4. In ambienti gestiti (studio con IT): chiedete all'IT di distribuire l'app dal server condiviso (`windows/server/`), così nessuno deve scaricare l'exe. Evitate le esclusioni su intere cartelle: lasciano senza controllo tutto ciò che contengono.
 
 ## Per il maintainer: segnalare il falso positivo a Microsoft
 

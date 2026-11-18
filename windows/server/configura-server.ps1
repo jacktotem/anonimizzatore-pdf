@@ -131,7 +131,7 @@ if ($healthy) {
 $ShortcutPath = "$env:PUBLIC\Desktop\Anonimizzatore PDF.url"
 @"
 [InternetShortcut]
-URL=http://localhost:$Port
+URL=http://127.0.0.1:$Port
 IconFile=%SystemRoot%\System32\SHELL32.dll
 IconIndex=48
 "@ | Set-Content -Path $ShortcutPath -Encoding ASCII

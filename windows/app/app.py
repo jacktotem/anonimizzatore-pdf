@@ -3,8 +3,8 @@ Anonimizzatore PDF
 Basato su Microsoft Presidio + PyMuPDF + Tesseract OCR
 Anonimizzazione locale di documenti legali italiani (testo + scansioni).
 
-Versione: 1.1.1
 Licenza: GNU AGPL v3.0
+(la versione è in __version__, più sotto)
 """
 
 import streamlit as st
@@ -14,9 +14,13 @@ import os
 import re
 import sys
 import logging
+import tempfile
+import time
+import unicodedata
 import zipfile
 from io import BytesIO, StringIO
 from collections import Counter
+from typing import NamedTuple
 from presidio_analyzer import (
     AnalyzerEngine,
     RecognizerRegistry,
@@ -26,8 +30,9 @@ from presidio_analyzer import (
     RecognizerResult,
 )
 from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_analyzer.predefined_recognizers import PhoneRecognizer
 
-__version__ = "2.1.7"
+__version__ = "2.2.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -35,6 +40,113 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger("anonimizzatore-pdf")
+
+
+# ============================================================
+# NIENTE RETE E NIENTE RESIDUI SU DISCO DURANTE L'ANALISI (D5)
+# ============================================================
+
+def _disable_suffix_list_download():
+    """
+    Il riconoscitore di email di Presidio usa tldextract, che al primo
+    uso scarica l'elenco dei suffissi di dominio da publicsuffix.org e lo
+    salva in ~/.cache. Non esce alcun dato del documento, ma l'app
+    promette di non fare chiamate di rete durante l'analisi: qui si usa
+    la copia dell'elenco inclusa nella libreria, senza rete e senza cache.
+    """
+    try:
+        import tldextract
+        tldextract.extract = tldextract.TLDExtract(cache_dir=None, suffix_list_urls=())
+        return True
+    except Exception as e:
+        logger.warning("Impossibile disattivare il download di tldextract: %s",
+                       type(e).__name__)
+        return False
+
+
+def _use_private_temp_dir(max_age_seconds=3600):
+    """
+    Tesseract lavora su file: ogni pagina letta con l'OCR passa, per
+    qualche istante, da un file temporaneo. Qui quei file finiscono in
+    una cartella dedicata all'app (riservata all'utente dove il sistema
+    lo consente) e quelli rimasti da un'esecuzione interrotta vengono
+    cancellati al riavvio. Si cancellano solo i file più vecchi di
+    un'ora: in modalità server un'altra sessione può essere a metà di
+    un OCR.
+    """
+    try:
+        utente = os.environ.get("USERNAME") or os.environ.get("USER") or "utente"
+        utente = re.sub(r"[^A-Za-z0-9_-]", "_", utente)
+        cartella = os.path.join(tempfile.gettempdir(), f"anonimizzatore-pdf-{utente}")
+        if os.path.basename(os.path.normpath(tempfile.gettempdir())).startswith("anonimizzatore-pdf-"):
+            cartella = tempfile.gettempdir()        # già impostata in un giro precedente
+        os.makedirs(cartella, mode=0o700, exist_ok=True)
+        adesso = time.time()
+        for nome in os.listdir(cartella):
+            percorso = os.path.join(cartella, nome)
+            try:
+                if os.path.isfile(percorso) and adesso - os.path.getmtime(percorso) > max_age_seconds:
+                    os.remove(percorso)
+            except OSError:
+                pass
+        tempfile.tempdir = cartella
+        return cartella
+    except Exception as e:
+        logger.warning("Cartella temporanea dedicata non disponibile: %s", type(e).__name__)
+        return None
+
+
+_disable_suffix_list_download()
+_use_private_temp_dir()
+
+
+# PyMuPDF 2.x non è supportato (requirements.txt lo esclude): dopo una
+# rimozione sposta a sinistra il testo che segue sulla riga, che finisce
+# sotto il riquadro. Con la rete di sicurezza di apply_redaction_plan
+# nessun dato resta estraibile, ma si perdono parole vicine. L'installer
+# Mac, fino alla 2.1.7, poteva installarlo: l'app lo dice chiaramente.
+PYMUPDF_VERSION = getattr(fitz, "VersionBind", "0")
+
+
+def pymupdf_supported(version=None):
+    """True se la versione di PyMuPDF è tra quelle provate (1.24.5 - 1.x)."""
+    try:
+        parti = [int(x) for x in re.findall(r"\d+", version or PYMUPDF_VERSION)[:3]]
+        parti += [0] * (3 - len(parti))
+        return (1, 24, 5) <= tuple(parti) < (2, 0, 0)
+    except Exception:
+        return False
+
+
+class DocumentoNonElaborabile(Exception):
+    """Il PDF non si può elaborare in modo sicuro (protetto da password,
+    illeggibile, pulizia finale non riuscita). Il messaggio è pensato per
+    l'utente e non contiene mai testo del documento."""
+
+
+class TestoResiduo(Exception):
+    """Dopo la redazione resta testo estraibile sotto un riquadro: la
+    pagina non può uscire così e viene oscurata per intero."""
+
+
+class EsitoRedazione(NamedTuple):
+    """Risultato di redact_pdf. Si spacchetta per posizione:
+    pdf, log, mapping, avvisi = redact_pdf(...)."""
+    pdf: bytes
+    log: list
+    mapping: list
+    # Tutto ciò che l'utente deve sapere prima di fidarsi del file:
+    #   pagine_fallite            analisi o OCR in errore → oscurate per intero
+    #   pagine_ocr                pagine lette con l'OCR e ricostruite come immagine
+    #   pagine_immagini_non_lette pagine testuali con immagini non passate all'OCR
+    #   pagine_senza_ocr          scansioni non lette (Tesseract assente o "Mai OCR")
+    #   campi_modulo              campi compilabili trasformati in testo
+    #   pagine_ocr_incerto        pagine OCR con molte parole lette male e scartate
+    #   termini_non_trovati       termini specifici senza alcun riscontro
+    #   cognomi_non_propagati     cognomi oscurati solo accanto al nome
+    #   ocr_senza_italiano        OCR eseguito senza la lingua italiana
+    #   pagine_ritaglio_non_analizzato  pagine ritagliate non estese al foglio intero
+    avvisi: dict
 
 
 # ============================================================
@@ -267,6 +379,91 @@ def _is_substantive_token(token):
     return True
 
 
+# B1: parole della stoplist che sono anche cognomi italiani diffusi.
+# "Mario Piazza", "Giuseppe Giudice", "Anna Corso", "Rosa Italiano":
+# tagliare il bordo dell'entità lasciava in chiaro il cognome (e, non
+# essendo propagato, lo lasciava in chiaro in tutto l'atto).
+_STOPWORDS_ANCHE_COGNOMI = {
+    "piazza", "corso", "strada", "largo", "giudice", "corte", "camera",
+    "consiglio", "italiano", "italia", "signore", "causa", "comune",
+    "civile", "generale", "capitale", "garante", "popolo", "giustizia",
+    "notaio", "merito", "lavoro", "stato", "vero",
+}
+# dopo un prefisso di via, l'indirizzo prosegue: "Piazza Dante 3",
+# "Corso Italia 12", "Piazza delle Donne Lavoratrici"
+_ADDRESS_CONTINUES_RE = re.compile(
+    r"\s*,?\s*(?:(?:di|del|della|dello|dei|degli|delle)\s+)?(?:[A-ZÀ-Ý]|\d)")
+_APOSTROFI = str.maketrans({"’": "'", "‘": "'", "`": "'", "´": "'"})
+# forme elise: "dell'Alonzi", "all'Amico", "D'Alonzi"
+_ELISIONE_RE = re.compile(r"^(?:d|l|dell|all|nell|sull|dall|coll)'(.+)$", re.IGNORECASE)
+
+
+def _norm_token(token):
+    """Token normalizzato per i confronti: apostrofi tipografici resi
+    dritti, punteggiatura ai bordi tolta, minuscolo."""
+    return unicodedata.normalize("NFKC", token).translate(_APOSTROFI).strip(_TOKEN_PUNCT).lower()
+
+
+def _is_short_name_token(token):
+    """Cognome di due lettere ("Re", "Fo", "Hu", "Li"): iniziale
+    maiuscola, solo lettere, non una preposizione della stoplist."""
+    grezzo = token.strip(_TOKEN_PUNCT)
+    return (len(grezzo) == 2 and grezzo.isalpha() and grezzo[:1].isupper()
+            and grezzo.lower() not in FALSE_POSITIVE_STOPWORDS)
+
+
+def _is_surname_like_stopword(token, following=""):
+    """
+    True se una parola della stoplist qui fa da cognome: iniziale
+    maiuscola, è tra quelle che sono anche cognomi e — se è un prefisso
+    di via — l'indirizzo non prosegue ("Mario Piazza in udienza" sì,
+    "Mario Piazza Dante 3" no).
+    """
+    grezzo = token.strip(_TOKEN_PUNCT)
+    pulito = grezzo.lower()
+    if not grezzo[:1].isupper() or pulito not in _STOPWORDS_ANCHE_COGNOMI:
+        return False
+    if pulito in _STREET_PREFIXES and _ADDRESS_CONTINUES_RE.match(following):
+        return False
+    return True
+
+
+def _keeps_name_whole(tokens, indice, following=""):
+    """
+    B1: il token al bordo va tenuto perché è il cognome (o il nome) di
+    un'entità di due parole: toglierlo lascerebbe un solo token.
+    Vale per le parole comuni che sono anche cognomi e per i cognomi di
+    due lettere. Con tre o più token il bordo è boilerplate come prima
+    ("Giulio Castellani Giudice" → "Giulio Castellani").
+    """
+    if len(tokens) != 2:
+        return False
+    token = tokens[indice].group()
+    altro = tokens[1 - indice].group()
+    if not (_is_substantive_token(altro) and altro.strip(_TOKEN_PUNCT)[:1].isupper()):
+        return False
+    if _is_short_name_token(token):
+        return True
+    # le parole comuni si salvano solo in coda: in testa "Giudice Rossi",
+    # "Notaio Verdi" sono quasi sempre ruolo + cognome
+    return indice == 1 and _is_surname_like_stopword(token, following)
+
+
+def _is_name_remainder(text):
+    """
+    B1: ciò che resta di un'entità già in parte oscurata è ancora un
+    pezzo di nome? "Giudice" dopo che "Giuseppe" è stato coperto da
+    un'altra entità è il cognome, non boilerplate: il resto dell'entità
+    ha superato i filtri proprio perché quella parola fa da cognome.
+    """
+    parole = text.split()
+    return bool(parole) and all(
+        _is_short_name_token(t)
+        or (t.strip(_TOKEN_PUNCT)[:1].isupper()
+            and t.strip(_TOKEN_PUNCT).lower() in _STOPWORDS_ANCHE_COGNOMI)
+        for t in parole)
+
+
 def is_false_positive(entity_type, text):
     """
     R-01: True se l'entità rilevata è quasi certamente un falso positivo.
@@ -295,7 +492,12 @@ def is_false_positive(entity_type, text):
         return False
     if len(stripped) < MIN_TOKEN_LEN:
         return True
-    return not any(_is_substantive_token(t) for t in stripped.split())
+    parole = stripped.split()
+    # B1: due o più cognomi corti di fila sono un nome ("Hu Bo")
+    if (entity_type == "PERSON" and len(parole) >= 2
+            and all(_is_short_name_token(t) for t in parole)):
+        return False
+    return not any(_is_substantive_token(t) for t in parole)
 
 
 # R-14: i prefissi di indirizzo restano nell'entità quando sono in
@@ -320,9 +522,15 @@ def trim_ner_span(full_text, start, end):
     Ritorna (start, end) aggiustati, o None se non resta nulla.
     """
     tokens = list(re.finditer(r"\S+", full_text[start:end]))
+    # B1: "Hu Bo" — solo cognomi corti, nessun token "sostanziale"
+    if len(tokens) >= 2 and all(_is_short_name_token(t.group()) for t in tokens):
+        return start + tokens[0].start(), start + tokens[-1].end()
     while tokens and not _is_substantive_token(tokens[0].group()):
         # R-14: "Piazza/Via/..." in testa apre un indirizzo: si tiene
         if _clean_token(tokens[0].group()) in _STREET_PREFIXES:
+            break
+        # B1: "Hu Wei" — il nome di due lettere resta con il cognome
+        if _keeps_name_whole(tokens, 0):
             break
         # R-22: la particella di un cognome composto resta nel nome
         # ("DE LUCA MARIO", "Di Pietro"): toglierla lascerebbe in
@@ -333,6 +541,11 @@ def trim_ner_span(full_text, start, end):
             break
         tokens.pop(0)
     while tokens and not _is_substantive_token(tokens[-1].group()):
+        # B1: "Mario Piazza", "Giuseppe Giudice", "Giovanni Re" — la
+        # parola comune (o di due lettere) qui è il cognome
+        dopo = full_text[start + tokens[-1].end():start + tokens[-1].end() + 24]
+        if _keeps_name_whole(tokens, len(tokens) - 1, dopo):
+            break
         tokens.pop()
     if not tokens:
         return None
@@ -363,21 +576,46 @@ _ECJ_CASE_RE = re.compile(r"\bC\s?[-‑]\s?\d{1,4}\s?/\s?\d{0,4}")
 # R-13: aggiunti i marcatori delle citazioni nazionali — "Cass., n.
 # 12908/2004; Trib. Bari, 25.05.2005" è giurisprudenza, non un luogo
 # da proteggere.
-_CITATION_MARKER_RE = re.compile(
-    r"\b(CGUE|CEDU|Corte\s+giust\w*|in\s+causa|cause\s+riunite"
-    r"|Cass\.|Trib\.|Sez\.\s*Un)", re.IGNORECASE
+#
+# B2: i marcatori sono di due tipi, con regole diverse.
+# - Europei (CGUE, CEDU, "cause riunite", numero di causa): i precedenti
+#   si citano col NOME ("Köbler"), quindi valgono per le persone, in una
+#   finestra di 90 caratteri.
+# - Nazionali ("Cass.", "Trib.", "Sez. Un."): si citano con la sede e la
+#   data ("Trib. Bari, 25.05.2005"), mai col nome di una persona. Valgono
+#   solo per luoghi e date, e solo se il marcatore sta SUBITO PRIMA.
+#   Prima bastava un "Trib." entro 90 caratteri — da una parte o
+#   dall'altra — per lasciare in chiaro il nome di una parte ("Trib.
+#   Trento, R.G. 123/2024 - ricorrente Carla Nerozzi").
+# "in causa" non è più un marcatore: "la chiamata in causa di Giovanni
+# Verdolin" è un atto del processo, non una citazione; le cause europee
+# sono già riconosciute dal numero ("nella causa C-224/01").
+_EU_CITATION_MARKER_RE = re.compile(
+    r"\b(CGUE|CEDU|Corte\s+giust\w*|cause\s+riunite)", re.IGNORECASE
+)
+_NATIONAL_CITATION_MARKER_RE = re.compile(
+    r"\b(Cass\.|Trib\.|Sez\.\s*Un)", re.IGNORECASE
 )
 _VERSUS_RE = re.compile(r"\s[cC]\.\s")
 _CITATION_WINDOW = 90
+_NATIONAL_CITATION_BEFORE = 40
 
 
-def is_case_citation(full_text, start, end):
-    """True se l'entità è (quasi certamente) il nome di un precedente."""
+def is_case_citation(full_text, start, end, entity_type=None):
+    """
+    True se l'entità è (quasi certamente) parte di un precedente citato.
+    `entity_type` "PERSON" esclude i marcatori nazionali (vedi sopra).
+    """
     span = full_text[start:end]
     if _VERSUS_RE.search(span):
         return True  # "Farrell c. Whitty", "FY c. Profi Credit Polska"
     window = full_text[max(0, start - _CITATION_WINDOW):end + _CITATION_WINDOW]
-    return bool(_ECJ_CASE_RE.search(window) or _CITATION_MARKER_RE.search(window))
+    if _ECJ_CASE_RE.search(window) or _EU_CITATION_MARKER_RE.search(window):
+        return True
+    if entity_type == "PERSON":
+        return False
+    prima = full_text[max(0, start - _NATIONAL_CITATION_BEFORE):start]
+    return bool(_NATIONAL_CITATION_MARKER_RE.search(prima))
 
 
 # ============================================================
@@ -456,9 +694,40 @@ _VEHICLE_BEFORE_RE = re.compile(
 )
 
 
-def is_vehicle_description(full_text, start):
-    """True se l'entità è preceduta direttamente da una parola-veicolo."""
-    return bool(_VEHICLE_BEFORE_RE.search(full_text[max(0, start - 25):start]))
+# B2: marche e modelli diffusi. Dopo "autovettura" può venire una marca
+# ("autovettura Fiat Panda") ma anche una persona ("il conducente
+# dell'autovettura Luigi Bianchetti"): un'entità di più parole senza
+# una marca nota è una persona e va oscurata.
+_MARCHE_VEICOLI = {
+    "abarth", "alfa", "romeo", "audi", "bmw", "byd", "chevrolet", "citroen",
+    "citroën", "cupra", "dacia", "daewoo", "daihatsu", "ducati", "ferrari",
+    "fiat", "ford", "honda", "hyundai", "iveco", "jaguar", "jeep", "kawasaki",
+    "kia", "ktm", "lamborghini", "lancia", "land", "rover", "lexus", "maserati",
+    "mazda", "mercedes", "mercedes-benz", "mini", "mitsubishi", "nissan",
+    "opel", "peugeot", "piaggio", "porsche", "renault", "seat", "skoda",
+    "smart", "ssangyong", "subaru", "suzuki", "tesla", "toyota", "vespa",
+    "volkswagen", "volvo", "yamaha",
+    # modelli che il NER scambia più spesso per nomi
+    "panda", "punto", "tipo", "compass", "renegade", "golf", "polo", "clio",
+    "corsa", "fiesta", "focus", "giulia", "giulietta", "stelvio", "ypsilon",
+    "duster", "sandero", "qashqai", "yaris", "ducato", "doblo", "doblò",
+}
+
+
+def is_vehicle_description(full_text, start, end=None):
+    """
+    True se l'entità è marca/modello di un veicolo: segue direttamente
+    una parola-veicolo e — conoscendone la fine — è una parola sola
+    ("il veicolo Punto") oppure contiene una marca nota.
+    """
+    if not _VEHICLE_BEFORE_RE.search(full_text[max(0, start - 25):start]):
+        return False
+    if end is None:
+        return True
+    parole = [t for t in (_clean_token(t) for t in full_text[start:end].split()) if t]
+    if len(parole) <= 1:
+        return True
+    return any(t in _MARCHE_VEICOLI for t in parole)
 
 
 # Parole che precedono un marcatore societario senza essere il nome
@@ -615,6 +884,7 @@ def build_word_map(page):
     words = page.get_text("words")
     # Ordine di lettura: blocco, riga, parola
     words.sort(key=lambda w: (w[5], w[6], w[7]))
+    righe = _text_lines_with_direction(page)
     full_text = ""
     entries = []
     for w in words:
@@ -625,14 +895,52 @@ def build_word_map(page):
             full_text += " "
         start = len(full_text)
         full_text += token
+        rect = fitz.Rect(w[0], w[1], w[2], w[3])
         entries.append({
             "start": start,
             "end": len(full_text),
-            "rect": fitz.Rect(w[0], w[1], w[2], w[3]),
+            "rect": rect,
             "text": token,
             "line": (w[5], w[6]),  # (blocco, riga) — per raggruppare i codici
+            # C1: la rimozione "a fascia" vale solo per il testo orizzontale
+            "horizontal": _is_horizontal_word(rect, token, righe),
         })
     return full_text, entries
+
+
+def _text_lines_with_direction(page):
+    """Righe di testo della pagina come (rettangolo, direzione)."""
+    righe = []
+    try:
+        for blocco in page.get_text("dict").get("blocks", []):
+            for riga in blocco.get("lines", []):
+                righe.append((fitz.Rect(riga["bbox"]), riga.get("dir", (1, 0))))
+    except Exception as e:
+        logger.warning("Direzione delle righe non disponibile: %s", type(e).__name__)
+    return righe
+
+
+def _is_horizontal_word(rect, text, righe):
+    """
+    True solo se la parola è scritta in orizzontale: la riga che la
+    contiene ha direzione orizzontale E la forma del rettangolo è quella
+    di una parola stesa (non più alta che larga). Nel dubbio False: per
+    il testo ruotato — timbri verticali a margine ("Firmato Da: ..."),
+    filigrane diagonali — la fascia centrale attraverserebbe solo le
+    lettere di mezzo, lasciando estraibili le altre.
+    """
+    if len(text) > 2 and rect.width < rect.height * 0.6:
+        return False
+    centro = fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+    scelta = None
+    for bbox, direzione in righe:
+        if bbox.contains(centro):
+            area = abs(bbox.width * bbox.height)
+            if scelta is None or area < scelta[0]:
+                scelta = (area, direzione)
+    if scelta is None:
+        return False
+    return abs(scelta[1][1]) < 0.02
 
 
 def rects_for_span(entries, start, end):
@@ -657,6 +965,26 @@ def shrink_redact_rect(rect):
     v = min(1.0, rect.height * 0.15)
     h = min(0.3, rect.width * 0.05)
     return fitz.Rect(rect.x0 + h, rect.y0 + v, rect.x1 - h, rect.y1 - v)
+
+
+def text_removal_rect(rect):
+    """
+    C1: fascia centrale della parola, usata SOLO per rimuovere il testo.
+
+    Con interlinea stretta, o con caratteri dal riquadro alto, i riquadri
+    delle parole si sovrappongono a quelli delle righe vicine per più dei
+    2 punti che shrink_redact_rect toglie: apply_redactions cancellava
+    così anche parole non sensibili delle righe sopra e sotto, lasciando
+    spazi bianchi. Tutti i caratteri della parola attraversano la fascia
+    centrale (il loro riquadro va dall'ascendente al discendente del
+    carattere), quindi vengono rimossi comunque; quelli delle righe
+    vicine non la toccano. Il riquadro nero si disegna a parte, a piena
+    altezza (vedi apply_redaction_plan).
+    """
+    h = min(0.3, rect.width * 0.05)
+    centro = (rect.y0 + rect.y1) / 2
+    mezza = max(0.5, rect.height * 0.15)
+    return fitz.Rect(rect.x0 + h, centro - mezza, rect.x1 - h, centro + mezza)
 
 
 # Token "nome proprio": iniziale maiuscola + almeno un altro carattere
@@ -760,6 +1088,7 @@ ENTITY_CODE_PREFIXES = {
     "IT_PASSPORT": "PASS",
     "IT_LICENSE_PLATE": "TARGA",
     "IT_BIRTH_DATE": "NASCITA",
+    "IT_ADDRESS": "IND",
     "IT_POLICY_NUMBER": "POLIZZA",
     "IBAN_CODE": "IBAN",
     "CREDIT_CARD": "CARTA",
@@ -887,37 +1216,170 @@ def _fit_fontsize(text, rect):
     return max(4, size)
 
 
-def add_redaction_for_hits(page, entries, word_hits, mode, code=None):
+def add_redaction_for_hits(page, entries, word_hits, mode, code=None, piano=None):
     """
-    Aggiunge le redact-annotation per le parole di un'occorrenza.
+    Prepara la redazione delle parole di un'occorrenza.
 
     - mode "blackout": rettangolo nero per parola (comportamento storico).
     - mode "codes": il testo viene rimosso e sostituito dal codice
       "[XXX-nn]" sul primo segmento di riga; gli eventuali segmenti
       successivi (entità che va a capo) restano vuoti.
+
+    Con `piano` (lista) le coperture vengono solo annotate lì: le applica
+    apply_redaction_plan in due passate, rimozione del testo con una
+    fascia stretta e poi riquadri a piena altezza (C1). Senza `piano`
+    la redazione viene aggiunta subito alla pagina, come un tempo.
     """
+    def orizzontale(idx):
+        return 0 <= idx < len(entries) and entries[idx].get("horizontal", True)
+
+    coperture = []
     if mode != "codes":
-        for _idx, rect in word_hits:
-            page.add_redact_annot(shrink_redact_rect(rect), fill=(0, 0, 0))
+        for idx, rect in word_hits:
+            coperture.append({"rect": rect, "fill": (0, 0, 0),
+                              "fascia": orizzontale(idx)})
+    else:
+        label = f"[{code}]"
+        for gi, group in enumerate(group_hits_by_line(entries, word_hits)):
+            union = fitz.Rect()
+            for _idx, rect in group:
+                union |= rect
+            coperture.append({
+                "rect": union, "fill": (1, 1, 1),
+                "text": label if gi == 0 else "", "label": label,
+                "fascia": all(orizzontale(idx) for idx, _r in group),
+            })
+    if piano is not None:
+        piano.extend(coperture)
+        return
+    for c in coperture:
+        _add_cover_annot(page, c)
+
+
+def _add_cover_annot(page, copertura):
+    """Annotazione di redazione a piena altezza: riquadro nero o codice."""
+    rect = (copertura["rect"] if copertura.get("tutto")
+            else shrink_redact_rect(copertura["rect"]))
+    if "text" not in copertura:
+        page.add_redact_annot(rect, fill=copertura["fill"])
+        return
+    page.add_redact_annot(
+        rect,
+        text=copertura["text"],
+        fontname="helv",
+        fontsize=_fit_fontsize(copertura["label"], rect),
+        align=fitz.TEXT_ALIGN_CENTER,
+        fill=copertura["fill"],
+        text_color=(0, 0, 0),
+        cross_out=False,
+    )
+
+
+# Il parametro `text` di apply_redactions esiste da PyMuPDF 1.24.2, le
+# costanti con il nome solo da versioni successive: i valori sono 0 e 1.
+_REDACT_TEXT_REMOVE = getattr(fitz, "PDF_REDACT_TEXT_REMOVE", 0)
+_REDACT_TEXT_NONE = getattr(fitz, "PDF_REDACT_TEXT_NONE", 1)
+
+
+def apply_redaction_plan(page, piano):
+    """
+    C1: applica le redazioni raccolte in `piano` in due passate.
+
+    1. Rimozione del testo con la fascia centrale di ogni copertura:
+       spariscono i caratteri della parola, non quelli delle righe
+       vicine. Immagini e grafica non vengono toccate.
+    2. Riquadri a piena altezza: disegnano il nero (o il codice) e
+       cancellano i pixel delle immagini sottostanti, senza rimuovere
+       altro testo. Nelle scansioni con strato di testo è questa
+       passata a togliere le lettere dall'immagine: con la sola fascia
+       ne resterebbero la parte alta e la parte bassa.
+
+    Le coperture con "tutto": True (aree di firma) rimuovono anche il
+    testo su tutta l'area, come prima.
+
+    La fascia vale solo per il testo orizzontale ("fascia": True). Per il
+    testo ruotato — timbri verticali a margine, filigrane diagonali —
+    attraverserebbe solo le lettere di mezzo: lì si rimuove con l'intero
+    rettangolo, come nelle versioni precedenti.
+
+    Rete di sicurezza: dopo la prima passata, se sotto una copertura
+    resta ancora del testo (un carattere il cui centro cade nel riquadro),
+    quella copertura viene ripassata con l'intero rettangolo. Sotto un
+    riquadro nero non deve restare testo estraibile, qualunque sia il
+    motivo per cui la fascia non è bastata. Se ne resta anche dopo il
+    secondo passaggio la funzione solleva TestoResiduo: chi chiama
+    oscura l'intera pagina (come per le pagine non analizzate, A3).
+    """
+    if not piano:
         return
 
-    label = f"[{code}]"
-    for gi, group in enumerate(group_hits_by_line(entries, word_hits)):
-        union = fitz.Rect()
-        for _idx, rect in group:
-            union |= rect
-        union = shrink_redact_rect(union)
-        text = label if gi == 0 else ""
-        page.add_redact_annot(
-            union,
-            text=text,
-            fontname="helv",
-            fontsize=_fit_fontsize(label, union),
-            align=fitz.TEXT_ALIGN_CENTER,
-            fill=(1, 1, 1),
-            text_color=(0, 0, 0),
-            cross_out=False,
+    def _rimuovi_testo(rettangoli):
+        for r in rettangoli:
+            page.add_redact_annot(r, fill=False, cross_out=False)
+        page.apply_redactions(
+            images=fitz.PDF_REDACT_IMAGE_NONE,
+            graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+            text=_REDACT_TEXT_REMOVE,
         )
+
+    def _zona(c):
+        return c["rect"] if c.get("tutto") else shrink_redact_rect(c["rect"])
+
+    _rimuovi_testo([
+        text_removal_rect(c["rect"]) if (c.get("fascia", True) and not c.get("tutto"))
+        else _zona(c)
+        for c in piano
+    ])
+
+    def _con_testo(zone):
+        """Le zone in cui cade ancora il centro di un carattere.
+        Si guardano i singoli caratteri, non le parole: dopo una
+        rimozione le parole ai lati del vuoto possono essere riunite in
+        un'unica "parola" il cui centro cade proprio nel riquadro."""
+        try:
+            centri = []
+            for blocco in page.get_text("rawdict").get("blocks", []):
+                for riga in blocco.get("lines", []):
+                    for tratto in riga.get("spans", []):
+                        for car in tratto.get("chars", []):
+                            if car.get("c", "").strip():
+                                x0, y0, x1, y1 = car["bbox"]
+                                centri.append(fitz.Point((x0 + x1) / 2, (y0 + y1) / 2))
+        except Exception:
+            return list(zone)                       # nel dubbio, tutte
+        return [z for z in zone if any(z.contains(p) for p in centri)]
+
+    ancora = _con_testo([_zona(c) for c in piano])
+    if ancora:
+        _rimuovi_testo(ancora)
+        if _con_testo(ancora):
+            raise TestoResiduo("testo estraibile rimasto sotto un riquadro")
+    for c in piano:
+        _add_cover_annot(page, c)
+    page.apply_redactions(
+        images=fitz.PDF_REDACT_IMAGE_PIXELS,
+        text=_REDACT_TEXT_NONE,
+    )
+
+
+def _token_forms(token):
+    """
+    Forme con cui una parola del documento può corrispondere a un termine
+    o a un nome noto: la parola intera, la parte dopo un'elisione
+    ("dell'Amico" → "amico") e le parti di un doppio cognome
+    ("Rossignoli-Bianchetti" → "rossignoli", "bianchetti").
+    Sempre parole intere, mai frammenti.
+    """
+    base = _norm_token(token)
+    if not base:
+        return set()
+    forme = {base}
+    m = _ELISIONE_RE.match(base)
+    if m:
+        forme.add(m.group(1))
+    if "-" in base:
+        forme.update(parte for parte in base.split("-") if parte)
+    return forme
 
 
 def find_custom_term_matches(term, entries):
@@ -925,18 +1387,27 @@ def find_custom_term_matches(term, entries):
     Cerca un termine personalizzato come sequenza di PAROLE INTERE
     (case-insensitive, ignorando la punteggiatura ai bordi).
     Ritorna una lista di gruppi di indici parola corrispondenti.
-    Niente più match di sottostringhe dentro altre parole.
+    Niente match di sottostringhe dentro altre parole.
+
+    B4: l'utente si affida ai termini specifici "per certezza", quindi
+    le varianti tipografiche non devono farli fallire in silenzio:
+    - apostrofo dritto e tipografico sono la stessa cosa ("D'Amico"
+      trova "D’AMICO");
+    - trova la forma elisa ("Amico" trova "dell'Amico") e la parte di un
+      doppio cognome ("Rossignoli" trova "Rossignoli-Bianchetti");
+    - la punteggiatura isolata nel testo ("Via Roma, 12 - Milano") non
+      interrompe la sequenza.
     """
-    term_tokens = [_clean_token(t) for t in term.split()]
-    term_tokens = [t for t in term_tokens if t]
+    term_tokens = [t for t in (_norm_token(t) for t in term.split()) if t]
     if not term_tokens:
         return []
-    doc_tokens = [_clean_token(e["text"]) for e in entries]
+    doc = [(i, _token_forms(e["text"])) for i, e in enumerate(entries)]
+    doc = [(i, forme) for i, forme in doc if forme]
     n = len(term_tokens)
     matches = []
-    for i in range(len(doc_tokens) - n + 1):
-        if doc_tokens[i:i + n] == term_tokens:
-            matches.append(list(range(i, i + n)))
+    for k in range(len(doc) - n + 1):
+        if all(term_tokens[j] in doc[k + j][1] for j in range(n)):
+            matches.append([doc[k + j][0] for j in range(n)])
     return matches
 
 
@@ -995,6 +1466,10 @@ class ItLegalNameRecognizer(EntityRecognizer):
         span = text[start:end]
         tokens = list(re.finditer(r"\S+", span))
         while tokens and _clean_token(tokens[-1].group()) in FALSE_POSITIVE_STOPWORDS:
+            # B1: "sig. Mario Piazza", "avv. Giuseppe Giudice"
+            dopo = text[start + tokens[-1].end():start + tokens[-1].end() + 24]
+            if _keeps_name_whole(tokens, len(tokens) - 1, dopo):
+                break
             tokens.pop()
         if not tokens:
             return None
@@ -1510,10 +1985,25 @@ class ItBirthDateRecognizer(EntityRecognizer):
     restano leggibili, perché quasi sempre servono a capire la vicenda.
     """
 
+    # B3: forme comuni che la prima versione non copriva — "nato a Roma
+    # l'11/08/1975", toponimi con particelle minuscole ("Bassano del
+    # Grappa"), abbreviazioni ("S. Giovanni in Persiceto"), doppio nome
+    # ("Bolzano/Bozen"), sigla della provincia, "nato/a", "n. a", e
+    # l'etichetta dei moduli "Data di nascita:".
+    _LUOGO_INIZIO = r"(?:[A-ZÀ-Ý]\.|[A-ZÀ-Ý][\w'’\-/]*)"
+    _LUOGO_SEGUITO = (
+        r"(?:[A-ZÀ-Ý]\.|[A-ZÀ-Ý][\w'’\-/]*|\([A-Za-z]{2}\)|d['’][A-ZÀ-Ý][\w'’\-]*"
+        r"|(?:di|del|della|dello|dei|degli|delle|in|sul|sulla|al|alla|de|la|lo|le)"
+        r"(?=\s+[A-ZÀ-Ý]))"
+    )
     REGEX = re.compile(
-        r"\b(?i:nat[oaie])"
-        r"(?:\s+(?i:a|in|ad)\s+[A-ZÀ-Ý][\w'’\-]*(?:\s+[A-ZÀ-Ý(][\w'’\-)]*){0,3})?"
-        r"\s*,?\s*(?:(?i:il|in\s+data|in\s+data\s+del|addì|lì)\s+)?"
+        r"(?:\b(?i:nat[oaie])(?:/[aei])?|\b[nN]\.(?=\s+(?:a|in|ad)\s+[A-ZÀ-Ý]))"
+        rf"(?:\s+(?i:a|in|ad)\s+{_LUOGO_INIZIO}(?:\s+{_LUOGO_SEGUITO}){{0,5}})?"
+        r"\s*,?\s*(?:(?i:il|in\s+data(?:\s+del)?|addì|lì)\s+|[lL]['’]\s*)?"
+        rf"({_DATE_FULL_RE.pattern})"
+    )
+    REGEX_ETICHETTA = re.compile(
+        r"\b(?i:data\s+(?:di\s+)?nascita)\s*[:\-–]?\s*"
         rf"({_DATE_FULL_RE.pattern})"
     )
     SCORE = 0.9
@@ -1528,9 +2018,13 @@ class ItBirthDateRecognizer(EntityRecognizer):
     def analyze(self, text, entities, nlp_artifacts=None):
         if entities and "IT_BIRTH_DATE" not in entities:
             return []
-        return [RecognizerResult(entity_type="IT_BIRTH_DATE", start=m.start(1),
-                                 end=m.end(1), score=self.SCORE)
-                for m in self.REGEX.finditer(text)]
+        trovate = {}
+        for regex in (self.REGEX, self.REGEX_ETICHETTA):
+            for m in regex.finditer(text):
+                trovate[(m.start(1), m.end(1))] = None
+        return [RecognizerResult(entity_type="IT_BIRTH_DATE", start=a, end=b,
+                                 score=self.SCORE)
+                for a, b in sorted(trovate)]
 
 
 class ItDateRecognizer(EntityRecognizer):
@@ -1640,6 +2134,53 @@ class ItLocalityRecognizer(EntityRecognizer):
         return out
 
 
+class ItStreetAddressRecognizer(EntityRecognizer):
+    """
+    B5: numero civico e CAP di un indirizzo.
+
+    La casella "Località e indirizzi" oscurava il nome della via e il
+    comune ma lasciava "27/B, 38051": abbastanza, con il resto dell'atto,
+    per ritrovare l'abitazione. Qui si riconoscono il civico che segue
+    un odonimo ("via Giuseppe Verdi n. 27/B", "Piazza Dante 3") e il CAP
+    che segue il civico. L'odonimo deve cominciare con la maiuscola (o
+    con una particella seguita da maiuscola): "il corso di formazione
+    2021" e "così via 3 volte" non sono indirizzi.
+    """
+
+    _STRADA = (r"(?:[Vv]ia|[Vv]iale|[Vv]\.le|[Pp]iazza|[Pp]\.zza|[Pp]iazzale|[Cc]orso"
+               r"|[Cc]\.so|[Ll]argo|[Vv]icolo|[Ss]trada|[Cc]ontrada|[Cc]\.da"
+               r"|[Ll]ocalit[àa]|[Ff]razione|[Tt]raversa"
+               r"|VIA|VIALE|PIAZZA|PIAZZALE|CORSO|LARGO|VICOLO|STRADA|CONTRADA|TRAVERSA)")
+    _ODONIMO = (r"(?:[A-ZÀ-Ý][\w'’\-.]*"
+                r"|(?:di|del|della|dello|dei|degli|delle|de)(?=\s+[A-ZÀ-Ý]))")
+    REGEX = re.compile(
+        rf"\b{_STRADA}\s+{_ODONIMO}(?:\s+{_ODONIMO}){{0,4}}?"
+        r"\s*,?\s*(?:(?i:n\.?|nr\.?|num\.?|civico)\s*)?"
+        r"(?P<civico>\d{1,4}(?:\s?/\s?[A-Za-z0-9]{1,3}|[A-Za-z](?![A-Za-zÀ-ÿ]))?)(?!\d)"
+        r"(?:\s*[,\-–]?\s*(?P<cap>\d{5})(?!\d))?"
+    )
+    SCORE = 0.6
+
+    def __init__(self):
+        super().__init__(supported_entities=["IT_ADDRESS"],
+                         supported_language="it", name="ItStreetAddressRecognizer")
+
+    def load(self):
+        pass
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "IT_ADDRESS" not in entities:
+            return []
+        risultati = []
+        for m in self.REGEX.finditer(text):
+            for gruppo in ("civico", "cap"):
+                if m.group(gruppo):
+                    risultati.append(RecognizerResult(
+                        entity_type="IT_ADDRESS", start=m.start(gruppo),
+                        end=m.end(gruppo), score=self.SCORE))
+        return risultati
+
+
 def build_license_plate_recognizer():
     """Recognizer per targhe di veicoli (entità IT_LICENSE_PLATE)."""
     return ItLicensePlateRecognizer()
@@ -1674,6 +2215,13 @@ def initialize_analyzer():
     registry.add_recognizer(ItDateRecognizer())
     registry.add_recognizer(ItPolicyNumberRecognizer())
     registry.add_recognizer(ItLocalityRecognizer())
+    # B5: numero civico e CAP
+    registry.add_recognizer(ItStreetAddressRecognizer())
+    # B6: il riconoscitore di telefoni predefinito copre US, GB, DE, FR,
+    # IL, IN, CA, BR — non l'Italia: i numeri senza +39 venivano presi
+    # solo se per caso validi in uno di quei Paesi.
+    registry.add_recognizer(PhoneRecognizer(
+        supported_regions=("IT",), supported_language="it"))
 
     analyzer = AnalyzerEngine(
         nlp_engine=nlp_engine,
@@ -1687,7 +2235,7 @@ def initialize_analyzer():
 # SANITIZZAZIONE PDF (M-01, M-03)
 # ============================================================
 
-def sanitize_pdf_metadata(doc):
+def sanitize_pdf_metadata(doc, strict=False):
     """
     M-01: Rimuove TUTTI i metadata del PDF (autore, titolo, oggetto,
     creator, producer) e l'XMP metadata stream.
@@ -1712,15 +2260,45 @@ def sanitize_pdf_metadata(doc):
         logger.info("Metadata sanitizzati")
     except Exception as e:
         logger.warning("Sanitizzazione metadata fallita: %s", e)
+        if strict:
+            # A11: redact_pdf non consegna un file che non ha potuto pulire
+            raise
 
 
-def sanitize_pdf_objects(doc):
+def _is_javascript_object(doc, xref):
     """
-    M-03: Rimuove annotazioni, allegati, AcroForm e JavaScript.
+    C3: True se l'oggetto è un'azione JavaScript o ne porta il codice.
+
+    Si guardano le CHIAVI del dizionario, non il testo dell'oggetto: la
+    vecchia ricerca della sottostringa "/JS" azzerava anche oggetti
+    innocenti, per esempio un carattere chiamato "/JSABCD+Helvetica".
+    """
+    try:
+        chiavi = doc.xref_get_keys(xref)
+    except Exception:
+        return False
+    if "JS" in chiavi or "JavaScript" in chiavi:
+        return True
+    if "S" in chiavi:
+        try:
+            return doc.xref_get_key(xref, "S") == ("name", "/JavaScript")
+        except Exception:
+            return False
+    return False
+
+
+def sanitize_pdf_objects(doc, strict=False):
+    """
+    M-03: Rimuove annotazioni, link, campi modulo, allegati e JavaScript.
 
     Per documenti legali è critico: i commenti spesso contengono nomi,
     gli allegati possono essere CV/contratti, i campi form contengono
-    dati inseriti, JavaScript può estrarre informazioni.
+    dati inseriti, i link indirizzi email e percorsi di file, JavaScript
+    può estrarre informazioni.
+
+    Con strict=True (lo usa redact_pdf) un errore, o qualcosa che resta
+    dopo la pulizia, solleva un'eccezione invece di finire solo nel log:
+    il documento non viene consegnato (A11).
     """
     annotations_removed = 0
     forms_cleared = 0
@@ -1737,20 +2315,36 @@ def sanitize_pdf_objects(doc):
                 except Exception as e:
                     logger.warning("Rimozione annotazione fallita: %s", e)
 
-        # 2. AcroForm fields (valori inseriti nei moduli)
+        # 2. Campi modulo. A1: vanno ELIMINATI, non svuotati —
+        # `widget.field_value = ""` seguito da update() non cancella nulla
+        # (PyMuPDF ignora la stringa vuota), e resterebbero comunque nome
+        # del campo e suggerimento. redact_pdf li ha già trasformati in
+        # testo della pagina prima dell'analisi; qui si toglie ciò che
+        # fosse rimasto, e il modulo dal catalogo.
         for page in doc:
-            try:
-                widgets = list(page.widgets() or [])
-                for widget in widgets:
-                    try:
-                        # Svuota il valore del campo
-                        widget.field_value = ""
-                        widget.update()
-                        forms_cleared += 1
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            for widget in list(page.widgets() or []):
+                try:
+                    page.delete_widget(widget)
+                    forms_cleared += 1
+                except Exception as e:
+                    logger.warning("Rimozione campo modulo fallita: %s", type(e).__name__)
+        try:
+            catalogo = doc.pdf_catalog()
+            if doc.xref_get_key(catalogo, "AcroForm")[0] != "null":
+                doc.xref_set_key(catalogo, "AcroForm", "null")
+        except Exception as e:
+            logger.warning("Rimozione AcroForm fallita: %s", type(e).__name__)
+            if strict:
+                raise
+
+        # 2b. A6: link (mailto con nome e cognome, percorsi di file...).
+        # page.annots() non li comprende: vanno tolti a parte.
+        for page in doc:
+            for link in list(page.get_links() or []):
+                try:
+                    page.delete_link(link)
+                except Exception as e:
+                    logger.warning("Rimozione link fallita: %s", type(e).__name__)
 
         # 3. Allegati embedded (file collegati al PDF)
         attachments_removed = 0
@@ -1783,8 +2377,7 @@ def sanitize_pdf_objects(doc):
         # direttamente e logghiamo le singole eccezioni invece di nasconderle.
         for xref in range(1, doc.xref_length()):
             try:
-                obj = doc.xref_object(xref)
-                if "/JavaScript" in obj or "/JS" in obj:
+                if _is_javascript_object(doc, xref):
                     # Sostituisce il contenuto con dict vuoto
                     doc.update_object(xref, "<<>>")
                     js_removed += 1
@@ -1840,6 +2433,15 @@ def sanitize_pdf_objects(doc):
             annotations_removed, forms_cleared, attachments_removed, js_removed
         )
 
+        if strict:
+            # A11: controllo finale — nulla di ciò che andava tolto resta
+            for page in doc:
+                if (list(page.annots() or []) or list(page.widgets() or [])
+                        or page.get_links()):
+                    raise RuntimeError("annotazioni, campi o link residui dopo la pulizia")
+            if doc.embfile_count() > 0:
+                raise RuntimeError("allegati residui dopo la pulizia")
+
         return {
             "annotations": annotations_removed,
             "forms": forms_cleared,
@@ -1849,6 +2451,8 @@ def sanitize_pdf_objects(doc):
 
     except Exception as e:
         logger.warning("Sanitizzazione oggetti fallita: %s", e)
+        if strict:
+            raise
         return {"annotations": 0, "forms": 0, "attachments": 0, "javascript": 0}
 
 
@@ -1905,6 +2509,196 @@ def has_inline_images(page, min_image_area_ratio=0.05):
         return False
 
 
+# Soglie per le immagini nelle pagine con testo (audit A2, A7).
+# - Un'immagine che copre almeno un quarto della pagina e ha pochissimo
+#   testo sopra è una scansione, anche se la pagina ha del testo vero a
+#   margine (timbro di deposito, numero di protocollo, glifo di firma).
+# - Sopra il 2% della pagina un'immagine può contenere dati (firma,
+#   timbro con nome, foto di un documento): se non passa dall'OCR, la
+#   pagina va segnalata. Sotto restano i loghi piccoli.
+AREA_IMMAGINE_DOMINANTE = 0.25
+COPERTURA_TESTO_MINIMA = 0.03
+AREA_IMMAGINE_DA_SEGNALARE = 0.02
+
+
+def _immagini_della_pagina(page):
+    """Rettangoli delle immagini visibili sulla pagina."""
+    rettangoli = []
+    try:
+        for info in page.get_image_info():
+            r = fitz.Rect(info["bbox"]) & page.rect
+            if not r.is_empty and r.width > 1 and r.height > 1:
+                rettangoli.append(r)
+    except Exception as e:
+        logger.warning("Elenco immagini fallito: %s", type(e).__name__)
+    return rettangoli
+
+
+def has_image_dominated_content(page):
+    """
+    A2: True se la pagina è in sostanza una scansione, qualunque sia la
+    quantità di testo estraibile.
+
+    La vecchia regola guardava solo i caratteri: bastavano 50 caratteri
+    di testo vero (un timbro "Copia conforme... depositato nel fascicolo
+    telematico") perché una pagina-immagine fosse trattata come testuale
+    e uscisse interamente in chiaro. Qui si guarda la copertura: una
+    grande immagine con quasi nessuna parola sopra va letta con l'OCR.
+    Una pagina digitale con un'immagine di sfondo (carta intestata) ha
+    invece molto testo sopra l'immagine e resta testuale.
+    """
+    area_pagina = abs(page.rect.width * page.rect.height)
+    if area_pagina <= 0:
+        return False
+    grandi = [r for r in _immagini_della_pagina(page)
+              if abs(r.width * r.height) / area_pagina >= AREA_IMMAGINE_DOMINANTE]
+    if not grandi:
+        return False
+    try:
+        parole = [fitz.Rect(w[:4]) for w in page.get_text("words")]
+    except Exception:
+        return True   # nel dubbio, OCR
+    for img in grandi:
+        coperta = 0.0
+        for w in parole:
+            inter = w & img
+            if not inter.is_empty:
+                coperta += abs(inter.width * inter.height)
+        if coperta / abs(img.width * img.height) < COPERTURA_TESTO_MINIMA:
+            return True
+    return False
+
+
+def open_source_document(input_bytes):
+    """
+    Apre il PDF da elaborare. Solleva DocumentoNonElaborabile, con un
+    messaggio per l'utente, invece di lasciar arrivare all'interfaccia
+    un'eccezione con la traccia dello stack.
+    """
+    try:
+        doc = fitz.open(stream=input_bytes, filetype="pdf")
+    except Exception as e:
+        logger.error("Apertura PDF fallita: %s", type(e).__name__)
+        raise DocumentoNonElaborabile(
+            "il file non è un PDF leggibile (potrebbe essere danneggiato)") from None
+    if doc.needs_pass:
+        doc.close()
+        raise DocumentoNonElaborabile(
+            "il PDF è protetto da una password di apertura: "
+            "rimuovila e carica di nuovo il file")
+    return doc
+
+
+def prepare_source_document(doc):
+    """
+    Porta nel contenuto delle pagine tutto ciò che l'estrazione del testo
+    altrimenti non vedrebbe, così che venga analizzato come il resto.
+
+    Regola dell'intero percorso: il PDF prodotto contiene solo ciò che
+    l'analisi ha visto.
+
+    - A4 livelli nascosti: vengono resi visibili. Nel PDF prodotto la
+      definizione dei livelli non c'è più, quindi il loro contenuto
+      sarebbe comunque visibile: deve passare dall'analisi.
+    - A1/A10 campi modulo: i valori digitati in un modulo compilabile
+      vivono nei campi, non nella pagina. Svuotarli non funzionava (e
+      avrebbe restituito un modulo in bianco): qui diventano testo della
+      pagina, che viene poi analizzato e oscurato come ogni altro testo.
+      Il modulo interattivo sparisce, e con lui nomi dei campi,
+      suggerimenti, dati XFA e dizionari di firma digitale.
+
+    Ritorna (documento, numero di campi trasformati in testo). Il
+    documento può essere una NUOVA istanza: dopo queste modifiche viene
+    riletto da capo, perché MuPDF tiene in memoria lo stato dei livelli
+    e le pagine già caricate.
+    """
+    modificato = False
+
+    # I livelli per primi, prima che qualunque pagina venga caricata.
+    try:
+        # Senza /OCProperties tutto il contenuto è visibile: è lo stato in
+        # cui si troverà il PDF prodotto (set_layer non basta: l'estrazione
+        # del testo continua a ignorare i livelli spenti).
+        catalogo = doc.pdf_catalog()
+        if doc.xref_get_key(catalogo, "OCProperties")[0] != "null":
+            doc.xref_set_key(catalogo, "OCProperties", "null")
+            modificato = True
+    except Exception as e:
+        logger.error("Attivazione livelli fallita: %s", type(e).__name__)
+        raise DocumentoNonElaborabile(
+            "il PDF contiene livelli nascosti che non si possono "
+            "rendere visibili: stampalo in PDF e carica la copia") from None
+
+    campi = 0
+    try:
+        for page in doc:
+            campi += sum(1 for _ in (page.widgets() or []))
+    except Exception as e:
+        logger.warning("Conteggio campi modulo fallito: %s", type(e).__name__)
+        campi = -1   # ignoto: si procede comunque con l'appiattimento
+
+    if campi != 0:
+        try:
+            doc.bake(annots=False, widgets=True)
+            modificato = True
+        except Exception as e:
+            logger.error("Appiattimento campi modulo fallito: %s", type(e).__name__)
+            raise DocumentoNonElaborabile(
+                "il modulo compilabile contenuto nel PDF non si può "
+                "trasformare in testo: stampalo in PDF e carica la copia") from None
+        campi = max(campi, 0)
+
+    if modificato:
+        try:
+            riletto = fitz.open(stream=doc.tobytes(), filetype="pdf")
+        except Exception as e:
+            logger.error("Rilettura dopo la preparazione fallita: %s", type(e).__name__)
+            raise DocumentoNonElaborabile(
+                "il PDF non si può preparare per l'analisi: "
+                "stampalo in PDF e carica la copia") from None
+        doc.close()
+        doc = riletto
+    return doc, campi
+
+
+def expand_to_full_page(page):
+    """
+    A5: porta l'area visibile a coincidere con la pagina fisica.
+
+    In una pagina ritagliata (con Anteprima o Acrobat) il testo fuori dal
+    ritaglio non si vede e non veniva estratto, ma restava nel file e
+    ricompariva togliendo il ritaglio. Analizzando l'intera pagina fisica
+    viene oscurato come il resto. Ritorna (ritaglio, riuscito): il
+    ritaglio originale da ripristinare sulla pagina prodotta (None se non
+    c'era) e False se la pagina è ritagliata ma non si è potuta estendere
+    — in quel caso ciò che sta fuori dal ritaglio NON viene analizzato e
+    redact_pdf lo segnala.
+    """
+    try:
+        originale = fitz.Rect(page.cropbox)
+        mb = page.mediabox
+        # set_cropbox misura la y dal bordo superiore della pagina fisica
+        intera = fitz.Rect(mb.x0, 0, mb.x1, mb.y1 - mb.y0)
+        if (abs(originale.x0 - intera.x0) < 0.5 and abs(originale.y0 - intera.y0) < 0.5
+                and abs(originale.x1 - intera.x1) < 0.5 and abs(originale.y1 - intera.y1) < 0.5):
+            return None, True
+        page.set_cropbox(intera)
+        return originale, True
+    except Exception as e:
+        logger.warning("Estensione area visibile fallita: %s", type(e).__name__)
+        return None, False
+
+
+def restore_crop(page, originale):
+    """Rimette il ritaglio originale sulla pagina (vedi expand_to_full_page)."""
+    if originale is None:
+        return
+    try:
+        page.set_cropbox(originale)
+    except Exception as e:
+        logger.warning("Ripristino ritaglio fallito: %s", type(e).__name__)
+
+
 def safe_error_message(action, exception):
     """
     L-03: Restituisce un messaggio di errore SENZA esporre dettagli
@@ -1939,6 +2733,7 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
     raw_count = 0
     results = []
     dropped_fp = 0
+    failed = False
 
     if full_text.strip() and selected_entities:
         try:
@@ -1985,12 +2780,12 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
                     continue
                 # R-08: non redigere le citazioni giurisprudenziali
                 if (r.entity_type in NER_ENTITY_TYPES
-                        and is_case_citation(full_text, r.start, r.end)):
+                        and is_case_citation(full_text, r.start, r.end, r.entity_type)):
                     dropped_fp += 1
                     continue
                 # R-14: marca/modello dopo "automezzo/vettura/..." non si redige
                 if (r.entity_type in NER_ENTITY_TYPES
-                        and is_vehicle_description(full_text, r.start)):
+                        and is_vehicle_description(full_text, r.start, r.end)):
                     dropped_fp += 1
                     continue
                 # R-13/R-14: città → LOCATION, società → ORGANIZATION
@@ -2002,9 +2797,12 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
                 results.append(r)
 
         except Exception as e:
-            # L-03: messaggio sanitizzato, dettagli solo nei log
+            # L-03: messaggio sanitizzato, dettagli solo nei log.
+            # A3: la pagina NON va avanti senza analisi — redact_pdf la
+            # oscura per intero e la riporta tra le pagine fallite.
             st.error(safe_error_message(f"Analisi pagina {page_num}", e))
             results = []
+            failed = True
 
     return {
         "full_text": full_text,
@@ -2013,7 +2811,17 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
         "raw": raw_count,
         "filtered": len(results),
         "dropped_fp": dropped_fp,
+        "failed": failed,
     }
+
+
+def _name_token_ok(pulito):
+    """Token di nome propagabile: almeno tre lettere, fatto di lettere
+    (con eventuali apostrofi o trattini interni), non boilerplate."""
+    lettere = "".join(c for c in pulito if c.isalpha())
+    return (len(lettere) >= MIN_TOKEN_LEN
+            and pulito not in FALSE_POSITIVE_STOPWORDS
+            and all(c.isalpha() or c in "'-" for c in pulito))
 
 
 def collect_person_tokens(analysis):
@@ -2021,6 +2829,13 @@ def collect_person_tokens(analysis):
     R-04: raccoglie i token dei nomi di persona rilevati, per
     propagarli a tutto il documento (es. "Tavernelli" rilevato a
     pagina 1 viene oscurato anche dove il NER lo manca).
+
+    B8: entrano anche i cognomi con apostrofo o trattino ("D'Alonzi",
+    "Rossignoli-Bianchetti"), insieme alle loro parti, così da coprire
+    "Alonzi" e "Rossignoli" scritti da soli.
+    Restano fuori le parole comuni che sono anche cognomi ("Piazza") e
+    i cognomi di due lettere ("Re"): propagati da soli coprirebbero
+    ogni piazza e ogni re dell'atto. Vedi collect_ambiguous_surnames.
     """
     tokens = set()
     full_text = analysis["full_text"]
@@ -2028,15 +2843,61 @@ def collect_person_tokens(analysis):
         if r.entity_type != "PERSON":
             continue
         for token in full_text[r.start:r.end].split():
-            clean = _clean_token(token)
-            if (
-                len(clean) >= MIN_TOKEN_LEN
-                and clean not in FALSE_POSITIVE_STOPWORDS
-                and token[:1].isupper()
-                and clean.isalpha()
-            ):
-                tokens.add(clean)
+            if not token.strip(_TOKEN_PUNCT)[:1].isupper():
+                continue
+            for forma in _token_forms(token):
+                if _name_token_ok(forma):
+                    tokens.add(forma)
     return tokens
+
+
+def collect_ambiguous_surnames(analysis):
+    """
+    B1: cognomi rilevati che NON vengono propagati al resto dell'atto,
+    perché coincidono con una parola comune ("Piazza", "Giudice") o
+    hanno due lettere ("Re"). Dove compaiono col nome vengono oscurati;
+    scritti da soli ("il Piazza") no. L'elenco serve ad avvisare
+    l'utente, che può aggiungerli ai termini specifici.
+    """
+    ambigui = set()
+    full_text = analysis["full_text"]
+    for r in analysis["results"]:
+        if r.entity_type != "PERSON":
+            continue
+        parole = full_text[r.start:r.end].split()
+        if len(parole) < 2:
+            continue
+        for parola in parole:
+            grezzo = parola.strip(_TOKEN_PUNCT)
+            if _is_short_name_token(parola) or (
+                    grezzo[:1].isupper() and grezzo.lower() in _STOPWORDS_ANCHE_COGNOMI):
+                ambigui.add(grezzo)
+    return ambigui
+
+
+def propagation_type(text, known_person_tokens, known_org_tokens):
+    """
+    R-04/R-14: tipo di propagazione per una parola del documento, o None.
+    Solo parole intere con iniziale maiuscola, mai sottostringhe.
+    B8: valgono anche la parte dopo un'elisione ("dell'Alonzi") e le
+    parti di un doppio cognome, purché a loro volta maiuscole.
+    """
+    grezzo = unicodedata.normalize("NFKC", text).translate(_APOSTROFI).strip(_TOKEN_PUNCT)
+    candidati = []
+    if grezzo[:1].isupper():
+        candidati.append(grezzo.lower())
+    m = _ELISIONE_RE.match(grezzo)
+    if m and m.group(1)[:1].isupper():
+        candidati.append(m.group(1).lower())
+    if "-" in grezzo:
+        candidati.extend(p.lower() for p in grezzo.split("-") if p[:1].isupper())
+    for c in candidati:
+        if c in known_org_tokens:
+            return "ORGANIZATION (propagato)"
+    for c in candidati:
+        if c in known_person_tokens:
+            return "PERSON (propagato)"
+    return None
 
 
 def detect_handwriting_on_text_page(page, entries, dpi=300):
@@ -2101,6 +2962,7 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
     entries = analysis["entries"]
     use_codes = redaction_mode == "codes" and assigner is not None
     redacted_word_idx = set()
+    piano = []   # coperture da applicare in due passate (C1)
 
     def _log(tipo, testo, confidenza, code):
         row = {
@@ -2130,7 +2992,7 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
         for match_indexes in find_custom_term_matches(term, entries):
             word_hits = [(i, entries[i]["rect"]) for i in match_indexes]
             code = assigner.assign("TERMINE PERSONALIZZATO", term) if use_codes else None
-            add_redaction_for_hits(page, entries, word_hits, redaction_mode, code)
+            add_redaction_for_hits(page, entries, word_hits, redaction_mode, code, piano)
             redacted_word_idx.update(match_indexes)
             _log("TERMINE PERSONALIZZATO", term, "100%", code)
 
@@ -2157,10 +3019,12 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
         # (es. "(C.F." dopo che il codice fiscale è già stato redatto), salta
         remaining_text = " ".join(entries[i]["text"] for i, _r in word_hits)
         if (result.entity_type in NER_ENTITY_TYPES
-                and is_false_positive(result.entity_type, remaining_text)):
+                and is_false_positive(result.entity_type, remaining_text)
+                and not (len(found_text.split()) == 2
+                         and _is_name_remainder(remaining_text))):
             continue
         code = assigner.assign(result.entity_type, found_text) if use_codes else None
-        add_redaction_for_hits(page, entries, word_hits, redaction_mode, code)
+        add_redaction_for_hits(page, entries, word_hits, redaction_mode, code, piano)
         redacted_word_idx.update(idx for idx, _r in word_hits)
         _log(result.entity_type, found_text, f"{result.score:.0%}", code)
 
@@ -2170,20 +3034,14 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
     for idx, entry in enumerate(entries):
         if idx in redacted_word_idx:
             continue
-        clean = _clean_token(entry["text"])
-        if not entry["text"][:1].isupper():
-            continue
-        if clean in known_org_tokens:
-            prop_type = "ORGANIZATION (propagato)"
-        elif clean in known_person_tokens:
-            prop_type = "PERSON (propagato)"
-        else:
+        prop_type = propagation_type(entry["text"], known_person_tokens, known_org_tokens)
+        if prop_type is None:
             continue
         # R-15: nel log/tabella niente punteggiatura appiccicata ("Sartori," → "Sartori")
         display = entry["text"].strip(_TOKEN_PUNCT)
         code = assigner.assign(prop_type, display) if use_codes else None
         add_redaction_for_hits(
-            page, entries, [(idx, entry["rect"])], redaction_mode, code
+            page, entries, [(idx, entry["rect"])], redaction_mode, code, piano
         )
         redacted_word_idx.add(idx)
         _log(prop_type, display, "—", code)
@@ -2193,10 +3051,10 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
     #    scansioni: una firma non ha un testo da accoppiare a un codice).
     if redact_handwriting:
         for area in detect_handwriting_on_text_page(page, entries):
-            page.add_redact_annot(area, fill=(0, 0, 0))
+            piano.append({"rect": area, "fill": (0, 0, 0), "tutto": True})
             _log("FIRMA / SCRITTA A MANO", "(immagine)", "—", None)
 
-    page.apply_redactions()
+    apply_redaction_plan(page, piano)
 
 
 # ============================================================
@@ -2544,12 +3402,15 @@ def _ocr_page_words(src_page, dpi, lang, page_num):
         return img, None
 
     words = []
+    scartate = 0
     for i in range(len(ocr_data["text"])):
         word = ocr_data["text"][i].strip()
         try:
             conf = int(ocr_data["conf"][i])
         except (ValueError, TypeError):
             conf = 0
+        if word and conf <= 30 and sum(c.isalpha() for c in word) >= 3:
+            scartate += 1   # B8: parola letta male, non analizzata
         if word and conf > 30:
             words.append({
                 "text": word,
@@ -2559,6 +3420,7 @@ def _ocr_page_words(src_page, dpi, lang, page_num):
                 "h": ocr_data["height"][i],
                 "conf": conf,
             })
+    _ocr_page_words.ultime_scartate = scartate
     return img, words
 
 
@@ -2570,12 +3432,17 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
     del documento. Il dict restituito ha le stesse chiavi di
     analyze_text_page(), per poter riusare i filtri a valle.
     """
+    _ocr_page_words.ultime_scartate = 0
     _, words = _ocr_page_words(src_page, dpi, lang, page_num)
+    ocr_scartate = _ocr_page_words.ultime_scartate
 
     empty = {
         "words": [], "entries": [], "full_text": "", "word_positions": [],
         "results": [], "raw": 0, "filtered": 0, "dropped_fp": 0,
         "ocr_failed": words is None,
+        # A3: OCR in errore = pagina non analizzata, va oscurata per intero
+        "failed": words is None,
+        "ocr_scartate": ocr_scartate,
     }
     if not words:
         return empty
@@ -2596,6 +3463,7 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
     raw_count = 0
     dropped_fp = 0
     results = []
+    failed = False
 
     if selected_entities and full_text.strip():
         try:
@@ -2632,12 +3500,12 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
                     continue
                 # R-08: citazioni giurisprudenziali
                 if (r.entity_type in NER_ENTITY_TYPES
-                        and is_case_citation(full_text, r.start, r.end)):
+                        and is_case_citation(full_text, r.start, r.end, r.entity_type)):
                     dropped_fp += 1
                     continue
                 # R-14: marca/modello dopo "automezzo/vettura/..."
                 if (r.entity_type in NER_ENTITY_TYPES
-                        and is_vehicle_description(full_text, r.start)):
+                        and is_vehicle_description(full_text, r.start, r.end)):
                     dropped_fp += 1
                     continue
                 # R-13/R-14: città → LOCATION, società → ORGANIZATION
@@ -2659,6 +3527,7 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
             # L-03: messaggio sanitizzato
             st.warning(safe_error_message(f"Presidio OCR pagina {page_num}", e))
             results = []
+            failed = True
 
     return {
         "words": words,
@@ -2673,6 +3542,8 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
         "filtered": len(results),
         "dropped_fp": dropped_fp,
         "ocr_failed": False,
+        "failed": failed,
+        "ocr_scartate": ocr_scartate,
     }
 
 
@@ -2774,17 +3645,13 @@ def apply_scanned_redactions(src_page, out_doc, analysis, custom_terms,
             term = term.strip()
             if not term:
                 continue
-            term_words = term.split()
-            for i in range(len(words) - len(term_words) + 1):
-                match = all(
-                    _clean_token(words[i + j]["text"]) == _clean_token(term_words[j])
-                    for j in range(len(term_words))
-                )
-                if match:
-                    code = assigner.assign("TERMINE PERSONALIZZATO", term) if use_codes else None
-                    draw_redaction(words[i:i + len(term_words)], code)
-                    drawn_idx.update(range(i, i + len(term_words)))
-                    _log_ocr("TERMINE PERSONALIZZATO", term, "100%", code)
+            # B4: stesso cercatore delle pagine testuali (apostrofi,
+            # forme elise, doppi cognomi, punteggiatura isolata)
+            for indici in find_custom_term_matches(term, words):
+                code = assigner.assign("TERMINE PERSONALIZZATO", term) if use_codes else None
+                draw_redaction([words[i] for i in indici], code)
+                drawn_idx.update(indici)
+                _log_ocr("TERMINE PERSONALIZZATO", term, "100%", code)
 
         # 2-3. Entità rilevate (prima deterministiche, poi NER)
         pattern_results = [r for r in results if r.entity_type not in NER_ENTITY_TYPES]
@@ -2800,7 +3667,9 @@ def apply_scanned_redactions(src_page, out_doc, analysis, custom_terms,
                 found_text = full_text[result.start:result.end]
                 remaining_text = " ".join(words[i]["text"] for i in matching_idx)
                 if (result.entity_type in NER_ENTITY_TYPES
-                        and is_false_positive(result.entity_type, remaining_text)):
+                        and is_false_positive(result.entity_type, remaining_text)
+                        and not (len(found_text.split()) == 2
+                                 and _is_name_remainder(remaining_text))):
                     continue
                 code = assigner.assign(result.entity_type, found_text) if use_codes else None
                 draw_redaction([words[i] for i in matching_idx], code)
@@ -2812,14 +3681,8 @@ def apply_scanned_redactions(src_page, out_doc, analysis, custom_terms,
         for idx, w in enumerate(words):
             if idx in drawn_idx:
                 continue
-            clean = _clean_token(w["text"])
-            if not w["text"][:1].isupper():
-                continue
-            if clean in known_org_tokens:
-                prop_type = "ORGANIZATION (propagato)"
-            elif clean in known_person_tokens:
-                prop_type = "PERSON (propagato)"
-            else:
+            prop_type = propagation_type(w["text"], known_person_tokens, known_org_tokens)
+            if prop_type is None:
                 continue
             display = w["text"].strip(_TOKEN_PUNCT)
             code = assigner.assign(prop_type, display) if use_codes else None
@@ -2852,12 +3715,27 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     redact_handwriting: R-20/R-23 — oscura anche firme, sigle e timbri:
         sulle pagine scansionate e, nei PDF digitali, sulle immagini.
 
-    Ritorna (bytes_pdf, log, mapping) dove mapping è la tabella di
-    accoppiamento codice↔testo (vuota in modalità blackout).
+    Ritorna un EsitoRedazione (pdf, log, mapping, avvisi): mapping è la
+    tabella di accoppiamento codice↔testo (vuota in modalità blackout),
+    avvisi dice che cosa l'utente deve sapere prima di fidarsi del file.
+    Solleva DocumentoNonElaborabile se il PDF non si può trattare in
+    modo sicuro (password, file illeggibile, pulizia finale fallita).
+
+    Regola: il PDF prodotto contiene solo ciò che l'analisi ha visto.
     """
-    src_doc = fitz.open(stream=input_bytes, filetype="pdf")
+    src_doc = open_source_document(input_bytes)
+    src_doc, campi_modulo = prepare_source_document(src_doc)
     out_doc = fitz.open()
     log = []
+    pagine_fallite = []
+    pagine_ocr_elenco = []
+    pagine_immagini_non_lette = []
+    pagine_senza_ocr = []
+    pagine_ocr_incerto = []
+    pagine_ritaglio_non_analizzato = []
+    cognomi_ambigui = set()
+    # D3: l'OCR con un'altra lingua legge male accenti e nomi italiani
+    ocr_senza_italiano = False
     if redaction_mode == "codes" and assigner is None:
         assigner = CodeAssigner()
     elif redaction_mode != "codes":
@@ -2896,12 +3774,19 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         progress_bar.progress((page_index + 1) / (total_pages * 2))
         status_text.text(f"🧠 Analisi pagina {page_num}/{total_pages}...")
 
-        scanned = is_scanned_page(src_page)
+        # A5: si analizza l'intera pagina fisica, non solo il ritaglio
+        ritaglio, esteso = expand_to_full_page(src_page)
+        if not esteso:
+            pagine_ritaglio_non_analizzato.append(page_num)
 
-        # M-02: rileva immagini inline significative in pagine testuali
+        # A2: scansione = poco testo OPPURE una grande immagine con quasi
+        # nessuna parola sopra (scansione con timbro o protocollo a margine)
+        scanned = is_scanned_page(src_page) or has_image_dominated_content(src_page)
+
+        # M-02/A7: immagini che possono contenere dati in pagine testuali
         has_images = False
         if not scanned:
-            has_images = has_inline_images(src_page)
+            has_images = has_inline_images(src_page, AREA_IMMAGINE_DA_SEGNALARE)
             if has_images:
                 pages_with_inline_images += 1
 
@@ -2912,6 +3797,10 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         )
 
         if use_ocr:
+            # L'OCR lavora sull'immagine della pagina: fuori dal ritaglio
+            # non resta nulla nel file, quindi si torna al ritaglio originale
+            restore_crop(src_page, ritaglio)
+            ritaglio = None
             status_text.text(f"🔍 OCR pagina {page_num}/{total_pages}...")
             analysis = analyze_scanned_page(
                 src_page, selected_entities, analyzer, min_score,
@@ -2924,6 +3813,9 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             )
 
         known_person_tokens |= collect_person_tokens(analysis)
+        cognomi_ambigui |= collect_ambiguous_surnames(analysis)
+        if analysis.get("ocr_scartate", 0) >= max(5, 0.1 * len(analysis.get("words") or [])):
+            pagine_ocr_incerto.append(page_num)
         org_tokens |= collect_org_tokens(analysis)
         if exclude_magistrates:
             magistrate_tokens |= collect_magistrate_tokens(analysis["full_text"])
@@ -2936,6 +3828,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             "scanned": scanned,
             "has_images": has_images,
             "analysis": analysis,
+            "ritaglio": ritaglio,
+            "failed": bool(analysis.get("failed")),
         }
 
     # I termini personalizzati non vanno propagati come nomi, ma i
@@ -2985,7 +3879,34 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         plan = page_plans[page_index]
         progress_bar.progress(0.5 + (page_index + 1) / (total_pages * 2))
 
+        def _pagina_nera():
+            # A3: la pagina non esce in chiaro: al suo posto una pagina
+            # nera della stessa misura, riportata nel report e tra gli
+            # avvisi.
+            restore_crop(src_page, plan["ritaglio"])
+            nera = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
+            nera.draw_rect(nera.rect, color=(0, 0, 0), fill=(0, 0, 0))
+            pagine_fallite.append(page_num)
+            riga = {
+                "Pagina": page_num,
+                "Tipo": "PAGINA NON ANALIZZATA (oscurata per intero)",
+                "Testo": "—",
+                "Confidenza": "—",
+                "Metodo": "Errore",
+            }
+            if redaction_mode == "codes":
+                riga["Codice"] = "—"
+            log.append(riga)
+
+        if plan["failed"]:
+            # pagina non analizzata (errore del motore o dell'OCR)
+            _pagina_nera()
+            continue
+
         if plan["use_ocr"]:
+            pagine_ocr_elenco.append(page_num)
+            if ocr_lang != "ita":
+                ocr_senza_italiano = True
             status_text.text(f"🖊️ Redazione pagina {page_num}/{total_pages}...")
             apply_scanned_redactions(
                 src_page, out_doc, plan["analysis"], custom_terms,
@@ -2997,41 +3918,59 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             )
             pages_ocr += 1
         else:
-            if plan["scanned"] and not TESSERACT_AVAILABLE:
-                status_text.text(f"⚠️ Pagina {page_num}/{total_pages} scansionata ma OCR non disponibile")
-            elif plan["has_images"] and ocr_mode == "auto":
+            if plan["scanned"]:
+                # scansione non letta: Tesseract assente o "Mai OCR"
+                pagine_senza_ocr.append(page_num)
+                status_text.text(f"⚠️ Pagina {page_num}/{total_pages} scansionata ma non letta con l'OCR")
+            elif plan["has_images"]:
+                pagine_immagini_non_lette.append(page_num)
                 status_text.text(f"📄 Pagina {page_num}/{total_pages} (⚠️ contiene immagini)")
             else:
                 status_text.text(f"📄 Pagina {page_num}/{total_pages}...")
 
-            out_doc.insert_pdf(src_doc, from_page=page_index, to_page=page_index)
+            # A6: link e annotazioni non vengono copiati. I link restavano
+            # nelle pagine senza redazioni ("mailto:nome.cognome@...").
+            out_doc.insert_pdf(src_doc, from_page=page_index, to_page=page_index,
+                               links=False, annots=False)
             new_page = out_doc[-1]
-            apply_text_redactions(
-                new_page, plan["analysis"], custom_terms,
-                known_person_tokens, log, page_num,
-                redaction_mode=redaction_mode,
-                assigner=assigner,
-                known_org_tokens=org_tokens,
-                redact_handwriting=redact_handwriting,
-            )
+            try:
+                apply_text_redactions(
+                    new_page, plan["analysis"], custom_terms,
+                    known_person_tokens, log, page_num,
+                    redaction_mode=redaction_mode,
+                    assigner=assigner,
+                    known_org_tokens=org_tokens,
+                    redact_handwriting=redact_handwriting,
+                )
+            except TestoResiduo:
+                # Sotto un riquadro è rimasto testo che non si riesce a
+                # togliere: la pagina copiata si butta e al suo posto va
+                # una pagina nera.
+                logger.error("Pagina %d: testo residuo sotto un riquadro", page_num)
+                new_page = None
+                out_doc.delete_page(-1)
+                _pagina_nera()
+                continue
+            # A5: la pagina torna ritagliata come l'originale
+            restore_crop(new_page, plan["ritaglio"])
             pages_text += 1
 
     progress_bar.empty()
     status_text.empty()
 
-    # M-02: warning se ci sono immagini inline in modalità auto
-    if pages_with_inline_images > 0 and ocr_mode == "auto":
-        st.warning(
-            f"⚠️ **Attenzione:** rilevate immagini significative in {pages_with_inline_images} pagine "
-            f"testuali (firme scansionate, foto di documenti, timbri...). "
-            f"Queste immagini **NON sono state OCRate**. Se possono contenere dati sensibili, "
-            f"rilancia l'anonimizzazione in modalità **'Forza OCR su tutto'**."
-        )
-
-    # M-01 + M-03: sanitizzazione PDF di output
+    # M-01 + M-03: sanitizzazione PDF di output.
+    # A11: se la pulizia fallisce il documento non viene consegnato.
     status_text.text("🧹 Sanitizzazione metadata e oggetti residui...")
-    sanitize_pdf_metadata(out_doc)
-    sanitize_stats = sanitize_pdf_objects(out_doc)
+    try:
+        sanitize_pdf_metadata(out_doc, strict=True)
+        sanitize_stats = sanitize_pdf_objects(out_doc, strict=True)
+    except Exception as e:
+        logger.error("Pulizia finale fallita: %s", type(e).__name__)
+        out_doc.close()
+        src_doc.close()
+        raise DocumentoNonElaborabile(
+            "la pulizia finale del PDF (metadati, commenti, allegati) "
+            "non è riuscita: il file non viene prodotto") from None
     status_text.empty()
 
     # Riepilogo
@@ -3067,7 +4006,23 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     src_doc.close()
     output_bytes.seek(0)
     mapping = assigner.mapping if assigner else []
-    return output_bytes.getvalue(), log, mapping
+    # B4: un termine specifico che non trova nulla va detto all'utente
+    trovati = {r["Testo"] for r in log if r["Tipo"] == "TERMINE PERSONALIZZATO"}
+    termini_non_trovati = [t.strip() for t in custom_terms
+                           if t.strip() and t.strip() not in trovati]
+    avvisi = {
+        "pagine_fallite": pagine_fallite,
+        "pagine_ocr": pagine_ocr_elenco,
+        "pagine_immagini_non_lette": pagine_immagini_non_lette,
+        "pagine_senza_ocr": pagine_senza_ocr,
+        "pagine_ocr_incerto": pagine_ocr_incerto,
+        "pagine_ritaglio_non_analizzato": pagine_ritaglio_non_analizzato,
+        "campi_modulo": campi_modulo,
+        "termini_non_trovati": termini_non_trovati,
+        "cognomi_non_propagati": sorted(cognomi_ambigui),
+        "ocr_senza_italiano": ocr_senza_italiano,
+    }
+    return EsitoRedazione(output_bytes.getvalue(), log, mapping, avvisi)
 
 
 # ============================================================
@@ -3076,6 +4031,15 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 
 st.title("🔒 Anonimizzatore PDF")
 st.caption(f"Anonimizzazione documenti in locale · Powered by Microsoft Presidio + Tesseract OCR · v{__version__}")
+
+if not pymupdf_supported():
+    st.error(
+        f"⚠️ **Libreria PDF non supportata (PyMuPDF {PYMUPDF_VERSION}).** "
+        "Con questa versione l'oscuramento può cancellare o spostare parole "
+        "vicine a quelle oscurate. Su Mac lancia `./aggiorna.sh` nella cartella "
+        "`mac` (o reinstalla con `./installa.sh`); su Windows reinstalla l'ultima "
+        "versione. Fino ad allora controlla con più attenzione i PDF prodotti."
+    )
 
 # Banner stato OCR
 if TESSERACT_AVAILABLE and ITALIAN_AVAILABLE:
@@ -3168,8 +4132,13 @@ with st.sidebar:
     st.subheader("🎚️ Soglia di confidenza")
     min_score = st.slider(
         "Sensibilità del rilevamento",
-        min_value=0.1, max_value=1.0, value=0.4, step=0.05,
-        help="Più alto = meno falsi positivi ma rischio di perdere occorrenze.",
+        min_value=0.1, max_value=0.6, value=0.4, step=0.05,
+        help=(
+            "Più alto = meno falsi positivi ma più dati persi. "
+            "Sopra 0,40 non vengono più oscurati i numeri di telefono; "
+            "il massimo è 0,60 perché oltre si perderebbero targhe, codici "
+            "fiscali letti male dall'OCR e, da 0,90, tutti i nomi."
+        ),
     )
 
     st.divider()
@@ -3244,6 +4213,7 @@ entity_map = [
     (use_email, "EMAIL_ADDRESS"),
     (use_phone, "PHONE_NUMBER"),
     (use_location, "LOCATION"),
+    (use_location, "IT_ADDRESS"),   # B5: civico e CAP con "Località e indirizzi"
     (use_date, "DATE_TIME"),
     (use_birth, "IT_BIRTH_DATE"),
     (use_cf, "IT_FISCAL_CODE"),
@@ -3381,10 +4351,9 @@ st.divider()
 
 # --- AZIONE ---
 # N-03 (#7): guard difensivo contro OOM silenzioso su PDF molto grandi.
-# Il limite reale è imposto da .streamlit/config.toml -> server.maxUploadSize
-# (Streamlit blocca prima ancora di raggiungere Python). Questo check protegge
-# il caso in cui qualcuno esegua `streamlit run` senza il config (es. fuori
-# dal repo). Tenere MAX_PDF_BYTES in sync con il valore di config.toml.
+# Streamlit accetta di suo fino a 200 MB (server.maxUploadSize): questo
+# controllo ferma prima i file oltre i 100 MB, che l'app elabora tutta in
+# memoria.
 MAX_PDF_BYTES = 100 * 1024 * 1024  # 100 MB
 
 
@@ -3397,24 +4366,157 @@ def mapping_to_csv_bytes(mapping, with_document=False):
     writer = csv.DictWriter(buf, fieldnames=fields, delimiter=";",
                             extrasaction="ignore")
     writer.writeheader()
-    writer.writerows(mapping)
+    writer.writerows(
+        {k: _safe_csv_cell(v) for k, v in riga.items()} for riga in mapping
+    )
     return buf.getvalue().encode("utf-8-sig")
 
 
+def _safe_csv_cell(valore):
+    """
+    Neutralizza le celle che un foglio di calcolo eseguirebbe come
+    formula: il testo oscurato viene dal documento (o dal nome del file)
+    e può cominciare con "=" o "@". L'apostrofo iniziale lo fa trattare
+    come testo. I numeri con segno ("+39 0461...") restano come sono.
+    """
+    if not isinstance(valore, str) or not valore:
+        return valore
+    primo = valore[0]
+    if primo in "=@\t\r" or (primo in "+-" and len(valore) > 1
+                             and not (valore[1].isdigit() or valore[1] == " ")):
+        return "'" + valore
+    return valore
+
+
+_PAROLA_NOME_FILE = re.compile(r"[^\W\d_]{3,}")
+
+
+def nome_file_uscita(res, indice, estensione=".pdf", prefisso=None):
+    """
+    A9: nome del file da scaricare.
+
+    Di norma resta il nome originale con il prefisso, comodo per
+    ritrovare l'atto. Ma "Ricorso Rossi c. Bianchi.pdf" porterebbe i nomi
+    delle parti nel nome del file anonimizzato: se una parola del nome
+    coincide con un testo oscurato in quel documento, si usa un nome
+    neutro ("anonimizzato_documento_1.pdf").
+    Il nome è sempre ridotto al solo file, senza cartelle.
+    """
+    if prefisso is None:
+        prefisso = "pseudonimizzato" if res.get("redaction_mode") == "codes" else "anonimizzato"
+    nome = os.path.basename(str(res.get("source_name") or "").replace("\\", "/"))
+    base = os.path.splitext(nome)[0] or f"documento_{indice}"
+    oscurati = set()
+    for riga in res.get("log") or []:
+        oscurati.update(_PAROLA_NOME_FILE.findall(str(riga.get("Testo", "")).lower()))
+    for riga in res.get("mapping") or []:
+        oscurati.update(_PAROLA_NOME_FILE.findall(str(riga.get("Testo originale", "")).lower()))
+    if oscurati & set(_PAROLA_NOME_FILE.findall(base.lower())):
+        base = f"documento_{indice}"
+    return f"{prefisso}_{base}{estensione}"
+
+
+def _elenco_pagine(pagine):
+    """[1, 2, 3, 7] -> "1-3, 7"."""
+    gruppi, inizio, prec = [], None, None
+    for n in sorted(set(pagine)):
+        if inizio is None:
+            inizio = prec = n
+        elif n == prec + 1:
+            prec = n
+        else:
+            gruppi.append((inizio, prec))
+            inizio = prec = n
+    if inizio is not None:
+        gruppi.append((inizio, prec))
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in gruppi)
+
+
+def messaggi_avvisi(avvisi):
+    """
+    Trasforma gli avvisi di redact_pdf in messaggi per l'utente.
+    Ritorna una lista di (livello, testo), con livello "error", "warning"
+    o "info". I messaggi restano a schermo insieme ai risultati: prima
+    comparivano un istante durante l'elaborazione e sparivano al primo
+    clic su un download.
+    """
+    avvisi = avvisi or {}
+    messaggi = []
+    if avvisi.get("pagine_fallite"):
+        messaggi.append(("error",
+            f"**Pagine non analizzate per un errore: {_elenco_pagine(avvisi['pagine_fallite'])}.** "
+            "Nel PDF sono state sostituite da pagine nere, per non lasciarle in chiaro. "
+            "Riprova; se l'errore si ripete, prova la modalità OCR \"Forza OCR su tutto\"."))
+    if avvisi.get("pagine_senza_ocr"):
+        messaggi.append(("error",
+            f"**Pagine scansionate NON lette: {_elenco_pagine(avvisi['pagine_senza_ocr'])}.** "
+            "Sono immagini e l'OCR non era attivo o disponibile: tutto ciò che contengono "
+            "è rimasto in chiaro. Installa Tesseract o scegli una modalità OCR, poi rilancia."))
+    if avvisi.get("pagine_immagini_non_lette"):
+        messaggi.append(("warning",
+            f"**Immagini non lette alle pagine: {_elenco_pagine(avvisi['pagine_immagini_non_lette'])}.** "
+            "Firme, timbri o foto di documenti dentro pagine di testo non passano dall'OCR "
+            "in modalità Automatica. Se possono contenere dati, rilancia con "
+            "\"Forza OCR su tutto\" (o attiva \"Oscura firme e scritte a mano\")."))
+    if avvisi.get("pagine_ritaglio_non_analizzato"):
+        messaggi.append(("error",
+            "**Pagine ritagliate non analizzate per intero: "
+            f"{_elenco_pagine(avvisi['pagine_ritaglio_non_analizzato'])}.** "
+            "Il testo fuori dal ritaglio non si vede ma può essere rimasto nel file. "
+            "Rilancia con \"Forza OCR su tutto\", che ricostruisce la pagina come immagine."))
+    if avvisi.get("ocr_senza_italiano"):
+        messaggi.append(("error",
+            "**OCR eseguito senza la lingua italiana.** Tesseract non ha il pacchetto "
+            "italiano: accenti e nomi vengono letti peggio e possono essere rimasti dati "
+            "in chiaro. Installa la lingua italiana di Tesseract e rilancia."))
+    if avvisi.get("pagine_ocr_incerto"):
+        messaggi.append(("warning",
+            f"**Lettura OCR incerta alle pagine: {_elenco_pagine(avvisi['pagine_ocr_incerto'])}.** "
+            "Molte parole sono state lette male e non analizzate (scansione sbiadita, "
+            "timbri sovrapposti, scrittura a mano): possono essere rimasti dati in chiaro. "
+            "Controlla quelle pagine o riprova con una risoluzione OCR più alta."))
+    if avvisi.get("termini_non_trovati"):
+        elenco = ", ".join(f"«{t}»" for t in avvisi["termini_non_trovati"])
+        messaggi.append(("warning",
+            f"**Termini specifici non trovati in questo documento: {elenco}.** "
+            "Controlla come sono scritti nel testo (refusi, abbreviazioni, a capo)."))
+    if avvisi.get("cognomi_non_propagati"):
+        elenco = ", ".join(f"«{t}»" for t in avvisi["cognomi_non_propagati"])
+        messaggi.append(("warning",
+            f"**Cognomi oscurati solo accanto al nome: {elenco}.** "
+            "Coincidono con parole comuni o sono molto corti, quindi dove compaiono "
+            "da soli non vengono oscurati automaticamente. Se serve, aggiungili ai "
+            "termini specifici."))
+    if avvisi.get("campi_modulo"):
+        messaggi.append(("info",
+            f"Il PDF era un modulo compilabile ({avvisi['campi_modulo']} campi): i valori "
+            "sono diventati testo della pagina e sono stati analizzati come il resto. "
+            "Il file prodotto non è più compilabile."))
+    return messaggi
+
+
 def build_results_zip(risultati, shared_mapping=None):
-    """R-16: ZIP con tutti i PDF elaborati (+ tabelle di accoppiamento)."""
+    """
+    R-16: ZIP con tutti i PDF elaborati.
+
+    A8: le tabelle di accoppiamento NON entrano nello ZIP. Sono la chiave
+    di re-identificazione: chi inoltrava lo ZIP consegnava documenti e
+    chiave insieme, contro l'avvertenza mostrata a schermo. Si scaricano
+    a parte, con i loro pulsanti. `shared_mapping` resta nella firma per
+    compatibilità e non viene usato.
+    I documenti non prodotti (errore) vengono saltati.
+    """
     zip_buf = BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for res in risultati:
-            prefix = "pseudonimizzato" if res["redaction_mode"] == "codes" else "anonimizzato"
-            zf.writestr(f"{prefix}_{res['source_name']}", res["output_bytes"])
-            if shared_mapping is None and res["mapping"]:
-                base = os.path.splitext(res["source_name"])[0]
-                zf.writestr(f"accoppiamento_{base}.csv",
-                            mapping_to_csv_bytes(res["mapping"]))
-        if shared_mapping:
-            zf.writestr("accoppiamento_fascicolo.csv",
-                        mapping_to_csv_bytes(shared_mapping, with_document=True))
+        usati = set()
+        for indice, res in enumerate(risultati, start=1):
+            if not res.get("output_bytes"):
+                continue
+            nome = nome_file_uscita(res, indice)
+            if nome in usati:   # due file caricati con lo stesso nome
+                nome = nome_file_uscita(res, indice).replace(".pdf", f"_{indice}.pdf")
+            usati.add(nome)
+            zf.writestr(nome, res["output_bytes"])
     return zip_buf.getvalue()
 
 
@@ -3425,7 +4527,7 @@ if uploaded_files:
             "⚠️ PDF troppo grandi (limite "
             f"{MAX_PDF_BYTES // 1024**2} MB): "
             + ", ".join(f"{f.name} ({f.size / 1024**2:.0f} MB)" for f in troppo_grandi)
-            + ". Suddividili o aumenta `maxUploadSize` in `.streamlit/config.toml`."
+            + ". Suddividili in più file."
         )
         st.stop()
     if not selected_entities and not custom_terms:
@@ -3434,8 +4536,16 @@ if uploaded_files:
         n_docs = len(uploaded_files)
         etichetta = ("🔒 Anonimizza documento" if n_docs == 1
                      else f"🔒 Anonimizza {n_docs} documenti")
-        # firma del set di file: cambia → i vecchi risultati non valgono più
-        firma_upload = [(f.name, f.size) for f in uploaded_files]
+        # Firma di file E impostazioni: se cambia una qualunque delle due
+        # i risultati a schermo non valgono più. Prima contavano solo i
+        # file: aggiungendo un termine o una categoria restavano visibili
+        # "completata" e i download del giro precedente.
+        firma_upload = [
+            [(f.name, f.size) for f in uploaded_files],
+            sorted(selected_entities), [t.strip() for t in custom_terms],
+            min_score, ocr_mode, ocr_dpi, redaction_mode,
+            exclude_magistrates, redact_handwriting, shared_codes,
+        ]
 
         if st.button(etichetta, type="primary", use_container_width=True):
 
@@ -3457,26 +4567,41 @@ if uploaded_files:
                     st.markdown(f"##### 📄 {i}/{n_docs} — {f.name}")
                 if assigner_condiviso is not None:
                     assigner_condiviso.current_document = f.name
-                output_bytes, log, mapping = redact_pdf(
-                    f.read(),
-                    selected_entities,
-                    custom_terms,
-                    analyzer,
-                    min_score=min_score,
-                    ocr_mode=ocr_mode,
-                    ocr_dpi=ocr_dpi,
-                    ocr_lang="ita" if ITALIAN_AVAILABLE else "eng",
-                    redaction_mode=redaction_mode,
-                    exclude_magistrates=exclude_magistrates,
-                    assigner=assigner_condiviso,
-                    redact_handwriting=redact_handwriting,
-                )
+                # Un documento che non si può elaborare non ferma gli altri
+                # e non mostra tracce dello stack: viene riportato come
+                # errore, senza file da scaricare.
+                try:
+                    output_bytes, log, mapping, avvisi = redact_pdf(
+                        f.read(),
+                        selected_entities,
+                        custom_terms,
+                        analyzer,
+                        min_score=min_score,
+                        ocr_mode=ocr_mode,
+                        ocr_dpi=ocr_dpi,
+                        ocr_lang="ita" if ITALIAN_AVAILABLE else "eng",
+                        redaction_mode=redaction_mode,
+                        exclude_magistrates=exclude_magistrates,
+                        assigner=assigner_condiviso,
+                        redact_handwriting=redact_handwriting,
+                    )
+                    errore = None
+                except DocumentoNonElaborabile as e:
+                    output_bytes, log, mapping, avvisi = None, [], [], {}
+                    errore = str(e)
+                except Exception as e:
+                    output_bytes, log, mapping, avvisi = None, [], [], {}
+                    logger.error("Elaborazione fallita: %s — %s",
+                                 type(e).__name__, str(e)[:200])
+                    errore = f"errore imprevisto ({type(e).__name__}); il file non viene prodotto"
                 # con codici condivisi il mapping cresce a ogni documento:
                 # teniamo traccia di quali codici sono NUOVI in questo file
                 risultati.append({
                     "output_bytes": output_bytes,
                     "log": log,
                     "mapping": mapping,
+                    "avvisi": avvisi,
+                    "errore": errore,
                     "redaction_mode": redaction_mode,
                     "source_name": f.name,
                 })
@@ -3501,17 +4626,37 @@ if uploaded_files:
         # --- RISULTATI (persistenti tra i rerun dei download) ---
         stato = st.session_state.get("risultati")
         if stato is not None and stato.get("firma") != firma_upload:
-            stato = None  # i file caricati sono cambiati
+            stato = None  # file o impostazioni sono cambiati
             st.session_state.pop("risultati", None)
+            st.info("File o impostazioni sono cambiati: premi di nuovo il "
+                    "pulsante per rielaborare con le scelte attuali.")
 
         if stato is not None:
-            risultati = stato["docs"]
+            tutti = stato["docs"]
             mapping_condiviso = stato["shared_mapping"]
-            res_mode = risultati[0]["redaction_mode"]
+            res_mode = tutti[0]["redaction_mode"]
+
+            # documenti non prodotti: errore chiaro, nessun download
+            for res in tutti:
+                if res.get("errore"):
+                    st.error(f"❌ **{res['source_name']}** non elaborato: {res['errore']}.")
+            risultati = [r for r in tutti if r.get("output_bytes")]
+            for res in risultati:
+                res["indice"] = tutti.index(res) + 1
+
             tot_redazioni = sum(len(r["log"]) for r in risultati)
             docs_con_esito = [r for r in risultati if r["log"]]
 
-            if tot_redazioni:
+            # avvisi dei documenti senza redazioni (gli altri li mostrano
+            # nel proprio riquadro, qui sotto)
+            for res in risultati:
+                if not res["log"]:
+                    for livello, testo in messaggi_avvisi(res.get("avvisi")):
+                        getattr(st, livello)(f"**{res['source_name']}** — {testo}")
+
+            if not risultati:
+                pass
+            elif tot_redazioni:
                 n_codici = (len(mapping_condiviso) if mapping_condiviso is not None
                             else sum(len(r["mapping"]) for r in risultati))
                 if res_mode == "codes":
@@ -3533,8 +4678,8 @@ if uploaded_files:
                     col_z1, col_z2 = st.columns([1, 1])
                     with col_z1:
                         st.download_button(
-                            label=f"📦 Scarica tutto ({len(risultati)} PDF, ZIP)",
-                            data=build_results_zip(risultati, mapping_condiviso),
+                            label=f"📦 Scarica tutti i PDF ({len(risultati)}, ZIP senza tabelle)",
+                            data=build_results_zip(risultati),
                             file_name="documenti_anonimizzati.zip",
                             mime="application/zip",
                             type="primary",
@@ -3554,7 +4699,7 @@ if uploaded_files:
                 for res in risultati:
                     res_log = res["log"]
                     res_mapping = res["mapping"]
-                    base_name = os.path.splitext(res["source_name"])[0]
+                    idx_doc = res["indice"]
                     if not res_log:
                         st.warning(
                             f"⚠️ **{res['source_name']}**: nessuna entità sensibile "
@@ -3567,25 +4712,35 @@ if uploaded_files:
                     contenitore = (st.expander(intestazione, expanded=len(risultati) <= 2)
                                    if intestazione else st.container())
                     with contenitore:
+                        # avvisi che restano a schermo insieme al download
+                        for livello, testo in messaggi_avvisi(res.get("avvisi")):
+                            getattr(st, livello)(testo)
+                        nome_pdf = nome_file_uscita(res, idx_doc)
+                        if not nome_pdf.endswith(f"_{os.path.splitext(res['source_name'])[0]}.pdf"):
+                            st.caption(
+                                "Il nome del file originale conteneva un dato oscurato: "
+                                f"il PDF viene scaricato come `{nome_pdf}`."
+                            )
                         col_a, col_b = st.columns([1, 2])
                         with col_a:
                             st.download_button(
                                 label="📥 Scarica PDF",
                                 data=res["output_bytes"],
-                                file_name=f"{prefix}_{res['source_name']}",
+                                file_name=nome_pdf,
                                 mime="application/pdf",
                                 type="primary" if len(risultati) == 1 else "secondary",
                                 use_container_width=True,
-                                key=f"dl_pdf_{base_name}",
+                                key=f"dl_pdf_{idx_doc}",
                             )
                             if res_mapping and mapping_condiviso is None:
                                 st.download_button(
                                     label="🔑 Scarica tabella di accoppiamento (CSV)",
                                     data=mapping_to_csv_bytes(res_mapping),
-                                    file_name=f"accoppiamento_{base_name}.csv",
+                                    file_name=nome_file_uscita(
+                                        res, idx_doc, ".csv", "accoppiamento"),
                                     mime="text/csv",
                                     use_container_width=True,
-                                    key=f"dl_csv_{base_name}",
+                                    key=f"dl_csv_{idx_doc}",
                                 )
                         with col_b:
                             types_count = Counter(item["Tipo"] for item in res_log)
@@ -3642,7 +4797,11 @@ with st.expander("ℹ️ Informazioni e avvertenze"):
 
     **Redazione scansioni (OCR):** il PDF viene rasterizzato e ricostruito come immagine con rettangoli neri (la pagina diventa solo immagine, non selezionabile).
 
-    **Sanitizzazione automatica (v1.1+):** il PDF di output viene ripulito da metadata (autore, titolo), annotazioni, allegati, campi form e JavaScript.
+    **Sanitizzazione automatica (v1.1+):** il PDF di output viene ripulito da metadata (autore, titolo), annotazioni, link, allegati e JavaScript.
+
+    **Moduli compilabili, livelli, pagine ritagliate (v2.2+):** i valori dei campi di un modulo diventano testo della pagina e vengono analizzati come il resto (il file prodotto non è più compilabile); i livelli nascosti vengono resi visibili e analizzati; il testo fuori dal ritaglio di una pagina viene analizzato e la pagina resta ritagliata.
+
+    **Pagine non analizzate (v2.2+):** se l'analisi o l'OCR di una pagina va in errore, la pagina esce **nera** e viene segnalata: non resta mai in chiaro.
 
     **Precisione (v1.2+):**
     - La redazione avviene alle **coordinate esatte** dell'occorrenza rilevata:
@@ -3658,8 +4817,11 @@ with st.expander("ℹ️ Informazioni e avvertenze"):
     **Limiti:**
     - L'OCR può perdere parole con scansioni di bassa qualità.
     - Nomi inusuali possono sfuggire — usa sempre i "termini specifici" per certezza.
+    - I cognomi che coincidono con parole comuni ("Piazza", "Giudice", "Corso") o di due lettere ("Re") vengono oscurati accanto al nome, non quando compaiono da soli: l'app li elenca e puoi aggiungerli ai termini specifici.
+    - I termini specifici che non trovano nulla nel documento vengono segnalati.
     - Date disabilitate di default perché spesso rilevanti nei documenti legali.
-    - Per documenti che contengono firme scansionate, foto di documenti d'identità o timbri all'interno di pagine altrimenti testuali, usa la modalità **"Forza OCR su tutto"**.
+    - In modalità Automatica le pagine-immagine vengono lette con l'OCR anche se hanno un po' di testo vero a margine (timbro, protocollo). Le immagini più piccole dentro pagine di testo (firme, timbri, foto di documenti) **non** vengono lette: l'app le segnala pagina per pagina; per leggerle usa **"Forza OCR su tutto"**.
+    - Lo ZIP "Scarica tutti i PDF" non contiene le tabelle di accoppiamento: si scaricano a parte.
     - Le filigrane diagonali (es. "copia comunicata ai soli fini...") possono
       perdere le lettere che attraversano fisicamente un'area oscurata.
 

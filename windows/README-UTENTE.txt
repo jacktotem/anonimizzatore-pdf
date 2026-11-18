@@ -58,6 +58,6 @@ Pannello di Controllo -> Programmi -> Anonimizzatore PDF
 
 SUPPORTO
 --------
-In caso di problemi, scrivi a: [inserire email]
+In caso di problemi, scrivi a: info@jacoporomani.it
 
 Log tecnici disponibili in: [cartella installazione]\logs\

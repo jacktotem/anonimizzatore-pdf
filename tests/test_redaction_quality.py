@@ -802,8 +802,8 @@ def test_zip_contiene_pdf_e_tabelle_per_documento():
     ]
     zf = zipfile.ZipFile(BytesIO(build_results_zip(risultati)))
     nomi = set(zf.namelist())
-    assert {"pseudonimizzato_uno.pdf", "pseudonimizzato_due.pdf",
-            "accoppiamento_uno.csv", "accoppiamento_due.csv"} == nomi
+    # A8: nello ZIP solo i PDF, mai le tabelle di accoppiamento
+    assert {"pseudonimizzato_uno.pdf", "pseudonimizzato_due.pdf"} == nomi
     assert zf.read("pseudonimizzato_due.pdf") == b"%PDF-2"
 
 
@@ -818,9 +818,9 @@ def test_zip_con_tabella_condivisa_unica():
                "Occorrenze": 3, "Documenti": "uno.pdf · due.pdf"}]
     zf = zipfile.ZipFile(BytesIO(build_results_zip(risultati, shared)))
     nomi = set(zf.namelist())
-    assert "accoppiamento_fascicolo.csv" in nomi
-    # con la tabella condivisa NON ci sono le tabelle per documento
-    assert not any(n.startswith("accoppiamento_uno") for n in nomi)
+    # A8: la tabella del fascicolo si scarica a parte, non con i PDF
+    assert not any(n.startswith("accoppiamento") for n in nomi)
+    assert nomi == {"pseudonimizzato_uno.pdf", "pseudonimizzato_due.pdf"}
 
 
 def test_zip_blackout_senza_csv():
@@ -861,14 +861,13 @@ def test_trim_org_scarta_le_sole_forme_giuridiche():
     assert is_false_positive("ORGANIZATION", residuo) is True
 
 
-def test_trim_org_non_usa_la_stoplist_delle_persone():
-    """'Italia' è in stoplist per le persone ma è parte del nome sociale:
-    il trim generico lo toglierebbe, quello per le organizzazioni no."""
+def test_trim_generico_tiene_una_parola_comune_che_fa_da_cognome():
+    """B1: con due sole parole la parola comune è il cognome ('Italia' è
+    anche un cognome); prima restava solo 'MONDI'."""
     t = "Società MONDI ITALIA SRL"
-    generico = t[slice(*trim_ner_span(t, 0, len(t)))]
-    org = t[slice(*trim_org_span(t, 0, len(t)))]
-    assert generico == "MONDI"          # comportamento del trim persone
-    assert org == "MONDI ITALIA"        # trim organizzazioni: nome intero
+    assert t[slice(*trim_ner_span(t, 0, len(t)))] == "MONDI ITALIA"
+    # il trim per le organizzazioni lo teneva già
+    assert t[slice(*trim_org_span(t, 0, len(t)))] == "MONDI ITALIA"
 
 
 def _org_tokens_da_testo(testo):

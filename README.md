@@ -72,10 +72,14 @@ Se Defender segnala l'exe, puoi aiutare tutti segnalando il falso positivo a Mic
 
 ```bash
 git clone https://github.com/jacktotem/anonimizzatore-pdf.git
-cd anonimizzatore-pdf/mac
-chmod +x installa.sh
+cd anonimizzatore-pdf
+# ultima versione rilasciata (il ramo principale può contenere modifiche non ancora rilasciate)
+git checkout "$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n 1)"
+cd mac
 ./installa.sh
 ```
+
+Per aggiornare in seguito: `./aggiorna.sh` nella cartella `mac`.
 
 Lo script installa automaticamente Homebrew, Python, Tesseract e tutte le dipendenze. Vedi [`mac/README-MAC.md`](mac/README-MAC.md) per i dettagli.
 

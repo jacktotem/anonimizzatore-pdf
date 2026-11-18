@@ -42,7 +42,7 @@ Le feature più richieste hanno priorità.
 
 ```bash
 # Clona il repository
-git clone https://github.com/[username]/anonimizzatore-pdf.git
+git clone https://github.com/jacktotem/anonimizzatore-pdf.git
 cd anonimizzatore-pdf
 
 # Ambiente virtuale
@@ -51,7 +51,7 @@ source venv/bin/activate  # su Windows: venv\Scripts\activate
 
 # Dipendenze
 pip install -r requirements.txt
-pip install -r requirements-dev.txt  # se presente
+pip install -r requirements-dev.txt
 python -m spacy download it_core_news_lg
 
 # Avvia in modalità sviluppo
@@ -126,11 +126,35 @@ chore: aggiorna versione spaCy a 3.7.5
 
 ## 🧪 Test
 
-Al momento il progetto non ha una suite di test automatizzata completa. Contributi in questa direzione sono **molto graditi**:
+```bash
+python -m pytest -q
+```
 
-- Test unitari per le funzioni di riconoscimento entità
-- Test di integrazione su PDF reali (anonimizzati)
-- Benchmark di precisione/recall
+La suite gira a ogni pull request (`.github/workflows/test.yml`), con la
+versione minima e con l'ultima di PyMuPDF ammesse da `requirements.txt`.
+
+- `tests/test_percorso_completo.py` — dal PDF d'ingresso al PDF prodotto:
+  cerca i dati nel testo, nei byte e nell'immagine del risultato. **Ogni
+  modifica che tocca la redazione deve avere un test qui.**
+- `tests/test_redaction_quality.py`, `tests/test_riconoscimento_audit.py`
+  — filtri e riconoscitori a regola, senza modello linguistico.
+- `tests/test_interfaccia.py` — l'interfaccia, con il banco di prova di
+  Streamlit (serve il modello italiano di spaCy; altrimenti si salta).
+- `tests/test_sanitize_*.py`, `tests/test_ambiente.py` — pulizia del PDF,
+  assenza di chiamate di rete, file temporanei.
+
+Due regole:
+
+1. **Solo dati di fantasia.** Mai nomi, codici fiscali, indirizzi, targhe
+   o numeri presi da atti veri: né nei test, né nei commenti, né nelle
+   descrizioni delle pull request. Il repository è pubblico.
+2. **`src/app.py` è l'unica fonte.** Dopo ogni modifica:
+   `bash scripts/sync-app.sh` aggiorna le copie in `mac/` e `windows/app/`
+   (la CI fallisce se differiscono).
+
+Mancano ancora, e sono benvenuti, un benchmark di precisione e
+richiamo su un corpus di atti sintetici e test su documenti di formati
+insoliti.
 
 ---
 
