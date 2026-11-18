@@ -1,226 +1,93 @@
-# 🚀 Guida al rilascio (per maintainer)
+# Guida al rilascio (per chi mantiene il progetto)
 
-Questa guida è per **te** (Jacopo), per gestire le release del progetto su GitHub.
+Come si pubblica oggi una nuova versione. Ogni passaggio che può essere
+controllato da una macchina lo è: se un controllo fallisce, non si rilascia.
 
----
+## In breve
 
-## 📋 Prima della prima release
+1. Le modifiche arrivano su `main` solo con una pull request.
+2. La pull request aggiorna versione e changelog.
+3. I test automatici devono essere verdi.
+4. Si pubblica una release su GitHub con il tag della versione.
+5. GitHub compila l'installer Windows, lo allega alla release e manda la
+   notifica via email.
 
-### 1. Aggiorna i placeholder
+## 1. Preparare la pull request
 
-Cerca e sostituisci nel repository:
-- `[username]` → il tuo username GitHub effettivo
-- `info@jacoporomani.it` → la tua email reale (commerciale + security)
-- `[inserire sito]` → l'URL della landing page (quando ce l'avrai)
-- `[inserire LinkedIn]` → il tuo profilo LinkedIn
+- **Codice:** si modifica solo `src/app.py`. Poi
+  `bash scripts/sync-app.sh` aggiorna le copie in `mac/` e `windows/app/`.
+- **Versione**, in tre punti che devono coincidere:
+  - `__version__` in `src/app.py`;
+  - `#define MyAppVersion` (e il commento sopra) in `windows/installer.iss`;
+  - una nuova sezione `## [X.Y.Z] - AAAA-MM-GG` in `CHANGELOG.md`, sotto
+    `## [Unreleased]`.
+- **Librerie:** l'unico elenco è `requirements.txt` (lo leggono
+  `mac/installa.sh` e `mac/aggiorna.sh`); `windows/setup-dependencies.ps1`
+  ne tiene una copia in `$PythonPackages`, che va tenuta identica.
+  Cambiare quell'elenco fa ricostruire l'ambiente agli utenti Windows al
+  prossimo aggiornamento: va detto nelle note di rilascio.
+- **Dati di esempio:** solo di fantasia, anche nei commenti e nella
+  descrizione della pull request.
 
-> ⚠️ Il check `scripts/release-checks.sh` (eseguito in CI) fallisce il build
-> se trova ancora `info@jacoporomani.it` in qualsiasi file
-> tracciato. Vedi issue N-01 (#5).
-
-Comando rapido (su Mac/Linux):
-```bash
-grep -rl "\[username\]" . | xargs sed -i '' 's/\[username\]/jacopo-romani/g'
-grep -rl "info@jacoporomani.it" . | \
-    xargs sed -i '' 's/info@jacoporomani.it/tua@email.it/g'
-```
-
-### 2. Scarica il testo completo della licenza AGPL v3
-
-```bash
-curl -O https://www.gnu.org/licenses/agpl-3.0.txt
-mv agpl-3.0.txt LICENSE
-```
-
-Poi aggiungi in cima al file le righe di copyright che trovi nel `LICENSE` attuale.
-
-### 3. Verifica i file
+Controllo locale, dalla radice del progetto:
 
 ```bash
-# Controlla che siano tutti presenti
-ls -la
-# Devi avere: README.md, LICENSE, NOTICE, CONTRIBUTING.md, CHANGELOG.md, .gitignore
+bash scripts/release-checks.sh
+python -m pytest -q
 ```
 
----
+## 2. Cosa controlla GitHub sulla pull request
 
-## 📤 Pubblicare la repository
+| Workflow | Cosa prova | Quando parte |
+|---|---|---|
+| `test.yml` | copie di `app.py` identiche, versione coerente, suite completa con PyMuPDF minimo e ultimo | ogni PR e ogni push su `main` |
+| `test-installazione-windows.yml` | installer vero su Windows in quattro scenari, poi la suite nell'ambiente installato | PR che toccano `windows/`, l'app, le librerie o i test; ogni lunedì |
+| `test-installazione-mac.yml` | `installa.sh` su un Mac pulito, librerie nei limiti, avvio dell'app, suite nell'ambiente installato | PR che toccano `mac/`, l'app, le librerie o i test; ogni lunedì |
 
-### Opzione A — Dall'interfaccia web GitHub (più semplice)
+Le prove del lunedì servono a scoprire quando una libreria pubblicata da
+altri rompe un'installazione da zero, anche se il progetto non è cambiato.
 
-1. Vai su https://github.com/new
-2. Compila:
-   - **Repository name**: `anonimizzatore-pdf`
-   - **Description**: "Anonimizzazione automatica e GDPR-compliant di documenti PDF per studi legali italiani"
-   - **Public** ✅
-   - **NON** spuntare "Initialize with README" (ce l'hai già)
-3. Clicca **Create repository**
-4. GitHub ti dà i comandi da lanciare nel terminale — segui quelli
+## 3. Unire e pubblicare
 
-### Opzione B — Da terminale (più professionale)
+1. Unire la pull request (squash).
+2. Creare la release dal commit appena unito:
 
-```bash
-cd anonimizzatore-pdf
+   ```bash
+   gh release create vX.Y.Z --target <commit completo> \
+     --title "vX.Y.Z — titolo breve" --notes-file note.md --latest
+   ```
 
-# Inizializza git
-git init
-git branch -M main
+   Le note sono per chi usa il programma: che cosa cambia per lui e come
+   aggiornare (Windows; Mac con git; Mac con zip; server, se serve
+   fermare l'attività).
+3. La pubblicazione fa partire due workflow:
+   - `build-installer.yml` compila l'installer **dal tag**, lo allega con
+     il file `.sha256` e aggiunge l'impronta alle note;
+   - `notifica-release.yml` aspetta che l'installer sia allegato e manda
+     la mail.
+4. Verificare: l'exe è tra gli allegati, l'impronta nelle note coincide
+   con quella del file scaricato.
 
-# Aggiungi tutti i file
-git add .
-git commit -m "Initial release v1.0.0"
+Su Mac non c'è nulla da compilare: `aggiorna.sh` porta le copie
+scaricate con git all'ultima versione rilasciata.
 
-# Collega al repo remoto
-git remote add origin https://github.com/[username]/anonimizzatore-pdf.git
+## Cose da non fare
 
-# Push
-git push -u origin main
-```
+- **Non compilare l'installer a mano** per allegarlo a una release: quello
+  pubblicato deve venire dal workflow, con la sua impronta.
+- **Non sostituire l'installer di una release già pubblicata.** Se c'è un
+  errore si pubblica una versione nuova.
+- **Non usare `git add .` o `git add -A`** senza guardare cosa entra: i
+  file locali (log di installazione, documenti di prova) non devono finire
+  nel repository pubblico.
 
----
+## Configurazione del repository
 
-## 🏷️ Creare una release
+- Secret: `RESEND_API_KEY`, `NOTIFY_EMAIL`, `NOTIFY_FROM` (gli indirizzi
+  sono secret perché il repository è pubblico e i log sono leggibili).
+- L'installer non è firmato digitalmente: vedi
+  [`FALSI-POSITIVI-ANTIVIRUS.md`](FALSI-POSITIVI-ANTIVIRUS.md).
 
-Le **release** di GitHub sono il modo "ufficiale" per distribuire i file compilati (es. `.exe`).
-
-### 1. Compila l'installer Windows
-
-Sul tuo PC Windows:
-1. Apri `windows/installer.iss` con Inno Setup
-2. Premi F9
-3. Si crea `windows/installer/AnonimizzatorePDF-Setup.exe`
-
-### 2. Crea il tag della versione
-
-```bash
-git tag -a v1.0.0 -m "Prima release pubblica"
-git push origin v1.0.0
-```
-
-### 3. Crea la release su GitHub
-
-1. Vai sulla tua repository GitHub
-2. Clicca **Releases** → **Draft a new release**
-3. Compila:
-   - **Tag**: seleziona `v1.0.0`
-   - **Title**: `v1.0.0 — Prima release pubblica`
-   - **Description**: copia il contenuto della sezione [1.0.0] dal `CHANGELOG.md`
-4. **Allega i file**:
-   - `AnonimizzatorePDF-Setup.exe` (installer Windows)
-   - Eventualmente uno zip della cartella `mac/`
-5. Clicca **Publish release**
-
-Ora chiunque può scaricare i file dalla pagina Releases del repository.
-
----
-
-## 🔄 Workflow per release future
-
-```
-1. Modifica codice in src/app.py
-   ↓
-2. Aggiorna CHANGELOG.md (sezione [Unreleased] → [1.x.x])
-   ↓
-3. Aggiorna versione nei file:
-   - windows/installer.iss → MyAppVersion
-   - mac/installa.sh → versione nel bundle .app
-   - README.md (se necessario)
-   ↓
-4. Commit + push
-   ↓
-5. git tag -a v1.x.x -m "Descrizione"
-   ↓
-6. Compila .exe Windows
-   ↓
-7. Crea release su GitHub con .exe allegato
-   ↓
-8. Annuncia la release (email clienti, LinkedIn, ecc.)
-```
-
----
-
-## 🎨 Setup avanzato (opzionale, ma utile)
-
-### GitHub Pages (landing page gratuita)
-
-1. Crea una cartella `docs/site/` con dentro un `index.html` semplice
-2. Vai su **Settings → Pages** del tuo repository
-3. Source: `Deploy from a branch`
-4. Branch: `main`, folder: `/docs/site` (o `/docs`)
-5. Save → dopo qualche minuto la pagina è online su `https://[username].github.io/anonimizzatore-pdf`
-
-### Domain personalizzato
-
-Se compri un dominio (es. `anonimizzatorepdf.it`):
-1. Configura il DNS per puntare a `[username].github.io`
-2. Su GitHub Pages → Custom domain → inserisci il dominio
-3. Aspetta la verifica (può richiedere ore)
-
-### Pulsanti Sponsor
-
-Nel file `.github/FUNDING.yml`:
-```yaml
-github: jacktotem
-custom: ["https://anonimizzatorepdf.it/dona"]
-```
-
-### Topics GitHub
-
-Vai sulla pagina del repository → bottone ⚙️ accanto a "About" → aggiungi topics:
-- `pdf-anonymization`
-- `gdpr`
-- `legal-tech`
-- `italian`
-- `presidio`
-- `streamlit`
-- `privacy`
-
-Migliora la discoverability.
-
----
-
-## 💰 Strategie commerciali
-
-### Step 1 — Validation (mese 1-2)
-
-- Pubblica su GitHub
-- Pubblica su LinkedIn
-- Contatta 5-10 studi legali per beta testing gratuito
-- Raccogli feedback e testimonianze
-
-### Step 2 — Landing page (mese 2-3)
-
-- Sito semplice con prezzi
-- Form di contatto
-- 2-3 testimonianze da beta tester
-- Demo video (Loom/screencast)
-
-### Step 3 — Vendite (mese 3+)
-
-- Email outreach a studi legali italiani
-- Partecipazione a eventi/webinar del settore legale
-- Articoli su Altalex, Diritto.it, ecc.
-- Google Ads su keyword tipo "anonimizzazione PDF studio legale"
-
-### Pricing iniziale suggerito
-
-Per i primi 5 clienti, prezzo **scontato**:
-- Professional: **€290** invece di €490
-- Enterprise: **€59/mese** invece di €99/mese
-
-Dopo i primi 5: prezzo pieno.
-
----
-
-## 📞 Quando hai bisogno di me
-
-Quando vuoi:
-- Aggiungere nuove feature
-- Risolvere bug
-- Creare la landing page
-- Scrivere copy commerciale
-- Preparare presentazioni per i clienti
-- Tradurre l'app in inglese
-- Sviluppare la versione Enterprise
-
-Chiedi pure! 🚀
+La procedura della versione 1.1.0 è conservata, come riferimento
+storico, in [`RELEASE-PROCEDURE-v1.1.0.md`](RELEASE-PROCEDURE-v1.1.0.md):
+non va seguita per le versioni attuali.

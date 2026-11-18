@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-18
+
 Correzioni dell'audit del 17 novembre 2026: il PDF prodotto contiene
 solo ciò che l'analisi ha visto.
+
+**Prima di aggiornare un server Windows** fermare l'attività
+"AnonimizzatorePDF Server": l'elenco delle librerie cambia e il setup
+ricostruisce l'ambiente dell'app (dalla 2.2.0 il setup prova a fermarla
+e riavviarla da solo).
 
 ### Security
 - **A1 — Campi modulo.** I valori digitati in un PDF compilabile
@@ -133,6 +140,27 @@ solo ciò che l'analisi ha visto.
   notifica aspetta che l'installer sia allegato e non parte per le
   pre-release.
 - `windows/README-UTENTE.txt` riportava "scrivi a: [inserire email]".
+
+### Changed (rete, file temporanei, documentazione)
+- **Nessuna chiamata di rete durante l'analisi.** Il riconoscitore di
+  email scaricava, al primo uso, l'elenco dei suffissi di dominio da
+  `publicsuffix.org`. Ora usa la copia inclusa nella libreria, senza
+  rete e senza cache. L'unica connessione resta la verifica degli
+  aggiornamenti, su richiesta.
+- **File temporanei dell'OCR** in una cartella dedicata all'app; quelli
+  rimasti da un'esecuzione interrotta vengono cancellati al riavvio.
+- **OCR senza italiano:** se Tesseract non ha la lingua italiana, l'app
+  lo segnala accanto al risultato invece di procedere in silenzio.
+- **Server Windows:** il setup ferma l'attività prima di ricostruire
+  l'ambiente e la riavvia alla fine; il collegamento punta a
+  `127.0.0.1`. Il README del server spiega i rischi dell'account SYSTEM,
+  delle cartelle scrivibili e della doppia icona, e corregge l'ordine
+  dei passaggi di aggiornamento.
+- **Documentazione allineata:** privacy (unica connessione, file
+  temporanei), FAQ ("il testo può essere recuperato?", più documenti),
+  versioni supportate, architettura, guida per chi contribuisce (test,
+  solo dati di fantasia), guida Mac (aggiornamento) e guida al rilascio,
+  riscritta sulla procedura reale.
 
 ### Added
 - **Test automatici in CI** (`.github/workflows/test.yml`): a ogni PR

@@ -785,10 +785,47 @@ function Test-PythonEnvironmentCurrent {
     return $true
 }
 
+# SRV-01: in modalità server l'app gira come attività pianificata e tiene
+# aperti i file del suo ambiente. Ricostruirlo con l'istanza in
+# esecuzione lasciava l'ambiente cancellato a metà e l'app inutilizzabile
+# (il README diceva di fermarla DOPO il setup). Qui la si ferma prima, se
+# c'è ed è in esecuzione, e la si riavvia a setup riuscito. Un errore in
+# questi due passaggi non interrompe il setup: finisce nel log.
+$script:ServerTaskName = "AnonimizzatorePDF Server"
+$script:ServerTaskDaRiavviare = $false
+
+function Stop-ServerTaskIfRunning {
+    try {
+        $task = Get-ScheduledTask -TaskName $script:ServerTaskName -ErrorAction SilentlyContinue
+        if ($task -and $task.State -eq "Running") {
+            Write-Log "Istanza server in esecuzione: la fermo prima di ricostruire l'ambiente"
+            Stop-ScheduledTask -TaskName $script:ServerTaskName -ErrorAction Stop
+            Start-Sleep -Seconds 5
+            $script:ServerTaskDaRiavviare = $true
+        }
+    } catch {
+        Write-Log ("Non riesco a fermare l'istanza server ($($_.Exception.Message)). " +
+                   "Se il setup fallisce, fermala a mano (Stop-ScheduledTask) e rilancia.") "WARN"
+    }
+}
+
+function Start-ServerTaskIfStopped {
+    if (-not $script:ServerTaskDaRiavviare) { return }
+    try {
+        Start-ScheduledTask -TaskName $script:ServerTaskName -ErrorAction Stop
+        Write-Log "Istanza server riavviata"
+    } catch {
+        Write-Log ("Non riesco a riavviare l'istanza server ($($_.Exception.Message)). " +
+                   "Riavviala a mano: Start-ScheduledTask -TaskName '$($script:ServerTaskName)'") "WARN"
+    }
+}
+
 function Setup-PythonEnvironment {
     Show-Progress "Creazione ambiente virtuale Python..." 55
 
     $venvPath = Join-Path $InstallPath "venv"
+
+    Stop-ServerTaskIfRunning
 
     if (Test-Path $venvPath) {
         Remove-Item -Path $venvPath -Recurse -Force
@@ -1020,6 +1057,7 @@ try {
 
     # 5. Verifica finale (NUOVA - I-02)
     Verify-Installation
+    Start-ServerTaskIfStopped
 
     Show-Progress "Installazione completata!" 100
     Write-Log "===== SETUP COMPLETATO CON SUCCESSO ====="

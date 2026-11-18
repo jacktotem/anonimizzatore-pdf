@@ -19,7 +19,7 @@ anonimizzatore-pdf/
 ├── .gitignore
 │
 ├── src/                        # ✨ Codice sorgente
-│   └── app.py                  # App Streamlit principale (~600 LOC)
+│   └── app.py                  # App Streamlit principale (unica fonte; copiata in mac/ e windows/app/)
 │
 ├── windows/                    # 🪟 Tutto per Windows
 │   ├── installer.iss           # Script Inno Setup
@@ -83,7 +83,7 @@ Per ogni pagina:
 
 ```
 Per ogni pagina scansionata:
-  ├─ Renderizza pagina a DPI scelto (default 200)
+  ├─ Renderizza pagina a DPI scelto (default 300)
   ├─ Tesseract analizza l'immagine
   ├─ Ottiene parole + bounding box + confidence
   └─ Filtra parole con confidence < 30
@@ -121,10 +121,22 @@ Presidio AnalyzerEngine
 ### 5. Redazione
 
 ```
-Per ogni entità rilevata:
-  ├─ Trova la posizione fisica nel PDF (search_for)
-  ├─ Aggiungi redact_annotation()
-  └─ apply_redactions(): rimuove fisicamente il testo
+Prima dell'analisi (prepare_source_document):
+  ├─ i campi dei moduli compilabili diventano testo della pagina
+  ├─ i livelli nascosti vengono resi visibili
+  └─ le pagine ritagliate vengono analizzate per intero
+     → il PDF prodotto contiene solo ciò che l'analisi ha visto
+
+Per ogni entità rilevata (pagine con testo):
+  ├─ Posizione dalle coordinate delle parole (build_word_map), non da
+  │  una ricerca di testo: si oscura solo l'occorrenza rilevata
+  ├─ 1ª passata: rimozione del testo con una fascia stretta al centro
+  │  della riga (non tocca le righe vicine)
+  └─ 2ª passata: riquadro nero o codice a piena altezza; cancella anche
+     i pixel delle immagini sottostanti
+
+Se l'analisi di una pagina fallisce: la pagina esce nera e viene
+segnalata, mai in chiaro.
 
 Per pagine OCR:
   ├─ Calcola bounding box delle entità sulla pagina

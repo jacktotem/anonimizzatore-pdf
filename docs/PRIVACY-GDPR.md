@@ -20,7 +20,8 @@ Tutta l'elaborazione (estrazione testo, OCR, riconoscimento entità, redazione) 
 |-------------|------|
 | L'utente carica un PDF tramite browser | Localmente |
 | Streamlit riceve il file via WebSocket sulla porta 8501 | Localmente (localhost) |
-| Il PDF viene scritto temporaneamente in `/tmp` o `%TEMP%` | Localmente |
+| Il PDF caricato resta nella memoria del programma | Localmente |
+| Solo per l'OCR: ogni pagina letta da Tesseract passa per qualche istante da un file temporaneo, in una cartella dedicata all'app | Localmente |
 
 **Nessun trasferimento di rete esterno.**
 
@@ -46,15 +47,15 @@ Tutta l'elaborazione (estrazione testo, OCR, riconoscimento entità, redazione) 
 |-------------|------|
 | PyMuPDF rimuove fisicamente il testo | Localmente |
 | Il PDF risultante viene messo a disposizione per il download | Localmente |
-| Una volta scaricato, il file temporaneo viene eliminato | Localmente |
+| I file temporanei dell'OCR vengono cancellati a fine pagina; quelli rimasti da un'esecuzione interrotta vengono cancellati al riavvio | Localmente |
 
 ---
 
 ## 🚫 Cosa NON facciamo
 
 ❌ **Niente cloud upload** — il PDF non viene mai inviato a server esterni
-❌ **Niente API esterne** — non si chiamano servizi di terze parti
-❌ **Niente telemetria** — Streamlit usage statistics è disabilitato esplicitamente
+❌ **Niente API esterne** — durante l'analisi non si chiama alcun servizio
+❌ **Niente telemetria** — le statistiche d'uso di Streamlit sono disattivate negli avvii forniti (icona, `avvia.sh`, modalità server); chi avvia l'app a mano deve passare `--browser.gatherUsageStats false`, come indicato nel README
 ❌ **Niente analytics** — non si tracciano metriche d'uso
 ❌ **Niente backup automatico** — l'utente decide cosa salvare
 ❌ **Niente account** — non c'è registrazione né login
@@ -130,12 +131,23 @@ Se in futuro vorrai usare la **versione Enterprise** con hosting centralizzato:
 
 ---
 
+## 🌐 L'unica connessione verso l'esterno
+
+L'app si collega a internet in un solo caso: quando premi **"Verifica
+aggiornamenti"** nella barra laterale. In quel momento chiede a
+`api.github.com` qual è l'ultima versione pubblicata, inviando solo il
+numero della versione installata. Nessun documento, nessun nome di file,
+nessun dato dell'analisi. Senza quel clic l'app non fa chiamate di rete.
+
+L'app è raggiungibile solo dal computer su cui gira (indirizzo
+`127.0.0.1`): gli altri dispositivi della rete non possono aprirla.
+
 ## 🔍 Vuoi verificare?
 
 Il codice è pubblico su GitHub. Puoi:
 
-1. Cercare la stringa `requests.get` o `urllib` nel codice — vedrai che esistono solo per il download iniziale di Tesseract/spaCy in fase di installazione
-2. Monitorare il traffico di rete dell'app con Wireshark o Little Snitch — vedrai solo connessioni locali (localhost:8501)
+1. Cercare la stringa `urllib` nel codice — compare in un solo punto, la verifica degli aggiornamenti (vedi sotto)
+2. Monitorare il traffico di rete dell'app con Wireshark o Little Snitch — durante l'elaborazione vedrai solo connessioni locali (127.0.0.1:8501)
 3. Lanciare l'app in una macchina senza internet — funziona identico (dopo l'installazione iniziale)
 
 ---

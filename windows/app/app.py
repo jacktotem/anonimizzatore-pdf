@@ -14,6 +14,8 @@ import os
 import re
 import sys
 import logging
+import tempfile
+import time
 import unicodedata
 import zipfile
 from io import BytesIO, StringIO
@@ -30,7 +32,7 @@ from presidio_analyzer import (
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_analyzer.predefined_recognizers import PhoneRecognizer
 
-__version__ = "2.1.7"
+__version__ = "2.2.0"
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -38,6 +40,64 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger("anonimizzatore-pdf")
+
+
+# ============================================================
+# NIENTE RETE E NIENTE RESIDUI SU DISCO DURANTE L'ANALISI (D5)
+# ============================================================
+
+def _disable_suffix_list_download():
+    """
+    Il riconoscitore di email di Presidio usa tldextract, che al primo
+    uso scarica l'elenco dei suffissi di dominio da publicsuffix.org e lo
+    salva in ~/.cache. Non esce alcun dato del documento, ma l'app
+    promette di non fare chiamate di rete durante l'analisi: qui si usa
+    la copia dell'elenco inclusa nella libreria, senza rete e senza cache.
+    """
+    try:
+        import tldextract
+        tldextract.extract = tldextract.TLDExtract(cache_dir=None, suffix_list_urls=())
+        return True
+    except Exception as e:
+        logger.warning("Impossibile disattivare il download di tldextract: %s",
+                       type(e).__name__)
+        return False
+
+
+def _use_private_temp_dir(max_age_seconds=3600):
+    """
+    Tesseract lavora su file: ogni pagina letta con l'OCR passa, per
+    qualche istante, da un file temporaneo. Qui quei file finiscono in
+    una cartella dedicata all'app (riservata all'utente dove il sistema
+    lo consente) e quelli rimasti da un'esecuzione interrotta vengono
+    cancellati al riavvio. Si cancellano solo i file più vecchi di
+    un'ora: in modalità server un'altra sessione può essere a metà di
+    un OCR.
+    """
+    try:
+        utente = os.environ.get("USERNAME") or os.environ.get("USER") or "utente"
+        utente = re.sub(r"[^A-Za-z0-9_-]", "_", utente)
+        cartella = os.path.join(tempfile.gettempdir(), f"anonimizzatore-pdf-{utente}")
+        if os.path.basename(os.path.normpath(tempfile.gettempdir())).startswith("anonimizzatore-pdf-"):
+            cartella = tempfile.gettempdir()        # già impostata in un giro precedente
+        os.makedirs(cartella, mode=0o700, exist_ok=True)
+        adesso = time.time()
+        for nome in os.listdir(cartella):
+            percorso = os.path.join(cartella, nome)
+            try:
+                if os.path.isfile(percorso) and adesso - os.path.getmtime(percorso) > max_age_seconds:
+                    os.remove(percorso)
+            except OSError:
+                pass
+        tempfile.tempdir = cartella
+        return cartella
+    except Exception as e:
+        logger.warning("Cartella temporanea dedicata non disponibile: %s", type(e).__name__)
+        return None
+
+
+_disable_suffix_list_download()
+_use_private_temp_dir()
 
 
 class DocumentoNonElaborabile(Exception):
@@ -61,6 +121,7 @@ class EsitoRedazione(NamedTuple):
     #   pagine_ocr_incerto        pagine OCR con molte parole lette male e scartate
     #   termini_non_trovati       termini specifici senza alcun riscontro
     #   cognomi_non_propagati     cognomi oscurati solo accanto al nome
+    #   ocr_senza_italiano        OCR eseguito senza la lingua italiana
     avvisi: dict
 
 
@@ -3554,6 +3615,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     pagine_senza_ocr = []
     pagine_ocr_incerto = []
     cognomi_ambigui = set()
+    # D3: l'OCR con un'altra lingua legge male accenti e nomi italiani
+    ocr_senza_italiano = False
     if redaction_mode == "codes" and assigner is None:
         assigner = CodeAssigner()
     elif redaction_mode != "codes":
@@ -3717,6 +3780,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 
         if plan["use_ocr"]:
             pagine_ocr_elenco.append(page_num)
+            if ocr_lang != "ita":
+                ocr_senza_italiano = True
             status_text.text(f"🖊️ Redazione pagina {page_num}/{total_pages}...")
             apply_scanned_redactions(
                 src_page, out_doc, plan["analysis"], custom_terms,
@@ -3819,6 +3884,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         "campi_modulo": campi_modulo,
         "termini_non_trovati": termini_non_trovati,
         "cognomi_non_propagati": sorted(cognomi_ambigui),
+        "ocr_senza_italiano": ocr_senza_italiano,
     }
     return EsitoRedazione(output_bytes.getvalue(), log, mapping, avvisi)
 
@@ -4247,6 +4313,11 @@ def messaggi_avvisi(avvisi):
             "Firme, timbri o foto di documenti dentro pagine di testo non passano dall'OCR "
             "in modalità Automatica. Se possono contenere dati, rilancia con "
             "\"Forza OCR su tutto\" (o attiva \"Oscura firme e scritte a mano\")."))
+    if avvisi.get("ocr_senza_italiano"):
+        messaggi.append(("error",
+            "**OCR eseguito senza la lingua italiana.** Tesseract non ha il pacchetto "
+            "italiano: accenti e nomi vengono letti peggio e possono essere rimasti dati "
+            "in chiaro. Installa la lingua italiana di Tesseract e rilancia."))
     if avvisi.get("pagine_ocr_incerto"):
         messaggi.append(("warning",
             f"**Lettura OCR incerta alle pagine: {_elenco_pagine(avvisi['pagine_ocr_incerto'])}.** "

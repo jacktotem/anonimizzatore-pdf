@@ -38,7 +38,9 @@ Sì, by design. Niente cloud, niente API esterne, niente telemetria.
 
 ### Il testo oscurato può essere recuperato?
 
-**No.** Il testo viene fisicamente rimosso dal PDF, non solo coperto. Le pagine OCR vengono ricostruite come immagini pure, non recuperabili con copy-paste.
+**Ciò che l'app ha riconosciuto, no.** Il testo viene fisicamente rimosso dal PDF, non solo coperto, e sotto i riquadri vengono cancellati anche i pixel delle immagini. Le pagine OCR vengono ricostruite come immagini pure. Campi dei moduli, livelli nascosti, link, commenti, allegati e metadati non vengono copiati nel file prodotto senza passare dall'analisi.
+
+Resta in chiaro ciò che l'app **non ha riconosciuto**: nessun riconoscimento automatico è infallibile. L'app segnala le situazioni a rischio (immagini non lette, pagine con OCR incerto, cognomi che coincidono con parole comuni, termini specifici non trovati), ma il PDF va sempre riletto prima di consegnarlo.
 
 ### Posso usarlo offline?
 
@@ -101,8 +103,7 @@ Streamlit mostra una progress bar durante l'elaborazione.
 
 ### Posso elaborare più PDF contemporaneamente?
 
-In modalità Community: un PDF alla volta.
-La modalità batch è prevista in una versione futura o Enterprise.
+Sì, fino a 5 PDF per volta. In pseudonimizzazione la stessa persona può ricevere lo stesso codice in tutti i documenti del fascicolo. Lo ZIP "Scarica tutti i PDF" contiene solo i documenti: le tabelle di accoppiamento si scaricano a parte.
 
 ### L'app sbaglia, come posso correggerla?
 

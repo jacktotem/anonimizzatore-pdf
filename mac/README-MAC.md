@@ -21,7 +21,7 @@ Compatibile con **Mac Intel** e **Mac Apple Silicon** (M1/M2/M3/M4).
 
 1. Scarica il repository:
    ```bash
-   git clone https://github.com/[username]/anonimizzatore-pdf.git
+   git clone https://github.com/jacktotem/anonimizzatore-pdf.git
    ```
    Oppure scarica lo zip dalla pagina GitHub e estrailo.
 
@@ -87,14 +87,27 @@ Dopo l'installazione trovi sul **Desktop** un'icona blu con un lucchetto:
 
 ## 🔧 Aggiornamenti
 
+**Se hai scaricato l'app con `git clone`:**
+
 ```bash
-cd anonimizzatore-pdf
-git pull
+cd anonimizzatore-pdf/mac
+./aggiorna.sh
 ```
 
-Oppure scarica solo il nuovo `app.py` da GitHub e sostituiscilo nella cartella `mac/`.
+Lo script porta il programma all'ultima versione rilasciata, allinea le
+librerie se sono cambiate e rigenera l'icona sul Desktop. Di solito ci
+mette pochi secondi.
 
-Nessuna reinstallazione necessaria.
+**Se hai scaricato lo zip:** scarica lo zip della nuova versione dalla
+[pagina delle release](https://github.com/jacktotem/anonimizzatore-pdf/releases/latest),
+estrailo e lancia `./installa.sh` nella nuova cartella `mac/`. Poi puoi
+eliminare la cartella vecchia.
+
+Non sostituire a mano il solo `app.py`: le librerie non verrebbero
+aggiornate, e una versione nuova dell'app può richiederne di più recenti.
+
+**Icona sparita o cartella spostata?** `./crea-icona.sh` ricrea l'icona
+sul Desktop senza reinstallare nulla.
 
 ---
 
@@ -119,7 +132,7 @@ Tasto destro sull'icona → "Apri" → conferma. Necessario solo la prima volta.
 
 ### "Ambiente virtuale non trovato"
 
-Hai spostato la cartella `mac/` dopo l'installazione. Rilancia `installa.sh` dalla nuova posizione.
+Hai spostato la cartella dopo l'installazione. Lancia `./crea-icona.sh` dalla nuova posizione: ricrea l'icona sul Desktop.
 
 ### "Tesseract non trova l'italiano"
 

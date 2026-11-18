@@ -43,7 +43,7 @@ le sessioni utente. Ogni avvocato la usa aprendo il collegamento
    Lo script:
    - registra l'attività pianificata **"AnonimizzatorePDF Server"** che avvia
      l'app all'accensione del server (account SYSTEM, riavvio automatico in
-     caso di crash);
+     caso di crash) — vedi "Account dell'attività" più sotto;
    - la avvia subito e verifica che risponda;
    - crea il collegamento **"Anonimizzatore PDF"** sul desktop di tutti gli utenti.
 
@@ -65,21 +65,61 @@ Parametri opzionali:
 - I documenti **non lasciano il server dello studio**: l'elaborazione è
   interamente locale (nessun cloud, nessuna API esterna), come nella
   versione desktop.
-- I PDF caricati vivono solo nella memoria della sessione browser e non
-  vengono salvati su disco dall'app.
+- I PDF caricati vivono nella memoria del programma. Solo l'OCR usa file
+  temporanei: ogni pagina letta da Tesseract passa per qualche istante
+  da un file nella cartella temporanea dell'account che esegue l'app, e
+  viene cancellata a fine pagina. I file rimasti da un'esecuzione
+  interrotta vengono cancellati al riavvio dell'app.
+- Tutti gli utenti del server usano la stessa istanza, **senza
+  autenticazione**: chiunque abbia una sessione sul server può aprire
+  l'app. Ogni sessione vede solo i propri documenti.
+
+### Account dell'attività
+
+Lo script registra l'attività con l'account **SYSTEM**, il più semplice
+da configurare. L'app apre PDF ricevuti da terzi con librerie in codice
+nativo (MuPDF, Tesseract): un PDF costruito per sfruttare un difetto di
+una di queste librerie agirebbe con i privilegi dell'account che esegue
+l'app, cioè — con SYSTEM — con il controllo completo del server.
+
+Dove il server ospita altri servizi o dati, conviene eseguire l'attività
+con un **account locale dedicato senza privilegi amministrativi**, con
+sola lettura sulla cartella dell'app: in Utilità di pianificazione, nelle
+proprietà dell'attività, "Cambia utente o gruppo". Tenere l'app
+aggiornata riduce comunque l'esposizione.
+
+Se l'app è installata fuori da `Program Files` (per esempio in
+`D:\Apps`), verificare che gli utenti normali **non possano scrivere**
+in quella cartella: chi può sostituire `app.py` o una libreria la fa
+eseguire con l'account dell'attività.
+
+Dopo la configurazione, sul desktop comune restano due icone con lo
+stesso nome: quella creata dall'installer (un file `.lnk`) avvia
+un'istanza privata per il singolo utente e va **rimossa**; quella creata
+da questo script (un file `.url`) apre l'istanza condivisa.
 
 ## Aggiornamento a una nuova versione
 
-1. Scarica ed esegui il nuovo `AnonimizzatorePDF-Setup-vX.Y.Z.exe`
-   (sovrascrive l'installazione esistente).
-2. Riavvia l'istanza:
+1. **Prima ferma l'istanza.** Quando cambiano le librerie il setup
+   ricostruisce l'ambiente dell'app: con l'istanza in esecuzione i file
+   sono in uso e l'aggiornamento resta a metà.
 
    ```powershell
-   Stop-ScheduledTask  -TaskName "AnonimizzatorePDF Server"
+   Stop-ScheduledTask -TaskName "AnonimizzatorePDF Server"
+   ```
+
+2. Scarica ed esegui il nuovo `AnonimizzatorePDF-Setup-vX.Y.Z.exe`
+   (sovrascrive l'installazione esistente).
+3. Riavvia l'istanza:
+
+   ```powershell
    Start-ScheduledTask -TaskName "AnonimizzatorePDF Server"
    ```
 
    (oppure semplicemente riavvia il server).
+
+Dalla 2.2.0 il setup ferma da solo l'attività se la trova in esecuzione
+e la riavvia alla fine; fermarla a mano resta la via più sicura.
 
 ## Rimozione della modalità server
 
