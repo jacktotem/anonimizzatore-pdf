@@ -57,3 +57,10 @@ def test_avviso_se_l_ocr_non_ha_l_italiano():
     livelli = [livello for livello, _ in app.messaggi_avvisi({"ocr_senza_italiano": True})]
     assert livelli == ["error"]
     assert app.messaggi_avvisi({"ocr_senza_italiano": False, "pagine_ocr": [1]}) == []
+
+
+def test_versioni_di_pymupdf_supportate():
+    assert app.pymupdf_supported("1.24.5") and app.pymupdf_supported("1.28.2")
+    assert not app.pymupdf_supported("1.24.2")      # manca la rimozione del solo testo
+    assert not app.pymupdf_supported("2.1")         # sposta il testo dopo una rimozione
+    assert not app.pymupdf_supported("non-una-versione")

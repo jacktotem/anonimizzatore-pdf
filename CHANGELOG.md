@@ -38,7 +38,8 @@ e riavviarla da solo).
   livelli vengono resi visibili prima dell'analisi.
 - **A5 — Pagine ritagliate.** Il testo fuori dal ritaglio restava nel
   file. Ora si analizza l'intera pagina fisica; la pagina prodotta
-  resta ritagliata come l'originale.
+  resta ritagliata come l'originale. Se una pagina ritagliata non si
+  riesce a estendere, l'app lo segnala con un errore invece di tacere.
 - **A6 — Link.** Restavano nelle pagine senza redazioni (per esempio
   un `mailto:` con nome e cognome). Non vengono più copiati.
 - **A8 — ZIP senza la chiave.** "Scarica tutto" metteva nello stesso
@@ -79,8 +80,10 @@ e riavviarla da solo).
   stretta, o con caratteri dal riquadro alto, la redazione cancellava
   anche parole non sensibili sopra e sotto, lasciando spazi bianchi.
   Il testo ora viene rimosso con una fascia centrale stretta e il
-  riquadro nero si disegna a parte, a piena altezza. Corregge anche le
-  parole mutilate accanto ai riquadri con PyMuPDF 2.x.
+  riquadro nero si disegna a parte, a piena altezza. Il testo ruotato
+  o in diagonale (timbri, filigrane, pagine scritte di lato) viene
+  rimosso con l'intero riquadro, e dopo la rimozione un controllo
+  verifica che sotto nessun riquadro sia rimasto un carattere.
 - **C3 —** La rimozione di JavaScript azzerava qualunque oggetto il
   cui testo contenesse "/JS", per esempio un carattere chiamato
   `JSABCD+Helvetica`. Ora guarda le chiavi dell'oggetto.
@@ -109,6 +112,10 @@ e riavviarla da solo).
 - `redact_pdf` restituisce anche gli avvisi (`pdf, log, mapping,
   avvisi`) e solleva `DocumentoNonElaborabile` per i PDF che non si
   possono trattare in modo sicuro.
+- PyMuPDF 2.x non è supportato (dopo una redazione sposta il testo
+  che segue sulla riga): `requirements.txt` lo esclude e, se l'app si
+  trova comunque a girare con una versione fuori dall'intervallo
+  provato, lo dice con un avviso in cima alla pagina.
 - PyMuPDF minimo 1.24.5. **Windows:** l'elenco delle librerie cambia,
   quindi l'aggiornamento ricostruisce l'ambiente; in modalità server
   fermare prima l'attività "AnonimizzatorePDF Server".

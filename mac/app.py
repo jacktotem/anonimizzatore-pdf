@@ -100,6 +100,24 @@ _disable_suffix_list_download()
 _use_private_temp_dir()
 
 
+# PyMuPDF 2.x non è supportato (requirements.txt lo esclude): dopo una
+# rimozione sposta a sinistra il testo che segue sulla riga, che finisce
+# sotto il riquadro. Con la rete di sicurezza di apply_redaction_plan
+# nessun dato resta estraibile, ma si perdono parole vicine. L'installer
+# Mac, fino alla 2.1.7, poteva installarlo: l'app lo dice chiaramente.
+PYMUPDF_VERSION = getattr(fitz, "VersionBind", "0")
+
+
+def pymupdf_supported(version=None):
+    """True se la versione di PyMuPDF è tra quelle provate (1.24.5 - 1.x)."""
+    try:
+        parti = [int(x) for x in re.findall(r"\d+", version or PYMUPDF_VERSION)[:3]]
+        parti += [0] * (3 - len(parti))
+        return (1, 24, 5) <= tuple(parti) < (2, 0, 0)
+    except Exception:
+        return False
+
+
 class DocumentoNonElaborabile(Exception):
     """Il PDF non si può elaborare in modo sicuro (protetto da password,
     illeggibile, pulizia finale non riuscita). Il messaggio è pensato per
@@ -122,6 +140,7 @@ class EsitoRedazione(NamedTuple):
     #   termini_non_trovati       termini specifici senza alcun riscontro
     #   cognomi_non_propagati     cognomi oscurati solo accanto al nome
     #   ocr_senza_italiano        OCR eseguito senza la lingua italiana
+    #   pagine_ritaglio_non_analizzato  pagine ritagliate non estese al foglio intero
     avvisi: dict
 
 
@@ -860,6 +879,7 @@ def build_word_map(page):
     words = page.get_text("words")
     # Ordine di lettura: blocco, riga, parola
     words.sort(key=lambda w: (w[5], w[6], w[7]))
+    righe = _text_lines_with_direction(page)
     full_text = ""
     entries = []
     for w in words:
@@ -870,14 +890,52 @@ def build_word_map(page):
             full_text += " "
         start = len(full_text)
         full_text += token
+        rect = fitz.Rect(w[0], w[1], w[2], w[3])
         entries.append({
             "start": start,
             "end": len(full_text),
-            "rect": fitz.Rect(w[0], w[1], w[2], w[3]),
+            "rect": rect,
             "text": token,
             "line": (w[5], w[6]),  # (blocco, riga) — per raggruppare i codici
+            # C1: la rimozione "a fascia" vale solo per il testo orizzontale
+            "horizontal": _is_horizontal_word(rect, token, righe),
         })
     return full_text, entries
+
+
+def _text_lines_with_direction(page):
+    """Righe di testo della pagina come (rettangolo, direzione)."""
+    righe = []
+    try:
+        for blocco in page.get_text("dict").get("blocks", []):
+            for riga in blocco.get("lines", []):
+                righe.append((fitz.Rect(riga["bbox"]), riga.get("dir", (1, 0))))
+    except Exception as e:
+        logger.warning("Direzione delle righe non disponibile: %s", type(e).__name__)
+    return righe
+
+
+def _is_horizontal_word(rect, text, righe):
+    """
+    True solo se la parola è scritta in orizzontale: la riga che la
+    contiene ha direzione orizzontale E la forma del rettangolo è quella
+    di una parola stesa (non più alta che larga). Nel dubbio False: per
+    il testo ruotato — timbri verticali a margine ("Firmato Da: ..."),
+    filigrane diagonali — la fascia centrale attraverserebbe solo le
+    lettere di mezzo, lasciando estraibili le altre.
+    """
+    if len(text) > 2 and rect.width < rect.height * 0.6:
+        return False
+    centro = fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+    scelta = None
+    for bbox, direzione in righe:
+        if bbox.contains(centro):
+            area = abs(bbox.width * bbox.height)
+            if scelta is None or area < scelta[0]:
+                scelta = (area, direzione)
+    if scelta is None:
+        return False
+    return abs(scelta[1][1]) < 0.02
 
 
 def rects_for_span(entries, start, end):
@@ -1167,10 +1225,14 @@ def add_redaction_for_hits(page, entries, word_hits, mode, code=None, piano=None
     fascia stretta e poi riquadri a piena altezza (C1). Senza `piano`
     la redazione viene aggiunta subito alla pagina, come un tempo.
     """
+    def orizzontale(idx):
+        return 0 <= idx < len(entries) and entries[idx].get("horizontal", True)
+
     coperture = []
     if mode != "codes":
-        for _idx, rect in word_hits:
-            coperture.append({"rect": rect, "fill": (0, 0, 0)})
+        for idx, rect in word_hits:
+            coperture.append({"rect": rect, "fill": (0, 0, 0),
+                              "fascia": orizzontale(idx)})
     else:
         label = f"[{code}]"
         for gi, group in enumerate(group_hits_by_line(entries, word_hits)):
@@ -1180,6 +1242,7 @@ def add_redaction_for_hits(page, entries, word_hits, mode, code=None, piano=None
             coperture.append({
                 "rect": union, "fill": (1, 1, 1),
                 "text": label if gi == 0 else "", "label": label,
+                "fascia": all(orizzontale(idx) for idx, _r in group),
             })
     if piano is not None:
         piano.extend(coperture)
@@ -1228,17 +1291,60 @@ def apply_redaction_plan(page, piano):
 
     Le coperture con "tutto": True (aree di firma) rimuovono anche il
     testo su tutta l'area, come prima.
+
+    La fascia vale solo per il testo orizzontale ("fascia": True). Per il
+    testo ruotato — timbri verticali a margine, filigrane diagonali —
+    attraverserebbe solo le lettere di mezzo: lì si rimuove con l'intero
+    rettangolo, come nelle versioni precedenti.
+
+    Rete di sicurezza: dopo la prima passata, se sotto una copertura
+    resta ancora del testo (un carattere il cui centro cade nel riquadro),
+    quella copertura viene ripassata con l'intero rettangolo. Sotto un
+    riquadro nero non deve restare testo estraibile, qualunque sia il
+    motivo per cui la fascia non è bastata.
     """
     if not piano:
         return
-    for c in piano:
-        fascia = c["rect"] if c.get("tutto") else text_removal_rect(c["rect"])
-        page.add_redact_annot(fascia, fill=False, cross_out=False)
-    page.apply_redactions(
-        images=fitz.PDF_REDACT_IMAGE_NONE,
-        graphics=fitz.PDF_REDACT_LINE_ART_NONE,
-        text=_REDACT_TEXT_REMOVE,
-    )
+
+    def _rimuovi_testo(rettangoli):
+        for r in rettangoli:
+            page.add_redact_annot(r, fill=False, cross_out=False)
+        page.apply_redactions(
+            images=fitz.PDF_REDACT_IMAGE_NONE,
+            graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+            text=_REDACT_TEXT_REMOVE,
+        )
+
+    def _zona(c):
+        return c["rect"] if c.get("tutto") else shrink_redact_rect(c["rect"])
+
+    _rimuovi_testo([
+        text_removal_rect(c["rect"]) if (c.get("fascia", True) and not c.get("tutto"))
+        else _zona(c)
+        for c in piano
+    ])
+
+    # Si guardano i singoli caratteri, non le parole: dopo una rimozione
+    # le parole ai lati del vuoto possono essere riunite in un'unica
+    # "parola" il cui centro cade proprio nel riquadro.
+    try:
+        centri = []
+        for blocco in page.get_text("rawdict").get("blocks", []):
+            for riga in blocco.get("lines", []):
+                for tratto in riga.get("spans", []):
+                    for car in tratto.get("chars", []):
+                        if car.get("c", "").strip():
+                            x0, y0, x1, y1 = car["bbox"]
+                            centri.append(fitz.Point((x0 + x1) / 2, (y0 + y1) / 2))
+    except Exception:
+        centri = None
+    if centri is None:
+        ancora = [_zona(c) for c in piano]          # nel dubbio, tutte
+    else:
+        ancora = [_zona(c) for c in piano
+                  if any(_zona(c).contains(p) for p in centri)]
+    if ancora:
+        _rimuovi_testo(ancora)
     for c in piano:
         _add_cover_annot(page, c)
     page.apply_redactions(
@@ -2553,8 +2659,11 @@ def expand_to_full_page(page):
     In una pagina ritagliata (con Anteprima o Acrobat) il testo fuori dal
     ritaglio non si vede e non veniva estratto, ma restava nel file e
     ricompariva togliendo il ritaglio. Analizzando l'intera pagina fisica
-    viene oscurato come il resto. Ritorna il ritaglio originale, da
-    ripristinare sulla pagina prodotta, oppure None se non c'era.
+    viene oscurato come il resto. Ritorna (ritaglio, riuscito): il
+    ritaglio originale da ripristinare sulla pagina prodotta (None se non
+    c'era) e False se la pagina è ritagliata ma non si è potuta estendere
+    — in quel caso ciò che sta fuori dal ritaglio NON viene analizzato e
+    redact_pdf lo segnala.
     """
     try:
         originale = fitz.Rect(page.cropbox)
@@ -2563,12 +2672,12 @@ def expand_to_full_page(page):
         intera = fitz.Rect(mb.x0, 0, mb.x1, mb.y1 - mb.y0)
         if (abs(originale.x0 - intera.x0) < 0.5 and abs(originale.y0 - intera.y0) < 0.5
                 and abs(originale.x1 - intera.x1) < 0.5 and abs(originale.y1 - intera.y1) < 0.5):
-            return None
+            return None, True
         page.set_cropbox(intera)
-        return originale
+        return originale, True
     except Exception as e:
         logger.warning("Estensione area visibile fallita: %s", type(e).__name__)
-        return None
+        return None, False
 
 
 def restore_crop(page, originale):
@@ -3614,6 +3723,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     pagine_immagini_non_lette = []
     pagine_senza_ocr = []
     pagine_ocr_incerto = []
+    pagine_ritaglio_non_analizzato = []
     cognomi_ambigui = set()
     # D3: l'OCR con un'altra lingua legge male accenti e nomi italiani
     ocr_senza_italiano = False
@@ -3656,7 +3766,9 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         status_text.text(f"🧠 Analisi pagina {page_num}/{total_pages}...")
 
         # A5: si analizza l'intera pagina fisica, non solo il ritaglio
-        ritaglio = expand_to_full_page(src_page)
+        ritaglio, esteso = expand_to_full_page(src_page)
+        if not esteso:
+            pagine_ritaglio_non_analizzato.append(page_num)
 
         # A2: scansione = poco testo OPPURE una grande immagine con quasi
         # nessuna parola sopra (scansione con timbro o protocollo a margine)
@@ -3881,6 +3993,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         "pagine_immagini_non_lette": pagine_immagini_non_lette,
         "pagine_senza_ocr": pagine_senza_ocr,
         "pagine_ocr_incerto": pagine_ocr_incerto,
+        "pagine_ritaglio_non_analizzato": pagine_ritaglio_non_analizzato,
         "campi_modulo": campi_modulo,
         "termini_non_trovati": termini_non_trovati,
         "cognomi_non_propagati": sorted(cognomi_ambigui),
@@ -3895,6 +4008,15 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 
 st.title("🔒 Anonimizzatore PDF")
 st.caption(f"Anonimizzazione documenti in locale · Powered by Microsoft Presidio + Tesseract OCR · v{__version__}")
+
+if not pymupdf_supported():
+    st.error(
+        f"⚠️ **Libreria PDF non supportata (PyMuPDF {PYMUPDF_VERSION}).** "
+        "Con questa versione l'oscuramento può cancellare o spostare parole "
+        "vicine a quelle oscurate. Su Mac lancia `./aggiorna.sh` nella cartella "
+        "`mac` (o reinstalla con `./installa.sh`); su Windows reinstalla l'ultima "
+        "versione. Fino ad allora controlla con più attenzione i PDF prodotti."
+    )
 
 # Banner stato OCR
 if TESSERACT_AVAILABLE and ITALIAN_AVAILABLE:
@@ -4313,6 +4435,12 @@ def messaggi_avvisi(avvisi):
             "Firme, timbri o foto di documenti dentro pagine di testo non passano dall'OCR "
             "in modalità Automatica. Se possono contenere dati, rilancia con "
             "\"Forza OCR su tutto\" (o attiva \"Oscura firme e scritte a mano\")."))
+    if avvisi.get("pagine_ritaglio_non_analizzato"):
+        messaggi.append(("error",
+            "**Pagine ritagliate non analizzate per intero: "
+            f"{_elenco_pagine(avvisi['pagine_ritaglio_non_analizzato'])}.** "
+            "Il testo fuori dal ritaglio non si vede ma può essere rimasto nel file. "
+            "Rilancia con \"Forza OCR su tutto\", che ricostruisce la pagina come immagine."))
     if avvisi.get("ocr_senza_italiano"):
         messaggi.append(("error",
             "**OCR eseguito senza la lingua italiana.** Tesseract non ha il pacchetto "

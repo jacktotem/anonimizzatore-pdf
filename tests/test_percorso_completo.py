@@ -169,6 +169,44 @@ def test_nessun_modulo_nel_catalogo_del_risultato():
     assert out.xref_get_key(out.pdf_catalog(), "AcroForm")[0] == "null"
 
 
+def test_dati_xfa_e_firma_digitale_non_restano_nel_file():
+    """A10: un modulo XFA e il dizionario di una firma digitale portano
+    con se' nomi e valori; non devono arrivare nel PDF prodotto."""
+    doc = _con_campo("valore qualsiasi")
+    base = fitz.open(stream=doc.tobytes(), filetype="pdf")
+    pagina = base[0]
+    catalogo = base.pdf_catalog()
+    # il modulo puo' stare nel catalogo o in un oggetto a parte
+    tipo, valore = base.xref_get_key(catalogo, "AcroForm")
+    if tipo == "xref":
+        acro, prefisso = int(valore.split()[0]), ""
+    else:
+        acro, prefisso = catalogo, "AcroForm/"
+    # flusso XFA con i dati del modulo
+    xfa = base.get_new_xref()
+    base.update_object(xfa, "<<>>")
+    base.update_stream(xfa, b"<xfa:data><cognome>Zanfretta</cognome></xfa:data>", compress=False)
+    base.xref_set_key(acro, prefisso + "XFA", f"{xfa} 0 R")
+    # campo firma con il nome del firmatario
+    firma = base.get_new_xref()
+    base.update_object(firma, "<</Type/Sig/Filter/Adobe.PPKLite/Name(Ermenegildo Zanfretta)"
+                              "/Reason(Sottoscrizione)/Contents<DEADBEEF>>>")
+    campo = base.get_new_xref()
+    base.update_object(campo, f"<</FT/Sig/T(firma_Zanfretta)/V {firma} 0 R/Type/Annot"
+                              f"/Subtype/Widget/Rect[0 0 0 0]/P {pagina.xref} 0 R>>")
+    campi = base.xref_get_key(acro, prefisso + "Fields")[1].strip("[]")
+    base.xref_set_key(acro, prefisso + "Fields", f"[{campi} {campo} 0 R]")
+    annots = base.xref_get_key(pagina.xref, "Annots")[1].strip("[]")
+    base.xref_set_key(pagina.xref, "Annots", f"[{annots} {campo} 0 R]")
+    sorgente = fitz.open(stream=base.tobytes(), filetype="pdf")
+    assert _nei_byte(sorgente, COGNOME)             # i dati ci sono, in ingresso
+
+    _, out = _esegui(sorgente)
+    assert not _nei_byte(out, COGNOME)
+    assert not _nei_byte(out, "DEADBEEF")
+    assert out.xref_get_key(out.pdf_catalog(), "AcroForm")[0] == "null"
+
+
 # ------------------------------------------------------------
 # A6: link
 # ------------------------------------------------------------
@@ -322,10 +360,46 @@ def test_immagine_piccola_non_letta_viene_segnalata():
     assert esito.avvisi["pagine_immagini_non_lette"] == [1]
 
 
+@serve_ocr
+def test_termini_e_propagazione_sulle_pagine_ocr():
+    """Sulle scansioni valgono le stesse regole delle pagine di testo:
+    il termine specifico viene trovato e un cognome noto viene coperto
+    anche nella forma elisa ("dell'Alonzi")."""
+    class SoloPrimaPagina(AnalizzatoreFinto):
+        def analyze(self, text, entities, language):
+            self.chiamate += 1
+            return super().analyze(text, entities, language) if self.chiamate == 1 else []
+
+    doc = fitz.open()
+    doc.new_page().insert_text(
+        (72, 90), "Il sig. Alonzi abita in citta' da molti anni e lavora come impiegato.", fontsize=12)
+    doc.insert_pdf(_scansione("La casa dell'Alonzi si trova a Rovereto."))
+    esito, out = _esegui(doc, SoloPrimaPagina(parole=("Alonzi",)), termini=["Rovereto"])
+    assert esito.avvisi["pagine_ocr"] == [2]
+    assert esito.avvisi["termini_non_trovati"] == []
+    letto = _ocr(out[1]).lower()
+    assert "alonzi" not in letto and "rovereto" not in letto
+    assert "casa" in letto
+
+
+def test_pagina_ritagliata_non_estendibile_viene_segnalata(monkeypatch):
+    """A5: se il foglio intero non si puo' analizzare, l'utente lo sa."""
+    doc, pagina = _pagina("Atto di citazione. Le parti hanno concluso come da verbale di udienza del giorno.")
+    pagina.set_cropbox(fitz.Rect(0, 0, pagina.rect.width, 700))
+    monkeypatch.setattr(app, "expand_to_full_page", lambda p: (None, False))
+    esito, _ = _esegui(doc)
+    assert esito.avvisi["pagine_ritaglio_non_analizzato"] == [1]
+    assert any(liv == "error" for liv, _ in app.messaggi_avvisi(esito.avvisi))
+
+
 # ------------------------------------------------------------
 # C1: le righe vicine restano intatte
 # ------------------------------------------------------------
 
+@pytest.mark.skipif(
+    not app.pymupdf_supported(),
+    reason="PyMuPDF fuori dai limiti di requirements.txt: sposta il testo dopo una rimozione",
+)
 def test_interlinea_stretta_non_cancella_le_righe_vicine():
     doc = fitz.open()
     pagina = doc.new_page()
@@ -341,6 +415,65 @@ def test_interlinea_stretta_non_cancella_le_righe_vicine():
     parole_dopo = [w[4] for w in out[0].get_text("words")]
     attese = [p for p in parole_prima if p not in (NOME, COGNOME)]
     assert parole_dopo == attese, "parole non sensibili perse o mutilate"
+
+
+def _pagina_con_testo_ruotato(disegna):
+    """Pagina con abbastanza testo da restare testuale (non OCR)."""
+    doc = fitz.open()
+    pagina = doc.new_page()
+    for i in range(6):
+        pagina.insert_text((72, 90 + i * 20),
+                           "Verbale di udienza del tribunale ordinario, sezione civile.", fontsize=11)
+    disegna(pagina)
+    return doc
+
+
+@pytest.mark.parametrize("gradi", [90, 180, 270])
+@pytest.mark.parametrize("modo", ["blackout", "codes"])
+def test_testo_ruotato_rimosso_per_intero(gradi, modo):
+    """Un timbro verticale a margine ("Firmato Da: ...") non deve lasciare
+    frammenti: la fascia centrale attraverserebbe solo le lettere di mezzo."""
+    doc = _pagina_con_testo_ruotato(lambda p: (
+        p.insert_text((400, 600), "Firmato Da: Ermenegildo Zanfretta Emesso Da", fontsize=10, rotate=gradi),
+        p.insert_text((430, 600), "Copia conforme all'originale informatico", fontsize=10, rotate=gradi),
+    ))
+    esito, out = _esegui(doc, redaction_mode=modo)
+    assert esito.avvisi["pagine_ocr"] == []
+    parole = out[0].get_text().split()
+    frammenti = [w for w in parole if w in ("Erm", "ildo", "Za", "tta") or
+                 (len(w) >= 2 and (w in NOME or w in COGNOME) and w not in ("Da", "a"))]
+    assert frammenti == [], f"frammenti del nome rimasti: {frammenti}"
+    assert not _nei_byte(out, COGNOME) and not _nei_byte(out, NOME)
+    assert "Firmato" in parole and "conforme" in parole     # il resto del timbro resta
+
+
+def test_filigrana_diagonale_rimossa_per_intero():
+    def filigrana(p):
+        m = fitz.Matrix(1, 0, 0, 1, 0, 0).prerotate(35)
+        p.insert_text((150, 600), "Copia per Ermenegildo Zanfretta ai soli fini", fontsize=16,
+                      morph=(fitz.Point(150, 600), m))
+    esito, out = _esegui(_pagina_con_testo_ruotato(filigrana))
+    assert esito.avvisi["pagine_ocr"] == []
+    parole = out[0].get_text().split()
+    assert all(not (len(w) >= 2 and (w in NOME or w in COGNOME)) for w in parole), parole
+    assert not _nei_byte(out, COGNOME)
+
+
+def test_nessun_testo_resta_sotto_un_riquadro():
+    """Rete di sicurezza: anche se la parola è marcata orizzontale per
+    errore, sotto la copertura non resta testo estraibile."""
+    doc = _pagina_con_testo_ruotato(lambda p: p.insert_text(
+        (400, 600), "Firmato Da: Ermenegildo Zanfretta Emesso Da", fontsize=10, rotate=90))
+    pagina = doc[0]
+    testo, voci = app.build_word_map(pagina)
+    for v in voci:
+        v["horizontal"] = True              # informazione sbagliata apposta
+    i = testo.index("Zanfretta")
+    analisi = {"full_text": testo, "entries": voci,
+               "results": [RecognizerResult("PERSON", i, i + 9, 0.85)]}
+    app.apply_text_redactions(pagina, analisi, [], set(), [], 1)
+    parole = pagina.get_text().split()
+    assert all(not (len(w) >= 2 and w in COGNOME) for w in parole), parole
 
 
 def test_riquadro_nero_a_piena_altezza():
