@@ -38,6 +38,8 @@ permissions:
 jobs:
   notifica:
     runs-on: ubuntu-latest
+    # Una pre-release non va annunciata come "da installare sul server"
+    if: github.event_name != 'release' || !github.event.release.prerelease
     steps:
       - name: Maschera il destinatario una tantum nei log
         # Letto dal file dell'evento e non da ${{ inputs.* }}: così il valore
@@ -64,7 +66,7 @@ jobs:
       # non esiste nel runner (il job gira su una macchina vuota).
       - name: Checkout
         if: steps.cfg.outputs.pronta == 'si'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Servono i tag delle release: la mail confronta l'elenco delle
           # librerie con la versione precedente per stimare la durata.
@@ -76,13 +78,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          TAG_RELEASE: ${{ github.event.release.tag_name }}
+          TAG_MANUALE: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-          else
-            TAG="${{ inputs.tag }}"
+          TAG="${TAG_RELEASE:-$TAG_MANUALE}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag non valido: deve avere la forma v1.2.3"
+            exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # La build dell'installer parte insieme a questo workflow e
+          # finisce qualche secondo dopo: senza attendere, la mail partiva
+          # senza il collegamento all'exe e senza la sua impronta.
+          for tentativo in $(seq 1 80); do
+            if gh release view "$TAG" -R "$REPO" --json assets -q '.assets[].name' | grep -q '\.exe$'; then
+              break
+            fi
+            if [ "$tentativo" -eq 80 ]; then
+              echo "::error::Dopo 20 minuti l'installer non è ancora allegato: la mail non parte"
+              exit 1
+            fi
+            sleep 15
+          done
           gh release view "$TAG" -R "$REPO" \
             --json name,body,url,publishedAt,assets > release.json
           # Release pubblicata subito prima di questa (per la stima della

@@ -106,7 +106,43 @@ solo ciò che l'analisi ha visto.
   quindi l'aggiornamento ricostruisce l'ambiente; in modalità server
   fermare prima l'attività "AnonimizzatorePDF Server".
 
+### Fixed (installazione e rilascio)
+- **F1 — Mac: librerie fuori dai limiti.** `installa.sh` aveva un
+  proprio elenco di librerie, senza i limiti di `requirements.txt`: un
+  Mac appena installato riceveva PyMuPDF 2.x e Pillow 13, versioni che
+  il progetto esclude. Ora legge `requirements.txt`, come Windows e
+  `aggiorna.sh`. Il modello linguistico si scarica dal rilascio
+  ufficiale con impronta SHA256 verificata, come su Windows.
+- **F2 — Mac: "installazione completata" anche in caso di errore.** Lo
+  stato dei comandi era quello di `tee`: un `pip` o un download falliti
+  non fermavano nulla. Ora lo script si ferma al primo errore con un
+  messaggio chiaro, e verifica che le librerie lavorino insieme e che
+  Tesseract abbia l'italiano.
+- **Mac: `aggiorna.sh`** porta all'ultima versione *rilasciata* (prima
+  scaricava il ramo `main`, quindi anche modifiche non ancora
+  rilasciate), riprende un aggiornamento delle librerie interrotto a
+  metà e rigenera l'icona sul Desktop.
+- **Mac: icona sul Desktop** funziona anche se la cartella ha un
+  apostrofo nel nome, trova Tesseract anche se Homebrew non è nel PATH
+  e riporta la versione vera. Si può ricreare con `crea-icona.sh`.
+- **Richiesta dell'email al primo avvio:** Streamlit si fermava in
+  console a chiedere un indirizzo, che avrebbe inviato ai propri
+  server. Disattivata negli avvii di Windows e Mac.
+- **Build dell'installer:** compila sempre dal tag indicato e non
+  sostituisce più l'exe di una release già pubblicata. La mail di
+  notifica aspetta che l'installer sia allegato e non parte per le
+  pre-release.
+- `windows/README-UTENTE.txt` riportava "scrivi a: [inserire email]".
+
 ### Added
+- **Test automatici in CI** (`.github/workflows/test.yml`): a ogni PR
+  la suite completa con la versione minima e con l'ultima di PyMuPDF,
+  il confronto delle tre copie di `app.py` e i controlli di rilascio
+  (ora anche versione coerente tra `app.py`, installer e changelog).
+- **Prova di installazione su Mac** in CI: esegue `installa.sh`,
+  verifica le librerie, avvia l'app e fa girare la suite nel suo
+  ambiente. La prova Windows ora esegue la suite nell'ambiente
+  installato e parte anche quando cambiano l'app o le librerie.
 - Test dell'intero percorso (`tests/test_percorso_completo.py`): dal
   PDF d'ingresso al PDF prodotto, cercando i dati nel testo, nei byte
   e nell'immagine. Test dell'interfaccia (`tests/test_interfaccia.py`).

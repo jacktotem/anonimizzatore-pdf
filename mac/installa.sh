@@ -5,7 +5,14 @@
 # Compatibile con Apple Silicon (M1/M2/M3/M4) e Intel
 # ============================================================
 
-set -e
+# -e: ci si ferma al primo errore. pipefail: vale anche per i comandi
+# il cui output passa da `tee` per finire nel log — senza, lo stato era
+# quello di tee e un pip o un download falliti non fermavano nulla:
+# lo script arrivava comunque a "INSTALLAZIONE COMPLETATA" (audit F2).
+set -eo pipefail
+
+# Con ANONIMIZZATORE_NON_INTERATTIVO=1 non si fanno domande (test in CI).
+NON_INTERATTIVO="${ANONIMIZZATORE_NON_INTERATTIVO:-0}"
 
 # Colori
 RED='\033[0;31m'
@@ -15,6 +22,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 cd "$SCRIPT_DIR"
 
 LOG_DIR="$SCRIPT_DIR/logs"
@@ -52,6 +60,23 @@ print_error() {
 print_success() {
     echo -e "${GREEN}✅ $1${NC}"
     log "OK: $1"
+}
+
+# Qualunque errore non gestito: messaggio chiaro, non un'uscita muta.
+errore_imprevisto() {
+    print_error "Installazione interrotta da un errore (riga $1)."
+    echo "L'app NON è installata correttamente. Dettagli nel log:"
+    echo "  $LOG_FILE"
+}
+trap 'errore_imprevisto $LINENO' ERR
+
+# Elenco delle lingue di Tesseract. Catturato in una variabile: con
+# pipefail, `tesseract --list-langs | grep -q` può dare falso anche se
+# la lingua c'è (grep chiude la pipe appena trova la riga).
+tesseract_ha_italiano() {
+    local lingue
+    lingue="$(tesseract --list-langs 2>&1 || true)"
+    grep -q "^ita$" <<< "$lingue"
 }
 
 detect_arch() {
@@ -145,7 +170,7 @@ install_tesseract() {
     if command -v tesseract &> /dev/null; then
         print_success "Tesseract già installato"
         
-        if tesseract --list-langs 2>&1 | grep -q "^ita$"; then
+        if tesseract_ha_italiano; then
             print_success "Lingua italiana Tesseract già presente"
         else
             print_step "Installazione lingua italiana per Tesseract..."
@@ -186,25 +211,19 @@ setup_venv() {
     
     pip install --upgrade pip setuptools wheel 2>&1 | tee -a "$LOG_FILE"
     
+    # F1: le librerie si leggono da requirements.txt, lo stesso elenco di
+    # Windows e di aggiorna.sh. Prima qui c'era una copia a mano senza i
+    # limiti superiori: un Mac appena installato riceveva PyMuPDF 2.x e
+    # Pillow 13, versioni che il progetto esclude e che nessun test copre.
+    if [[ ! -f "$REPO_ROOT/requirements.txt" ]]; then
+        print_error "Manca requirements.txt nella cartella superiore a mac/."
+        echo "Scarica la cartella completa del progetto, non solo mac/."
+        exit 1
+    fi
     print_step "Installazione librerie..."
-    pip install --only-binary=:all: \
-        "streamlit>=1.30.0" \
-        "pymupdf>=1.23.0" \
-        "presidio-analyzer>=2.2.0" \
-        "presidio-anonymizer>=2.2.0" \
-        "spacy>=3.7.0,<3.8.0" \
-        "pytesseract>=0.3.10" \
-        "Pillow>=10.0.0" \
-        "numpy>=1.26,<2.0" \
-        "pandas>=2.0,<2.3" \
-        "thinc>=8.2.2,<8.2.5" \
-        "preshed>=3.0.2,<3.0.14" \
-        "cymem>=2.0.2,<2.0.17" \
-        "murmurhash>=0.28.0,<1.0.17" \
-        "srsly>=2.4.3,<2.6.0" \
-        "blis>=0.7.8,<0.8.0" \
-        "pyarrow>=14,<26" 2>&1 | tee -a "$LOG_FILE"
-    
+    pip install --only-binary=:all: -r "$REPO_ROOT/requirements.txt" 2>&1 | tee -a "$LOG_FILE"
+    shasum -a 256 "$REPO_ROOT/requirements.txt" | awk '{print $1}' > venv/.requirements-installati
+
     print_success "Pacchetti Python installati"
 }
 
@@ -213,121 +232,41 @@ install_spacy_model() {
     print_warn "Questo passaggio richiede alcuni minuti..."
     
     source venv/bin/activate
-    python -m spacy download it_core_news_lg 2>&1 | tee -a "$LOG_FILE"
-    
-    if [[ $? -ne 0 ]]; then
-        print_error "Download modello spaCy fallito"
+
+    # Stesso file e stessa impronta che usa l'installer Windows: download
+    # diretto dal rilascio ufficiale, verifica SHA256, installazione dal
+    # file locale. La versione del modello (3.7.0) segue quella di spaCy
+    # in requirements.txt (>=3.7.0,<3.8.0).
+    local url="https://github.com/explosion/spacy-models/releases/download/it_core_news_lg-3.7.0/it_core_news_lg-3.7.0-py3-none-any.whl"
+    local atteso="f48bd152621c872c1f177dbe21929fbb28751e73eb3c61714cf6344c6d582bbf"
+    local cartella file ottenuto
+    cartella="$(mktemp -d)"
+    file="$cartella/it_core_news_lg-3.7.0-py3-none-any.whl"
+
+    if ! curl -fL --retry 3 --retry-delay 5 -o "$file" "$url" 2>&1 | tee -a "$LOG_FILE"; then
+        rm -rf "$cartella"
+        print_error "Download del modello linguistico fallito (controlla la connessione)"
         exit 1
     fi
-    
-    print_success "Modello linguistico italiano installato"
-}
+    ottenuto="$(shasum -a 256 "$file" | awk '{print $1}')"
+    if [[ "$ottenuto" != "$atteso" ]]; then
+        rm -rf "$cartella"
+        print_error "Il modello scaricato non corrisponde all'impronta attesa: non viene installato"
+        log "SHA256 atteso $atteso, ottenuto $ottenuto"
+        exit 1
+    fi
+    pip install --no-deps "$file" 2>&1 | tee -a "$LOG_FILE"
+    rm -rf "$cartella"
 
-generate_icon() {
-    if [[ -f "$SCRIPT_DIR/AppIcon.icns" ]]; then
-        log "Icona .icns già presente"
-        return 0
-    fi
-    
-    if [[ ! -f "$SCRIPT_DIR/icon-1024.png" ]]; then
-        print_warn "PNG sorgente icona non trovato, l'app userà l'icona di default"
-        return 0
-    fi
-    
-    print_step "Generazione icona macOS .icns..."
-    
-    ICONSET_DIR="$SCRIPT_DIR/AppIcon.iconset"
-    mkdir -p "$ICONSET_DIR"
-    
-    sips -z 16 16     "$SCRIPT_DIR/icon-1024.png" --out "$ICONSET_DIR/icon_16x16.png" &> /dev/null
-    sips -z 32 32     "$SCRIPT_DIR/icon-1024.png" --out "$ICONSET_DIR/icon_16x16@2x.png" &> /dev/null
-    sips -z 32 32     "$SCRIPT_DIR/icon-1024.png" --out "$ICONSET_DIR/icon_32x32.png" &> /dev/null
-    sips -z 64 64     "$SCRIPT_DIR/icon-1024.png" --out "$ICONSET_DIR/icon_32x32@2x.png" &> /dev/null
-    sips -z 128 128   "$SCRIPT_DIR/icon-1024.png" --out "$ICONSET_DIR/icon_128x128.png" &> /dev/null
-    sips -z 256 256   "$SCRIPT_DIR/icon-1024.png" --out "$ICONSET_DIR/icon_128x128@2x.png" &> /dev/null
-    sips -z 256 256   "$SCRIPT_DIR/icon-1024.png" --out "$ICONSET_DIR/icon_256x256.png" &> /dev/null
-    sips -z 512 512   "$SCRIPT_DIR/icon-1024.png" --out "$ICONSET_DIR/icon_256x256@2x.png" &> /dev/null
-    sips -z 512 512   "$SCRIPT_DIR/icon-1024.png" --out "$ICONSET_DIR/icon_512x512.png" &> /dev/null
-    cp "$SCRIPT_DIR/icon-1024.png" "$ICONSET_DIR/icon_512x512@2x.png"
-    
-    iconutil -c icns "$ICONSET_DIR" -o "$SCRIPT_DIR/AppIcon.icns" 2>&1 | tee -a "$LOG_FILE"
-    rm -rf "$ICONSET_DIR"
-    
-    if [[ -f "$SCRIPT_DIR/AppIcon.icns" ]]; then
-        print_success "Icona .icns generata"
-    fi
+    print_success "Modello linguistico italiano installato"
 }
 
 create_app_bundle() {
     print_step "Creazione applicazione .app sul Desktop..."
-    
-    APP_NAME="Anonimizzatore PDF"
-    DESKTOP_PATH="$HOME/Desktop"
-    APP_PATH="$DESKTOP_PATH/$APP_NAME.app"
-    
-    if [[ -d "$APP_PATH" ]]; then
-        rm -rf "$APP_PATH"
-    fi
-    
-    mkdir -p "$APP_PATH/Contents/MacOS"
-    mkdir -p "$APP_PATH/Contents/Resources"
-    
-    cat > "$APP_PATH/Contents/Info.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>launch</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.anonimizzatorepdf.app</string>
-    <key>CFBundleName</key>
-    <string>Anonimizzatore PDF</string>
-    <key>CFBundleDisplayName</key>
-    <string>Anonimizzatore PDF</string>
-    <key>CFBundleVersion</key>
-    <string>1.0.0</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>12.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>LSUIElement</key>
-    <false/>
-</dict>
-</plist>
-EOF
-    
-    cat > "$APP_PATH/Contents/MacOS/launch" <<EOF
-#!/bin/bash
-INSTALL_DIR="$SCRIPT_DIR"
-cd "\$INSTALL_DIR"
-
-if [[ ! -f "\$INSTALL_DIR/venv/bin/activate" ]]; then
-    osascript -e 'display alert "Errore" message "Ambiente virtuale non trovato. Lancia di nuovo installa.sh." as critical'
-    exit 1
-fi
-
-osascript <<APPLESCRIPT
-tell application "Terminal"
-    activate
-    do script "cd '\$INSTALL_DIR' && source venv/bin/activate && streamlit run app.py --server.headless false --server.address 127.0.0.1 --browser.gatherUsageStats false"
-end tell
-APPLESCRIPT
-EOF
-    
-    chmod +x "$APP_PATH/Contents/MacOS/launch"
-    
-    if [[ -f "$SCRIPT_DIR/AppIcon.icns" ]]; then
-        cp "$SCRIPT_DIR/AppIcon.icns" "$APP_PATH/Contents/Resources/AppIcon.icns"
-    fi
-    
-    print_success "App creata: $APP_PATH"
+    # Lo stesso script viene usato da aggiorna.sh per rigenerare l'icona
+    # delle copie già installate.
+    bash "$SCRIPT_DIR/crea-icona.sh" 2>&1 | tee -a "$LOG_FILE"
+    print_success "App creata sul Desktop"
 }
 
 run_tests() {
@@ -335,13 +274,30 @@ run_tests() {
     
     source venv/bin/activate
     
+    # Con pipefail ognuna di queste verifiche, se fallisce, ferma lo
+    # script: "INSTALLAZIONE COMPLETATA" compare solo se sono passate.
     python -c "import streamlit, pyarrow, fitz, pytesseract, spacy; from presidio_analyzer import AnalyzerEngine; print('✓ Tutti i pacchetti Python importati')" 2>&1 | tee -a "$LOG_FILE"
     python -c "import spacy; nlp = spacy.load('it_core_news_lg'); print('✓ Modello italiano caricato')" 2>&1 | tee -a "$LOG_FILE"
-    
-    if tesseract --list-langs 2>&1 | grep -q "^ita$"; then
-        log "✓ Tesseract italiano disponibile"
+    # Le librerie lavorano insieme? Tabella (pyarrow + numpy + pandas, il
+    # guasto della 2.1.5) e redazione in due passate (PyMuPDF abbastanza
+    # recente, e non una versione fuori dai limiti di requirements.txt).
+    python - <<'PY' 2>&1 | tee -a "$LOG_FILE"
+import inspect
+import fitz, pandas, pyarrow
+pyarrow.Table.from_pandas(pandas.DataFrame({"a": [1, 2]}))
+assert "text" in inspect.signature(fitz.Page.apply_redactions).parameters, "PyMuPDF troppo vecchio"
+assert hasattr(fitz.Document, "bake"), "PyMuPDF troppo vecchio"
+assert int(fitz.VersionBind.split(".")[0]) < 2, f"PyMuPDF {fitz.VersionBind} fuori dai limiti"
+print(f"✓ Librerie coerenti (PyMuPDF {fitz.VersionBind}, pyarrow {pyarrow.__version__})")
+PY
+
+    if ! tesseract_ha_italiano; then
+        print_error "Tesseract non ha la lingua italiana: l'OCR leggerebbe male nomi e accenti"
+        echo "Prova: brew install tesseract-lang   e rilancia questo script."
+        exit 1
     fi
-    
+    log "✓ Tesseract italiano disponibile"
+
     print_success "Verifica completata"
 }
 
@@ -362,7 +318,9 @@ main() {
     echo ""
     echo "Tempo stimato: 10-20 minuti."
     echo ""
-    read -p "Premi INVIO per continuare, o CTRL+C per annullare..."
+    if [[ "$NON_INTERATTIVO" != "1" ]]; then
+        read -p "Premi INVIO per continuare, o CTRL+C per annullare..."
+    fi
     
     check_macos
     install_xcode_tools
@@ -371,7 +329,6 @@ main() {
     install_tesseract
     setup_venv
     install_spacy_model
-    generate_icon
     create_app_bundle
     run_tests
     
@@ -386,9 +343,11 @@ main() {
     echo "  $LOG_FILE"
     echo ""
     
-    read -p "Vuoi aprire l'app ora? (s/n): " open_now
-    if [[ "$open_now" == "s" || "$open_now" == "S" ]]; then
-        open "$HOME/Desktop/Anonimizzatore PDF.app"
+    if [[ "$NON_INTERATTIVO" != "1" ]]; then
+        read -p "Vuoi aprire l'app ora? (s/n): " open_now
+        if [[ "$open_now" == "s" || "$open_now" == "S" ]]; then
+            open "$HOME/Desktop/Anonimizzatore PDF.app"
+        fi
     fi
 }
 

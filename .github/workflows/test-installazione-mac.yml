@@ -1,0 +1,138 @@
+# ============================================================
+# Prova di installazione su Mac
+#
+# Esegue mac/installa.sh su un Mac pulito, come farebbe un utente, e poi
+# usa l'app installata. Nasce dall'audit del 17 novembre 2026:
+#   - F1: l'installer Mac aveva un proprio elenco di librerie, senza i
+#     limiti di requirements.txt, e installava versioni mai provate;
+#   - F2: se un passaggio falliva, lo script arrivava comunque a
+#     "INSTALLAZIONE COMPLETATA".
+# Nessun test girava su Mac.
+#
+# Costa una ventina di minuti (Tesseract con le lingue, 540 MB di
+# modello): parte solo quando cambia ciò che prova, ogni lunedì e a mano.
+# ============================================================
+
+name: Test installazione Mac
+
+on:
+  # Come per Windows: le librerie cambiano su PyPI anche se noi non
+  # tocchiamo nulla. Meglio scoprirlo da un test che da un collega.
+  schedule:
+    - cron: "30 6 * * 1"
+  pull_request:
+    paths:
+      - "mac/**"
+      - "src/app.py"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - "tests/**"
+      - ".github/workflows/test-installazione-mac.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-mac-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installa:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      ANONIMIZZATORE_NON_INTERATTIVO: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Un'installazione che fallisce deve dirlo (F2)
+        run: |
+          cp requirements.txt requirements.buono
+          echo "pacchetto-che-non-esiste-anonimizzatore==0.0.1" >> requirements.txt
+          set +e
+          bash mac/installa.sh > prova-fallimento.log 2>&1
+          codice=$?
+          set -e
+          mv requirements.buono requirements.txt
+          tail -n 15 prova-fallimento.log
+          if [ "$codice" -eq 0 ]; then
+            echo "::error::installa.sh è terminato con successo nonostante una libreria inesistente"
+            exit 1
+          fi
+          if grep -q "INSTALLAZIONE COMPLETATA" prova-fallimento.log; then
+            echo "::error::installa.sh ha scritto INSTALLAZIONE COMPLETATA dopo un errore"
+            exit 1
+          fi
+          echo "Fallimento riportato correttamente (codice $codice)"
+
+      - name: Installa come un utente
+        run: bash mac/installa.sh
+
+      - name: Librerie dentro i limiti di requirements.txt (F1)
+        run: |
+          source mac/venv/bin/activate
+          pip freeze | grep -iE '^(pymupdf|pillow|streamlit|numpy|pandas|pyarrow|spacy|thinc|presidio)'
+          # pip check segnala librerie installate che non rispettano i
+          # vincoli dichiarate dalle altre
+          pip check
+          python - <<'PY'
+          import re, subprocess, sys
+          from importlib.metadata import version
+          from packaging.requirements import Requirement
+          fuori = []
+          for riga in open("requirements.txt", encoding="utf-8"):
+              riga = riga.split("#")[0].strip()
+              if not riga:
+                  continue
+              r = Requirement(riga)
+              v = version(r.name)
+              if not r.specifier.contains(v, prereleases=True):
+                  fuori.append(f"{r.name} {v} non rispetta {r.specifier}")
+          print("\n".join(fuori) or "tutte le librerie rispettano requirements.txt")
+          sys.exit(1 if fuori else 0)
+          PY
+
+      - name: Icona sul Desktop
+        run: |
+          L="$HOME/Desktop/Anonimizzatore PDF.app/Contents/MacOS/launch"
+          test -x "$L"
+          bash -n "$L"
+          grep -q -- "--server.address 127.0.0.1" "$L"
+          plutil -p "$HOME/Desktop/Anonimizzatore PDF.app/Contents/Info.plist" | grep CFBundleShortVersionString
+
+      - name: L'app installata parte e risponde solo in locale
+        run: |
+          cd mac
+          source venv/bin/activate
+          STREAMLIT_SERVER_SHOW_EMAIL_PROMPT=false streamlit run app.py \
+            --server.headless true --server.address 127.0.0.1 --server.port 8765 \
+            --browser.gatherUsageStats false > "$RUNNER_TEMP/app.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fs http://127.0.0.1:8765/_stcore/health > /dev/null; then break; fi
+            sleep 2
+          done
+          curl -fs http://127.0.0.1:8765/_stcore/health
+          echo
+          lsof -nP -iTCP:8765 -sTCP:LISTEN
+          if lsof -nP -iTCP:8765 -sTCP:LISTEN | grep -q '\*:8765'; then
+            echo "::error::l'app ascolta su tutte le interfacce"
+            exit 1
+          fi
+          kill %1 || true
+
+      - name: La suite di test nell'ambiente installato
+        run: |
+          source mac/venv/bin/activate
+          pip install -q "pytest>=8.0,<9.0"
+          python -m pytest -q -rs
+
+      - name: Allega i log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: log-installazione-mac
+          path: |
+            mac/logs/
+            prova-fallimento.log
+          if-no-files-found: warn
