@@ -44,7 +44,11 @@ https://github.com/explosion/spaCy
 Modello linguistico italiano (it_core_news_lg)
 ----------------------------------------------
 Copyright (c) Explosion AI
-Licenza: CC BY-SA 4.0
+Licenza: CC BY-NC-SA 3.0 (uso non commerciale)
+Fonti dichiarate dal modello: UD Italian ISDT (CC BY-NC-SA 3.0),
+WikiNER (CC BY 4.0), vettori fastText di Explosion (CC0).
+Il modello non è incluso in questo repository: viene scaricato
+durante l'installazione dal sito del produttore.
 https://spacy.io/models/it
 
 pytesseract

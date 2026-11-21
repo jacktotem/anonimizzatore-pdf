@@ -170,7 +170,8 @@ L'app include un pulsante **"Verifica aggiornamenti"** nella barra laterale: con
 |------------|----------|---------|
 | UI Web | Streamlit | Apache 2.0 |
 | Manipolazione PDF | PyMuPDF (fitz) | AGPL v3 |
-| NLP | spaCy + `it_core_news_lg` | MIT |
+| NLP | spaCy | MIT |
+| Modello linguistico italiano | `it_core_news_lg` | CC BY-NC-SA 3.0 (uso non commerciale) |
 | Riconoscimento entità | Microsoft Presidio | MIT |
 | OCR | Tesseract + pytesseract | Apache 2.0 / MIT |
 | Immagini | Pillow | HPND |
@@ -212,8 +213,8 @@ a capo; se il carattere di controllo torna, la confidenza è massima.
 
 - ✅ Tutto quello della Professional, più:
 - ✅ Hosting su server interno dello studio
-- ✅ Gestione utenti multipli con login
-- ✅ Audit log completo (chi ha anonimizzato cosa e quando)
+- 🔜 Gestione utenti multipli con login (in programma: oggi non disponibile)
+- 🔜 Audit log completo, chi ha anonimizzato cosa e quando (in programma: oggi non disponibile)
 - ✅ Supporto prioritario telefonico
 - ✅ Aggiornamenti continui
 - ✅ SLA garantito
