@@ -154,8 +154,8 @@ Certo! Funziona con qualsiasi PDF italiano. È stato pensato per il mondo legale
 
 Tutto della Professional, più:
 - ✅ Hosting su server interno dello studio
-- ✅ Gestione utenti multipli con login
-- ✅ Audit log completo
+- 🔜 Gestione utenti multipli con login (in programma: oggi non disponibile)
+- 🔜 Audit log completo (in programma: oggi non disponibile)
 - ✅ Supporto telefonico prioritario
 - ✅ SLA garantito
 
