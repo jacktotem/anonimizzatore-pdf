@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (documentazione)
+- **Licenza del modello linguistico.** `README.md` indicava il modello
+  italiano `it_core_news_lg` come MIT e `NOTICE` come CC BY-SA 4.0. La
+  licenza dichiarata dal modello è CC BY-NC-SA 3.0 (uso non commerciale).
+- Il README elencava tra le funzioni della versione Enterprise il login
+  multiutente e il registro di audit, che non esistono: ora sono
+  indicati come "in programma", anche nelle domande frequenti.
+
 ## [2.2.0] - 2026-11-18
 
 Correzioni dell'audit del 17 novembre 2026: il PDF prodotto contiene
