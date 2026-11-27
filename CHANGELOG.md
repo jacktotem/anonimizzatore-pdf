@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-27
+
+### Added
+- **Scansioni e documenti misti.** L'OCR compensa rotazione e inclinazione, riprova sulle letture incerte e analizza anche i timbri e le immagini piccole nelle pagine con testo selezionabile. Le zone con lettura ancora dubbia sono indicate per pagina e posizione.
+- **Anonimizzazione da cartella.** Il comando `batch` elabora un PDF alla volta, anche nelle sottocartelle, con nomi di uscita neutri e un riepilogo riservato. Le copie con avvisi finiscono in `da_verificare`. Il profilo Scansioni è predefinito per la cartella quando Tesseract è disponibile.
+
+### Fixed
+- Lo ZIP include soltanto i PDF con redazioni rilevate e senza avvisi di analisi. L'app avverte anche quando l'OCR non ricava parole utilizzabili.
+- Caricare un altro PDF con lo stesso nome e la stessa dimensione invalida correttamente il risultato precedente.
+
 ## [2.2.0] - 2026-11-18
 
 Correzioni dell'audit del 17 novembre 2026: il PDF prodotto contiene

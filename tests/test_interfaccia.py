@@ -27,10 +27,10 @@ APP = str(Path(__file__).resolve().parent.parent / "src" / "app.py")
 FRASE = "Il sig. Ermenegildo Zanfretta abita a Rovereto da molti anni e lavora in zona."
 
 
-def _pdf(con_immagine=False, password=None):
+def _pdf(con_immagine=False, password=None, frase=FRASE):
     doc = fitz.open()
     pagina = doc.new_page()
-    pagina.insert_text((72, 90), FRASE, fontsize=12)
+    pagina.insert_text((72, 90), frase, fontsize=12)
     if con_immagine:
         pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 300, 40), False)
         pix.clear_with(230)
@@ -87,3 +87,32 @@ def test_nome_file_con_dato_oscurato_viene_segnalato():
     at = _avvia("Ricorso Zanfretta.pdf", _pdf())
     assert not at.exception
     assert "documento_1.pdf" in _testi(at.caption)
+
+
+def test_caricamento_con_stesso_nome_e_dimensione_invalida_i_risultati():
+    primo = _pdf()
+    secondo = _pdf(frase=FRASE.replace("zona", "sede"))
+    dimensione = max(len(primo), len(secondo))
+    primo, secondo = primo.ljust(dimensione, b"\n"), secondo.ljust(dimensione, b"\n")
+    assert primo != secondo and len(primo) == len(secondo)
+    at = _avvia("atto.pdf", primo)
+    assert at.get("download_button")
+
+    at.file_uploader[0].set_value(("atto.pdf", secondo, "application/pdf")).run()
+
+    assert not at.exception
+    assert not at.get("download_button")
+    assert "premi di nuovo" in _testi(at.info)
+
+
+def test_zip_esclude_i_pdf_con_avvisi_di_analisi():
+    at = testing.AppTest.from_file(APP, default_timeout=180).run()
+    at.file_uploader[0].set_value([
+        ("testuale.pdf", _pdf(), "application/pdf"),
+        ("immagini.pdf", _pdf(con_immagine=True), "application/pdf"),
+    ]).run()
+    next(b for b in at.button if "Anonimizza" in b.label).click().run()
+
+    assert not at.exception
+    assert "1 PDF da verificare" in _testi(at.warning)
+    assert any("senza avvisi (1, ZIP)" in b.proto.label for b in at.get("download_button"))
