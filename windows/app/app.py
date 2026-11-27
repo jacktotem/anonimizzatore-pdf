@@ -7,9 +7,12 @@ Licenza: GNU AGPL v3.0
 (la versione è in __version__, più sotto)
 """
 
+import argparse
 import streamlit as st
 import fitz  # PyMuPDF
 import csv
+import hashlib
+import math
 import os
 import re
 import sys
@@ -20,6 +23,7 @@ import unicodedata
 import zipfile
 from io import BytesIO, StringIO
 from collections import Counter
+from pathlib import Path
 from typing import NamedTuple
 from presidio_analyzer import (
     AnalyzerEngine,
@@ -32,7 +36,9 @@ from presidio_analyzer import (
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_analyzer.predefined_recognizers import PhoneRecognizer
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
+# Limite per documento: il motore PDF lavora in memoria.
+MAX_PDF_BYTES = 100 * 1024 * 1024
 
 # Logging diagnostico (sostituisce i try/except: pass)
 logging.basicConfig(
@@ -142,6 +148,8 @@ class EsitoRedazione(NamedTuple):
     #   pagine_senza_ocr          scansioni non lette (Tesseract assente o "Mai OCR")
     #   campi_modulo              campi compilabili trasformati in testo
     #   pagine_ocr_incerto        pagine OCR con molte parole lette male e scartate
+    #   pagine_ocr_senza_parole   pagine elaborate dall'OCR senza parole utilizzabili
+    #   zone_ocr_da_verificare    pagina e posizione delle zone OCR dubbie
     #   termini_non_trovati       termini specifici senza alcun riscontro
     #   cognomi_non_propagati     cognomi oscurati solo accanto al nome
     #   ocr_senza_italiano        OCR eseguito senza la lingua italiana
@@ -164,7 +172,7 @@ TESSERACT_INIT_ERROR = None
 
 try:
     import pytesseract
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
 
     if sys.platform == "win32":
         # ORDINE IMPORTANTE: prima i path di sistema (richiedono admin per
@@ -194,19 +202,6 @@ except Exception as e:
     # Niente più 'pass' silenzioso: registriamo l'errore
     TESSERACT_INIT_ERROR = f"{type(e).__name__}"
     logger.warning("Inizializzazione Tesseract fallita: %s", e)
-
-
-# ============================================================
-# CONFIGURAZIONE PAGINA
-# ============================================================
-
-st.set_page_config(
-    page_title="Anonimizzatore PDF",
-    page_icon="🔒",
-    layout="wide",
-    initial_sidebar_state="expanded",
-    menu_items={},
-)
 
 
 # ============================================================
@@ -2190,7 +2185,6 @@ def build_license_plate_recognizer():
 # INIZIALIZZAZIONE MOTORE DI ANALISI
 # ============================================================
 
-@st.cache_resource(show_spinner=False)
 def initialize_analyzer():
     """Inizializza l'analyzer di Presidio con modello italiano."""
     configuration = {
@@ -2521,16 +2515,19 @@ COPERTURA_TESTO_MINIMA = 0.03
 AREA_IMMAGINE_DA_SEGNALARE = 0.02
 
 
-def _immagini_della_pagina(page):
+def _immagini_della_pagina(page, *, strict=False):
     """Rettangoli delle immagini visibili sulla pagina."""
     rettangoli = []
+    area_pagina = page.rect * page.derotation_matrix
     try:
         for info in page.get_image_info():
-            r = fitz.Rect(info["bbox"]) & page.rect
+            r = fitz.Rect(info["bbox"]) & area_pagina
             if not r.is_empty and r.width > 1 and r.height > 1:
                 rettangoli.append(r)
     except Exception as e:
         logger.warning("Elenco immagini fallito: %s", type(e).__name__)
+        if strict:
+            raise
     return rettangoli
 
 
@@ -2705,9 +2702,8 @@ def safe_error_message(action, exception):
     sensibili (stacktrace può contenere frammenti del PDF processato).
     """
     error_type = type(exception).__name__
-    # Logghiamo i dettagli completi (file locale), ma all'utente diamo solo il tipo
-    logger.error("%s: %s — %s", action, error_type, str(exception)[:200])
-    return f"❌ {action}: {error_type}. Controlla i log per i dettagli."
+    logger.error("%s: %s", action, error_type)
+    return f"❌ {action}: {error_type}."
 
 
 # ============================================================
@@ -2720,7 +2716,7 @@ def safe_error_message(action, exception):
 #      dell'occorrenza rilevata (niente più search_for globale)
 
 def analyze_text_page(page, selected_entities, analyzer, min_score,
-                      page_num, debug_first=False):
+                      page_num, debug_first=False, ui=st):
     """
     Analizza una pagina testuale. Ritorna un dict con la mappa parole,
     i risultati validi e i contatori diagnostici.
@@ -2728,7 +2724,7 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
     full_text, entries = build_word_map(page)
 
     if debug_first:
-        st.write(f"🔍 Pagina {page_num} (testuale) — primi 200 caratteri: `{full_text[:200]}`")
+        ui.write(f"🔍 Pagina {page_num} (testuale) — primi 200 caratteri: `{full_text[:200]}`")
 
     raw_count = 0
     results = []
@@ -2749,7 +2745,7 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
                     f"{r.entity_type}={full_text[r.start:r.end][:25]!r}(s={r.score:.2f})"
                     for r in all_results[:6]
                 ]
-                st.write(f"   Esempi grezzi: {' | '.join(debug_sample)}")
+                ui.write(f"   Esempi grezzi: {' | '.join(debug_sample)}")
 
             for r in all_results:
                 if r.score < min_score:
@@ -2800,7 +2796,7 @@ def analyze_text_page(page, selected_entities, analyzer, min_score,
             # L-03: messaggio sanitizzato, dettagli solo nei log.
             # A3: la pagina NON va avanti senza analisi — redact_pdf la
             # oscura per intero e la riporta tra le pagine fallite.
-            st.error(safe_error_message(f"Analisi pagina {page_num}", e))
+            ui.error(safe_error_message(f"Analisi pagina {page_num}", e))
             results = []
             failed = True
 
@@ -2964,13 +2960,13 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
     redacted_word_idx = set()
     piano = []   # coperture da applicare in due passate (C1)
 
-    def _log(tipo, testo, confidenza, code):
+    def _log(tipo, testo, confidenza, code, indici=()):
         row = {
             "Pagina": page_num,
             "Tipo": tipo,
             "Testo": testo,
             "Confidenza": confidenza,
-            "Metodo": "Testo",
+            "Metodo": "OCR" if any(entries[i].get("ocr") for i in indici) else "Testo",
         }
         if use_codes:
             row["Codice"] = code
@@ -2994,7 +2990,7 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
             code = assigner.assign("TERMINE PERSONALIZZATO", term) if use_codes else None
             add_redaction_for_hits(page, entries, word_hits, redaction_mode, code, piano)
             redacted_word_idx.update(match_indexes)
-            _log("TERMINE PERSONALIZZATO", term, "100%", code)
+            _log("TERMINE PERSONALIZZATO", term, "100%", code, match_indexes)
 
     # 2-3. Entità rilevate dall'analisi (solo l'occorrenza alle sue coordinate)
     pattern_results = [r for r in analysis["results"]
@@ -3026,7 +3022,7 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
         code = assigner.assign(result.entity_type, found_text) if use_codes else None
         add_redaction_for_hits(page, entries, word_hits, redaction_mode, code, piano)
         redacted_word_idx.update(idx for idx, _r in word_hits)
-        _log(result.entity_type, found_text, f"{result.score:.0%}", code)
+        _log(result.entity_type, found_text, f"{result.score:.0%}", code, (i for i, _ in word_hits))
 
     # 4. R-04/R-14: propagazione di nomi e società rilevati altrove
     #    (solo parole intere con iniziale maiuscola, mai sottostringhe)
@@ -3044,7 +3040,7 @@ def apply_text_redactions(page, analysis, custom_terms, known_person_tokens,
             page, entries, [(idx, entry["rect"])], redaction_mode, code, piano
         )
         redacted_word_idx.add(idx)
-        _log(prop_type, display, "—", code)
+        _log(prop_type, display, "—", code, (idx,))
 
     # 5. R-23: firme incollate come immagine nei PDF digitali. Sempre
     #    rettangolo nero, anche in pseudonimizzazione (come sulle
@@ -3386,55 +3382,168 @@ def detect_handwriting_regions(img, words, dpi):
 # maiuscolo e il NER statistico non lo riconosceva.
 
 
-def _ocr_page_words(src_page, dpi, lang, page_num):
-    """Renderizza la pagina e restituisce (immagine, parole OCR)."""
-    zoom = dpi / 72
-    pix = src_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-    img = Image.open(BytesIO(pix.tobytes("png")))
-
-    try:
-        ocr_data = pytesseract.image_to_data(
-            img, lang=lang, output_type=pytesseract.Output.DICT
-        )
-    except Exception as e:
-        # L-03: messaggio sanitizzato
-        st.warning(safe_error_message(f"OCR pagina {page_num}", e))
-        return img, None
-
-    words = []
-    scartate = 0
+def _leggi_ocr(img, lang, config):
+    ocr_data = pytesseract.image_to_data(
+        img, lang=lang, config=config, output_type=pytesseract.Output.DICT, timeout=45,
+    )
+    parole = []
     for i in range(len(ocr_data["text"])):
         word = ocr_data["text"][i].strip()
+        if not word:
+            continue
         try:
-            conf = int(ocr_data["conf"][i])
+            conf = float(ocr_data["conf"][i])
         except (ValueError, TypeError):
             conf = 0
-        if word and conf <= 30 and sum(c.isalpha() for c in word) >= 3:
-            scartate += 1   # B8: parola letta male, non analizzata
-        if word and conf > 30:
-            words.append({
-                "text": word,
-                "x": ocr_data["left"][i],
-                "y": ocr_data["top"][i],
-                "w": ocr_data["width"][i],
-                "h": ocr_data["height"][i],
-                "conf": conf,
-            })
-    _ocr_page_words.ultime_scartate = scartate
-    return img, words
+        x, y, w, h = (ocr_data[chiave][i] for chiave in ("left", "top", "width", "height"))
+        if w > 0 and h > 0:
+            parole.append({"text": word, "conf": conf, "box": fitz.Rect(x, y, x + w, y + h),
+                           "line": tuple(ocr_data[k][i] for k in ("block_num", "par_num", "line_num"))})
+    return parole
+
+
+def _angolo_ocr(img):
+    """Cerca una piccola inclinazione tramite il profilo orizzontale dell'inchiostro."""
+    import numpy as np
+
+    ridotta = img.copy()
+    ridotta.thumbnail((600, 600))
+    ridotta = ImageOps.autocontrast(ridotta)
+    if np.count_nonzero(np.asarray(ridotta) < 160) < 80:
+        return 0
+
+    def punteggio(angolo):
+        ruotata = ridotta.rotate(angolo, resample=Image.Resampling.BILINEAR, fillcolor=255)
+        righe = (np.asarray(ruotata) < 160).sum(axis=1)
+        return np.square(righe).sum()
+
+    base = punteggio(0)
+    migliore = max(range(-12, 13, 3), key=punteggio)
+    migliore = max(range(migliore - 1, migliore + 2), key=punteggio)
+    return migliore if punteggio(migliore) > 1.15 * base else 0
+
+
+def _rileggi_numero(img, parola, lang, dpi):
+    """Seconda lettura di un frammento numerico debole e della sua posizione."""
+    box = parola["box"]
+    bordo = max(4, math.ceil(box.height / 4))
+    zona = fitz.Rect(box.x0 - bordo, box.y0 - bordo, box.x1 + bordo, box.y1 + bordo).irect
+    zoom = 2
+    ritaglio = img.crop((max(0, zona.x0), max(0, zona.y0),
+                        min(img.width, zona.x1), min(img.height, zona.y1)))
+    ritaglio = ImageOps.expand(ImageOps.autocontrast(ritaglio), border=8, fill=255)
+    ritaglio = ritaglio.resize((ritaglio.width * zoom, ritaglio.height * zoom), Image.Resampling.BICUBIC)
+    try:
+        seconda = _leggi_ocr(ritaglio, lang, f"--psm 7 --dpi {min(600, dpi * zoom)}")
+    except RuntimeError:
+        return False
+    if len(seconda) != 1 or seconda[0]["conf"] < 65:
+        return False
+    nuova = seconda[0]["text"]
+    concorde = nuova.casefold() == parola["text"].casefold()
+    if any(c.isdigit() for c in nuova):
+        parola.update(text=nuova, conf=seconda[0]["conf"])
+    return concorde
+
+
+def _ocr_scansioni(img, dpi, lang, ritaglio):
+    angolo = _angolo_ocr(img)
+    preparata = (img.rotate(angolo, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=255)
+                 if angolo else img)
+    psm = 11 if ritaglio else 1  # testo sparso nei riquadri, orientamento automatico sulla pagina
+    parole = _leggi_ocr(preparata, lang, f"--psm {psm} --dpi {dpi}")
+    dubbie = sum(p["conf"] <= 30 for p in parole)
+    if not parole or dubbie >= max(2, len(parole) / 5):
+        try:
+            alternativa = _leggi_ocr(ImageOps.autocontrast(preparata), lang,
+                                      f"--psm {6 if ritaglio else 12} --dpi {dpi}")
+
+            def qualita(letta):
+                return sum(max(0, p["conf"] - 30) for p in letta if any(c.isalnum() for c in p["text"]))
+
+            if qualita(alternativa) > qualita(parole):
+                parole = alternativa
+        except RuntimeError:
+            pass  # resta la prima lettura con i relativi avvisi
+
+    numeri_dubbi = [p for p in parole if p["conf"] < 55 and any(c.isdigit() for c in p["text"])]
+    zone = []
+    for indice, parola in enumerate(numeri_dubbi):
+        if indice >= 6 or not _rileggi_numero(preparata, parola, lang, dpi):
+            zone.append(parola["box"])
+    zone.extend(p["box"] for p in parole if p["conf"] <= 30
+                and sum(c.isalnum() for c in p["text"]) >= 3)
+    return parole, zone, preparata.size, angolo
+
+
+def _zona_ocr(rect, pagina):
+    """Indica la zona visibile nel PDF senza riportare testo riconosciuto."""
+    x = (rect.tl.x + rect.br.x) / 2 - pagina.x0
+    y = (rect.tl.y + rect.br.y) / 2 - pagina.y0
+    riga = ("alto", "centro", "basso")[max(0, min(2, int(3 * y / pagina.height)))]
+    colonna = ("sinistra", "centro", "destra")[max(0, min(2, int(3 * x / pagina.width)))]
+    return f"{riga} / {colonna}"
+
+
+def _ocr_page_words(src_page, dpi, lang, page_num, ui, *, profilo=False, area=None):
+    """Riporta le coordinate dell'OCR nei pixel del render originale e nel PDF."""
+    zoom = dpi / 72
+    clip = area * src_page.rotation_matrix if area is not None else None
+    try:
+        pix = src_page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY, alpha=False, clip=clip)
+        img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
+        if profilo:
+            # Nei piccoli riquadri Tesseract fatica a stimare l'orientamento.
+            # Annulla la rotazione PDF dichiarata prima di leggere il riquadro.
+            rotazione_pdf = src_page.rotation if area is not None else 0
+            dritta = img.rotate(rotazione_pdf, expand=True) if rotazione_pdf else img
+            parole, dubbi, dimensioni, angolo = _ocr_scansioni(dritta, dpi, lang, area is not None)
+            angolo += rotazione_pdf
+        else:
+            parole = _leggi_ocr(img, lang, "")
+            dubbi, dimensioni, angolo = [], img.size, 0
+    except Exception as e:
+        ui.warning(safe_error_message(f"OCR pagina {page_num}", e))
+        return None, 0, []
+
+    # Trasformazione inversa della rotazione centrata di Pillow.
+    seno, coseno = math.sin(math.radians(angolo)), math.cos(math.radians(angolo))
+    inversa = fitz.Matrix(coseno, seno, -seno, coseno,
+                          (img.width - coseno * dimensioni[0] + seno * dimensioni[1]) / 2,
+                          (img.height - seno * dimensioni[0] - coseno * dimensioni[1]) / 2)
+    al_pdf = fitz.Matrix(1 / zoom, 0, 0, 1 / zoom, pix.x / zoom, pix.y / zoom)
+    limiti = fitz.Rect(0, 0, img.width, img.height)
+    words = []
+    scartate = 0
+    for parola in parole:
+        if parola["conf"] <= 30:
+            scartate += sum(c.isalpha() for c in parola["text"]) >= 3
+            continue
+        box = (parola["box"] * inversa) & limiti
+        if box.is_empty:
+            continue
+        rect = fitz.Rect(box.x0 - 2, box.y0 - 2, box.x1 + 2, box.y1 + 2) & limiti
+        words.append({**parola, "x": math.floor(box.x0), "y": math.floor(box.y0),
+                      "w": math.ceil(box.x1) - math.floor(box.x0),
+                      "h": math.ceil(box.y1) - math.floor(box.y0),
+                      "rect": rect * al_pdf * src_page.derotation_matrix})
+    zone = {_zona_ocr(((box * inversa) & limiti) * al_pdf, src_page.rect) for box in dubbi}
+    if area is not None and not words:
+        zone.add(_zona_ocr(clip, src_page.rect))
+    return words, scartate, sorted(zone)
 
 
 def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
-                         dpi, lang, page_num, debug_first=False):
+                         dpi, lang, page_num, debug_first=False, ui=st,
+                         *, profilo=False, area=None):
     """
     OCR + analisi di una pagina scansionata. Non disegna nulla: serve
     alla prima passata, così i nomi trovati qui si propagano al resto
     del documento. Il dict restituito ha le stesse chiavi di
     analyze_text_page(), per poter riusare i filtri a valle.
     """
-    _ocr_page_words.ultime_scartate = 0
-    _, words = _ocr_page_words(src_page, dpi, lang, page_num)
-    ocr_scartate = _ocr_page_words.ultime_scartate
+    words, ocr_scartate, zone = _ocr_page_words(
+        src_page, dpi, lang, page_num, ui, profilo=profilo, area=area)
 
     empty = {
         "words": [], "entries": [], "full_text": "", "word_positions": [],
@@ -3443,14 +3552,15 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
         # A3: OCR in errore = pagina non analizzata, va oscurata per intero
         "failed": words is None,
         "ocr_scartate": ocr_scartate,
+        "zone_ocr": zone,
     }
     if not words:
         return empty
 
     if debug_first:
-        st.write(f"🔍 Pagina {page_num} (OCR) — parole rilevate: {len(words)}")
+        ui.write(f"🔍 Pagina {page_num} (OCR) — parole rilevate: {len(words)}")
         sample = " ".join([w["text"] for w in words[:20]])
-        st.write(f"   Estratto OCR: `{sample}...`")
+        ui.write(f"   Estratto OCR: `{sample}...`")
 
     full_text = ""
     word_positions = []
@@ -3458,6 +3568,7 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
         start = len(full_text)
         full_text += w["text"]
         word_positions.append((start, len(full_text), idx))
+        w.update(start=start, end=len(full_text), horizontal=False, ocr=True)
         full_text += " "
 
     raw_count = 0
@@ -3521,11 +3632,11 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
                     f"{r.entity_type}={full_text[r.start:r.end][:25]!r}(s={r.score:.2f})"
                     for r in all_results[:6]
                 ]
-                st.write(f"   Entità grezze OCR: {' | '.join(sample)}")
+                ui.write(f"   Entità grezze OCR: {' | '.join(sample)}")
 
         except Exception as e:
             # L-03: messaggio sanitizzato
-            st.warning(safe_error_message(f"Presidio OCR pagina {page_num}", e))
+            ui.warning(safe_error_message(f"Presidio OCR pagina {page_num}", e))
             results = []
             failed = True
 
@@ -3544,7 +3655,47 @@ def analyze_scanned_page(src_page, selected_entities, analyzer, min_score,
         "ocr_failed": False,
         "failed": failed,
         "ocr_scartate": ocr_scartate,
+        "zone_ocr": zone,
     }
+
+
+def _aggiungi_ocr_immagini(analysis, page, selected_entities, analyzer, min_score,
+                          dpi, lang, page_num, ui):
+    """Analizza i riquadri immagine e li unisce al testo digitale con le coordinate PDF."""
+    zone = set()
+    try:
+        aree = list(dict.fromkeys(tuple(r) for r in _immagini_della_pagina(page, strict=True)))
+    except Exception:
+        return False, ["pagina intera (elenco immagini indisponibile)"]
+
+    for indice, confini in enumerate(aree):
+        area = fitz.Rect(confini)
+        if indice >= 20:
+            zone.add(_zona_ocr(area * page.rotation_matrix, page.rect))
+            continue
+        ocr = analyze_scanned_page(page, selected_entities, analyzer, min_score, dpi, lang,
+                                   page_num, ui=ui, profilo=True, area=area)
+        zone.update(ocr["zone_ocr"])
+        if ocr["failed"]:
+            zone.add(_zona_ocr(area * page.rotation_matrix, page.rect))
+            continue
+        if not ocr["entries"]:
+            continue
+        separatore = "\n\n"
+        offset = len(analysis["full_text"]) + len(separatore)
+        analysis["full_text"] += separatore + ocr["full_text"]
+        for voce in ocr["entries"]:
+            voce.update(start=voce["start"] + offset, end=voce["end"] + offset,
+                        line=("ocr", indice, voce["line"]))
+            analysis["entries"].append(voce)
+        for risultato in ocr["results"]:
+            risultato.start += offset
+            risultato.end += offset
+            analysis["results"].append(risultato)
+        for chiave in ("raw", "filtered", "dropped_fp"):
+            analysis[chiave] += ocr[chiave]
+
+    return bool(aree), sorted(zone)
 
 
 def apply_scanned_redactions(src_page, out_doc, analysis, custom_terms,
@@ -3704,10 +3855,10 @@ def apply_scanned_redactions(src_page, out_doc, analysis, custom_terms,
 def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
                min_score=0.4, ocr_mode="auto", ocr_dpi=300, ocr_lang="ita",
                redaction_mode="blackout", exclude_magistrates=False,
-               assigner=None, redact_handwriting=False):
+               assigner=None, redact_handwriting=False, ui=st):
     """
     Anonimizza un PDF. Gestisce sia pagine testuali che scansionate.
-    ocr_mode: 'auto' | 'always' | 'never'
+    ocr_mode: 'auto' | 'scans' | 'always' | 'never'
     redaction_mode: 'blackout' (rettangoli neri) | 'codes' (pseudonimizzazione)
     exclude_magistrates: R-10 — non redigere i nomi del collegio giudicante
     assigner: R-16 — CodeAssigner condiviso, per dare gli STESSI codici a più
@@ -3732,6 +3883,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     pagine_immagini_non_lette = []
     pagine_senza_ocr = []
     pagine_ocr_incerto = []
+    pagine_ocr_senza_parole = []
+    zone_ocr_da_verificare = {}
     pagine_ritaglio_non_analizzato = []
     cognomi_ambigui = set()
     # D3: l'OCR con un'altra lingua legge male accenti e nomi italiani
@@ -3741,20 +3894,20 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     elif redaction_mode != "codes":
         assigner = None
 
-    st.write(f"📄 Documento: {len(src_doc)} pagine")
-    st.write(f"🎯 Entità cercate ({len(selected_entities)}): {', '.join(selected_entities)}")
-    st.write(f"📊 Soglia minima: {min_score:.0%} · Modalità OCR: **{ocr_mode}**")
+    ui.write(f"📄 Documento: {len(src_doc)} pagine")
+    ui.write(f"🎯 Entità cercate ({len(selected_entities)}): {', '.join(selected_entities)}")
+    ui.write(f"📊 Soglia minima: {min_score:.0%} · Modalità OCR: **{ocr_mode}**")
 
     total_pages = len(src_doc)
-    progress_bar = st.progress(0.0)
-    status_text = st.empty()
+    progress_bar = ui.progress(0.0)
+    status_text = ui.empty()
 
     total_raw = 0
     total_filtered = 0
     total_dropped_fp = 0
     pages_ocr = 0
     pages_text = 0
-    pages_with_inline_images = 0
+    profilo_scansioni = ocr_mode == "scans" and TESSERACT_AVAILABLE
 
     # ---------- PASSATA 1: analisi di TUTTE le pagine ----------
     # Analizziamo PRIMA tutto il documento per raccogliere i nomi di
@@ -3785,17 +3938,16 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 
         # M-02/A7: immagini che possono contenere dati in pagine testuali
         has_images = False
-        if not scanned:
+        if not scanned and not profilo_scansioni:
             has_images = has_inline_images(src_page, AREA_IMMAGINE_DA_SEGNALARE)
-            if has_images:
-                pages_with_inline_images += 1
 
         # Decide se applicare OCR
         use_ocr = (
             (ocr_mode == "always" and TESSERACT_AVAILABLE) or
-            (ocr_mode == "auto" and scanned and TESSERACT_AVAILABLE)
+            (ocr_mode in ("auto", "scans") and scanned and TESSERACT_AVAILABLE)
         )
 
+        zone_ocr = []
         if use_ocr:
             # L'OCR lavora sull'immagine della pagina: fuori dal ritaglio
             # non resta nulla nel file, quindi si torna al ritaglio originale
@@ -3804,14 +3956,26 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
             status_text.text(f"🔍 OCR pagina {page_num}/{total_pages}...")
             analysis = analyze_scanned_page(
                 src_page, selected_entities, analyzer, min_score,
-                ocr_dpi, ocr_lang, page_num, debug_first=(page_num == 1),
+                ocr_dpi, ocr_lang, page_num, debug_first=(ui is st and page_num == 1), ui=ui,
+                profilo=profilo_scansioni,
             )
+            zone_ocr = analysis["zone_ocr"]
+            if not analysis["words"] and not analysis["failed"]:
+                pagine_ocr_senza_parole.append(page_num)
         else:
             analysis = analyze_text_page(
                 src_page, selected_entities, analyzer, min_score,
-                page_num, debug_first=(page_num == 1),
+                page_num, debug_first=(ui is st and page_num == 1), ui=ui,
             )
+            if profilo_scansioni and not analysis["failed"]:
+                ocr_immagini, zone_ocr = _aggiungi_ocr_immagini(
+                    analysis, src_page, selected_entities, analyzer, min_score,
+                    ocr_dpi, ocr_lang, page_num, ui)
+                if ocr_immagini and ocr_lang != "ita":
+                    ocr_senza_italiano = True
 
+        if zone_ocr:
+            zone_ocr_da_verificare[page_num] = zone_ocr
         known_person_tokens |= collect_person_tokens(analysis)
         cognomi_ambigui |= collect_ambiguous_surnames(analysis)
         if analysis.get("ocr_scartate", 0) >= max(5, 0.1 * len(analysis.get("words") or [])):
@@ -3974,22 +4138,22 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
     status_text.empty()
 
     # Riepilogo
-    st.write(f"📈 **Riepilogo:** {pages_text} pagine testuali · {pages_ocr} pagine OCR")
-    st.write(
+    ui.write(f"📈 **Riepilogo:** {pages_text} pagine testuali · {pages_ocr} pagine OCR")
+    ui.write(
         f"   Presidio: {total_raw} risultati grezzi → {total_filtered} validi "
         f"(soglia ≥{min_score:.0%}, {total_dropped_fp} falsi positivi scartati)"
     )
     if known_person_tokens:
-        st.write(f"   👤 Nomi propagati a tutto il documento: {len(known_person_tokens)} token")
+        ui.write(f"   👤 Nomi propagati a tutto il documento: {len(known_person_tokens)} token")
     if exclude_magistrates and magistrate_tokens:
-        st.write(
+        ui.write(
             f"   ⚖️ Magistrati esclusi dall'anonimizzazione: "
             f"{len(magistrate_tokens)} token ({magistrates_skipped} occorrenze risparmiate)"
         )
 
     sanitize_total = sum(sanitize_stats.values())
     if sanitize_total > 0:
-        st.write(
+        ui.write(
             f"   🧹 Sanitizzazione: "
             f"{sanitize_stats['annotations']} annotazioni · "
             f"{sanitize_stats['forms']} form fields · "
@@ -3998,7 +4162,7 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         )
 
     if total_raw > 0 and total_filtered == 0:
-        st.warning(f"⚠️ Presidio ha trovato entità ma tutte con score < {min_score:.0%}. Abbassa la soglia nella sidebar.")
+        ui.warning(f"⚠️ Presidio ha trovato entità ma tutte con score < {min_score:.0%}. Abbassa la soglia nella sidebar.")
 
     output_bytes = BytesIO()
     out_doc.save(output_bytes, garbage=4, deflate=True, clean=True)
@@ -4016,6 +4180,8 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
         "pagine_immagini_non_lette": pagine_immagini_non_lette,
         "pagine_senza_ocr": pagine_senza_ocr,
         "pagine_ocr_incerto": pagine_ocr_incerto,
+        "pagine_ocr_senza_parole": pagine_ocr_senza_parole,
+        "zone_ocr_da_verificare": zone_ocr_da_verificare,
         "pagine_ritaglio_non_analizzato": pagine_ritaglio_non_analizzato,
         "campi_modulo": campi_modulo,
         "termini_non_trovati": termini_non_trovati,
@@ -4026,8 +4192,187 @@ def redact_pdf(input_bytes, selected_entities, custom_terms, analyzer,
 
 
 # ============================================================
+# ELABORAZIONE LOCALE DI UNA CARTELLA
+# ============================================================
+
+ENTITA_BATCH = (
+    "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "LOCATION", "IT_ADDRESS",
+    "IT_BIRTH_DATE", "IT_FISCAL_CODE", "IT_VAT_CODE", "IT_IDENTITY_CARD",
+    "IT_DRIVER_LICENSE", "IT_PASSPORT", "IT_LICENSE_PLATE", "IBAN_CODE", "CREDIT_CARD",
+)
+AVVISI_BATCH = {
+    "pagine_fallite": "Pagine oscurate per errore di analisi",
+    "pagine_senza_ocr": "Scansioni non lette",
+    "pagine_immagini_non_lette": "Immagini non lette",
+    "pagine_ritaglio_non_analizzato": "Pagine ritagliate analizzate solo in parte",
+    "pagine_ocr_incerto": "Lettura OCR incerta",
+    "pagine_ocr_senza_parole": "OCR senza parole utilizzabili",
+    "zone_ocr_da_verificare": "Zone OCR da verificare",
+    "ocr_senza_italiano": "OCR senza lingua italiana",
+    "termini_non_trovati": "Termini specifici senza riscontro",
+    "cognomi_non_propagati": "Cognomi oscurati solo accanto al nome",
+}
+
+
+class InterfacciaSilenziosa:
+    """Il comando mostra l'avanzamento per file, senza estratti del PDF."""
+
+    def progress(self, *_):
+        return self
+
+    empty = progress
+
+    def write(self, *_):
+        pass
+
+    text = warning = error = write
+
+
+def _descrivi_zone_ocr(zone):
+    return "; ".join(f"pagina {pagina}: {', '.join(posizioni)}" for pagina, posizioni in zone.items())
+
+
+def anonimizza_file_batch(sorgente, destinazione, indice, analyzer, termini, opzioni):
+    with sorgente.open("rb") as file_pdf:
+        dati = file_pdf.read(MAX_PDF_BYTES + 1)
+    if len(dati) > MAX_PDF_BYTES:
+        raise DocumentoNonElaborabile(f"PDF oltre il limite di {MAX_PDF_BYTES // 1024**2} MB")
+
+    esito = redact_pdf(
+        dati, list(ENTITA_BATCH), termini, analyzer,
+        ocr_mode=opzioni.ocr, ocr_dpi=opzioni.dpi,
+        ocr_lang="ita" if ITALIAN_AVAILABLE else "eng",
+        redact_handwriting=opzioni.firme, ui=InterfacciaSilenziosa(),
+    )
+    motivi = []
+    for chiave, descrizione in AVVISI_BATCH.items():
+        valore = esito.avvisi.get(chiave)
+        if not valore:
+            continue
+        if chiave.startswith("pagine_"):
+            descrizione += " (pagine " + ", ".join(str(p) for p in valore) + ")"
+        elif chiave == "zone_ocr_da_verificare":
+            descrizione += " (" + _descrivi_zone_ocr(valore) + ")"
+        motivi.append(descrizione)
+    redazioni = sum(riga["Metodo"] != "Errore" for riga in esito.log)
+    if not redazioni:
+        motivi.append("Nessuna redazione rilevata")
+
+    stato = "da verificare" if motivi else "elaborato"
+    cartella = "da_verificare" if motivi else "pdf"
+    relativo = Path(cartella) / f"documento_{indice:06d}.pdf"
+    percorso = destinazione / relativo
+    temporaneo = percorso.with_suffix(".tmp")
+    try:
+        temporaneo.write_bytes(esito.pdf)
+        temporaneo.replace(percorso)
+    finally:
+        temporaneo.unlink(missing_ok=True)
+    return stato, relativo.as_posix(), redazioni, " | ".join(motivi)
+
+
+def elenca_pdf_batch(origine, ricorsivo):
+    def solleva_errore(errore):
+        raise errore
+
+    file = []
+    for cartella, sottocartelle, nomi in origine.walk(on_error=solleva_errore):
+        if not ricorsivo:
+            sottocartelle.clear()
+        for nome in nomi:
+            percorso = cartella / nome
+            if percorso.suffix.lower() == ".pdf" and not percorso.is_symlink() and percorso.is_file():
+                file.append(percorso)
+    return sorted(file)
+
+
+def avvia_batch(argomenti):
+    parser = argparse.ArgumentParser(
+        prog="python app.py batch", description="Anonimizza in locale i PDF di una cartella.")
+    parser.add_argument("origine", type=Path, help="cartella con i PDF originali")
+    parser.add_argument("destinazione", type=Path, help="nuova cartella per risultati e riepilogo")
+    parser.add_argument("--ricorsivo", action="store_true", help="includi le sottocartelle")
+    parser.add_argument("--termini", type=Path, help="file UTF-8 con un termine per riga")
+    parser.add_argument("--ocr", choices=("scans", "auto", "always", "never"),
+                        default="scans" if TESSERACT_AVAILABLE else "auto",
+                        help="profilo Scansioni (predefinito con Tesseract), automatico, sempre o mai")
+    parser.add_argument("--dpi", type=int, choices=(150, 200, 300, 400, 600), default=300)
+    parser.add_argument("--firme", action="store_true", help="oscura firme e scritte a mano")
+    opzioni = parser.parse_args(argomenti)
+    if not pymupdf_supported():
+        parser.error(f"versione PyMuPDF non supportata: {PYMUPDF_VERSION}")
+    if opzioni.ocr in ("scans", "always") and not TESSERACT_AVAILABLE:
+        parser.error("Tesseract non disponibile per la modalità OCR selezionata")
+
+    try:
+        origine = opzioni.origine.resolve()
+        destinazione = opzioni.destinazione.resolve()
+        if not origine.is_dir():
+            parser.error("la cartella di origine non esiste")
+        if destinazione.exists() or destinazione.is_relative_to(origine):
+            parser.error("scegli una nuova cartella di destinazione esterna all'origine")
+        file = elenca_pdf_batch(origine, opzioni.ricorsivo)
+        termini = []
+        if opzioni.termini:
+            termini = [riga.strip() for riga in opzioni.termini.read_text(encoding="utf-8-sig").splitlines()
+                       if riga.strip()]
+    except (OSError, UnicodeError) as exc:
+        parser.error(f"impossibile leggere cartella o termini ({type(exc).__name__})")
+    if not file:
+        parser.error("nessun PDF trovato nella cartella selezionata")
+
+    print(f"Caricamento motore di analisi per {len(file)} PDF…", flush=True)
+    try:
+        analyzer = initialize_analyzer()
+    except Exception as exc:
+        parser.error(f"motore di analisi non disponibile ({type(exc).__name__})")
+
+    conteggi = Counter()
+    try:
+        destinazione.mkdir(mode=0o700)
+        (destinazione / "pdf").mkdir()
+        (destinazione / "da_verificare").mkdir()
+        with (destinazione / "riepilogo_riservato.csv").open("x", newline="", encoding="utf-8-sig") as report:
+            writer = csv.writer(report, delimiter=";")
+            writer.writerow(["Originale", "Esito", "PDF", "Redazioni", "Dettagli"])
+            report.flush()
+            for indice, sorgente in enumerate(file, start=1):
+                try:
+                    stato, uscita, redazioni, dettagli = anonimizza_file_batch(
+                        sorgente, destinazione, indice, analyzer, termini, opzioni)
+                except DocumentoNonElaborabile as exc:
+                    stato, uscita, redazioni, dettagli = "errore", "", 0, str(exc)
+                except Exception as exc:
+                    stato, uscita, redazioni, dettagli = "errore", "", 0, type(exc).__name__
+                # Il prefisso ./ mantiene i nomi di origine come testo anche in Excel.
+                writer.writerow(["./" + sorgente.relative_to(origine).as_posix(),
+                                 stato, uscita, redazioni, dettagli])
+                report.flush()
+                conteggi[stato] += 1
+                print(f"{indice}/{len(file)}  {stato}", flush=True)
+    except OSError as exc:
+        parser.error(f"impossibile scrivere i risultati ({type(exc).__name__})")
+
+    print(f"{conteggi['elaborato']} elaborati, {conteggi['da verificare']} da verificare, "
+          f"{conteggi['errore']} con errore. Riepilogo: riepilogo_riservato.csv")
+    return int(bool(conteggi["da verificare"] or conteggi["errore"]))
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["batch"]:
+    sys.exit(avvia_batch(sys.argv[2:]))
+
+
+# ============================================================
 # INTERFACCIA UTENTE
 # ============================================================
+st.set_page_config(
+    page_title="Anonimizzatore PDF",
+    page_icon="🔒",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={},
+)
+initialize_analyzer = st.cache_resource(show_spinner=False)(initialize_analyzer)
 
 st.title("🔒 Anonimizzatore PDF")
 st.caption(f"Anonimizzazione documenti in locale · Powered by Microsoft Presidio + Tesseract OCR · v{__version__}")
@@ -4147,16 +4492,19 @@ with st.sidebar:
     if TESSERACT_AVAILABLE:
         ocr_mode = st.radio(
             "Modalità OCR",
-            options=["auto", "always", "never"],
+            options=["auto", "scans", "always", "never"],
             format_func=lambda x: {
                 "auto": "🤖 Automatica",
-                "always": "🔄 Forza OCR su tutto (più sicuro)",
+                "scans": "📑 Scansioni e documenti misti",
+                "always": "🔄 Forza OCR su tutto",
                 "never": "❌ Mai OCR",
             }[x],
             help=(
                 "Auto: rileva automaticamente le pagine scansionate. "
+                "Scansioni: corregge l'orientamento per la lettura, legge anche i riquadri "
+                "immagine e segnala le zone dubbie. "
                 "Forza OCR: applica OCR a ogni pagina anche se testuale, "
-                "utile per documenti che contengono firme/timbri/foto di ID. Più sicuro ma più lento."
+                "e restituisce pagine come immagini."
             ),
         )
         ocr_dpi = st.select_slider(
@@ -4350,13 +4698,6 @@ with st.expander("🧪 Test e diagnostica"):
 st.divider()
 
 # --- AZIONE ---
-# N-03 (#7): guard difensivo contro OOM silenzioso su PDF molto grandi.
-# Streamlit accetta di suo fino a 200 MB (server.maxUploadSize): questo
-# controllo ferma prima i file oltre i 100 MB, che l'app elabora tutta in
-# memoria.
-MAX_PDF_BYTES = 100 * 1024 * 1024  # 100 MB
-
-
 def mapping_to_csv_bytes(mapping, with_document=False):
     """Tabella di accoppiamento in CSV (BOM utf-8, così Excel la apre bene)."""
     fields = ["Codice", "Tipo", "Testo originale", "Occorrenze"]
@@ -4475,6 +4816,13 @@ def messaggi_avvisi(avvisi):
             "Molte parole sono state lette male e non analizzate (scansione sbiadita, "
             "timbri sovrapposti, scrittura a mano): possono essere rimasti dati in chiaro. "
             "Controlla quelle pagine o riprova con una risoluzione OCR più alta."))
+    if avvisi.get("pagine_ocr_senza_parole"):
+        messaggi.append(("warning",
+            f"**OCR senza parole utilizzabili alle pagine: {_elenco_pagine(avvisi['pagine_ocr_senza_parole'])}.** "
+            "Controlla le immagini di queste pagine: potrebbero contenere testo rimasto in chiaro."))
+    if avvisi.get("zone_ocr_da_verificare"):
+        messaggi.append(("warning", "**Zone OCR da verificare.** "
+                         + _descrivi_zone_ocr(avvisi["zone_ocr_da_verificare"]) + "."))
     if avvisi.get("termini_non_trovati"):
         elenco = ", ".join(f"«{t}»" for t in avvisi["termini_non_trovati"])
         messaggi.append(("warning",
@@ -4541,7 +4889,7 @@ if uploaded_files:
         # file: aggiungendo un termine o una categoria restavano visibili
         # "completata" e i download del giro precedente.
         firma_upload = [
-            [(f.name, f.size) for f in uploaded_files],
+            [(f.name, hashlib.sha256(f.getbuffer()).digest()) for f in uploaded_files],
             sorted(selected_entities), [t.strip() for t in custom_terms],
             min_score, ocr_mode, ocr_dpi, redaction_mode,
             exclude_magistrates, redact_handwriting, shared_codes,
@@ -4572,7 +4920,7 @@ if uploaded_files:
                 # errore, senza file da scaricare.
                 try:
                     output_bytes, log, mapping, avvisi = redact_pdf(
-                        f.read(),
+                        f.getvalue(),
                         selected_entities,
                         custom_terms,
                         analyzer,
@@ -4591,8 +4939,7 @@ if uploaded_files:
                     errore = str(e)
                 except Exception as e:
                     output_bytes, log, mapping, avvisi = None, [], [], {}
-                    logger.error("Elaborazione fallita: %s — %s",
-                                 type(e).__name__, str(e)[:200])
+                    logger.error("Elaborazione fallita: %s", type(e).__name__)
                     errore = f"errore imprevisto ({type(e).__name__}); il file non viene prodotto"
                 # con codici condivisi il mapping cresce a ogni documento:
                 # teniamo traccia di quali codici sono NUOVI in questo file
@@ -4675,16 +5022,23 @@ if uploaded_files:
                 # --- DOWNLOAD ---
                 prefix = "pseudonimizzato" if res_mode == "codes" else "anonimizzato"
                 if len(risultati) > 1:
+                    scaricabili = [r for r in docs_con_esito
+                                    if not any(r["avvisi"].get(chiave) for chiave in AVVISI_BATCH)]
+                    da_verificare = len(risultati) - len(scaricabili)
+                    if da_verificare:
+                        st.warning(f"{da_verificare} PDF da verificare nei risultati qui sotto. "
+                                   "I PDF da verificare sono esclusi dallo ZIP.")
                     col_z1, col_z2 = st.columns([1, 1])
                     with col_z1:
-                        st.download_button(
-                            label=f"📦 Scarica tutti i PDF ({len(risultati)}, ZIP senza tabelle)",
-                            data=build_results_zip(risultati),
-                            file_name="documenti_anonimizzati.zip",
-                            mime="application/zip",
-                            type="primary",
-                            use_container_width=True,
-                        )
+                        if scaricabili:
+                            st.download_button(
+                                label=f"📦 Scarica PDF senza avvisi ({len(scaricabili)}, ZIP)",
+                                data=build_results_zip(scaricabili),
+                                file_name="documenti_anonimizzati.zip",
+                                mime="application/zip",
+                                type="primary",
+                                use_container_width=True,
+                            )
                     with col_z2:
                         if mapping_condiviso:
                             st.download_button(

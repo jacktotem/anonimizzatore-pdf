@@ -14,6 +14,7 @@ Nessun test richiede spaCy: l'analizzatore e' finto e riconosce un
 elenco fisso di parole. I casi con OCR vengono saltati se Tesseract
 non e' installato. Tutti i dati sono di fantasia.
 """
+import csv
 import io
 import re
 
@@ -604,3 +605,147 @@ def test_pdf_con_password_da_un_errore_chiaro():
     cifrato = doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="segreta", owner_pw="x")
     with pytest.raises(app.DocumentoNonElaborabile):
         redact_pdf(cifrato, ENTITA, [], AnalizzatoreFinto())
+
+
+@serve_ocr
+def test_ocr_senza_parole_segnalato_anche_se_altre_pagine_hanno_redazioni():
+    doc, _ = _pagina()
+    doc.new_page()
+    esito, out = _esegui(doc, ocr_dpi=150, ocr_lang="ita" if app.ITALIAN_AVAILABLE else "eng")
+    assert COGNOME not in _testo(out)
+    assert esito.avvisi["pagine_ocr_senza_parole"] == [2]
+    assert any("OCR senza parole" in testo for _, testo in app.messaggi_avvisi(esito.avvisi))
+
+
+def test_batch_supera_cinque_isola_scansioni_e_prosegue_dopo_errori(tmp_path, monkeypatch):
+    origine = tmp_path / "origine"
+    origine.mkdir()
+    annidato = origine / "sottocartella"
+    annidato.mkdir()
+    destinazione = tmp_path / "risultati"
+    pdf, _ = _pagina()
+    originale = pdf.tobytes()
+    for indice in range(7):
+        cartella = origine if indice < 6 else annidato
+        (cartella / f"{indice}_{COGNOME}.PDF").write_bytes(originale)
+
+    scansione = _scansione("Riferimento privato nella scansione di prova")
+    pdf.insert_pdf(scansione)
+    (origine / "8_misto.pdf").write_bytes(pdf.tobytes())
+    (origine / "00_danneggiato.pdf").write_bytes(b"non e' un PDF")
+    (origine / "intatto.txt").write_text("file non PDF")
+    analizzatore = AnalizzatoreFinto()
+    monkeypatch.setattr(app, "initialize_analyzer", lambda: analizzatore)
+    argomenti = [str(origine), str(destinazione), "--ricorsivo", "--ocr", "never"]
+
+    assert app.avvia_batch(argomenti) == 1
+
+    with (destinazione / "riepilogo_riservato.csv").open(encoding="utf-8-sig", newline="") as report:
+        righe = list(csv.DictReader(report, delimiter=";"))
+    assert len(righe) == 9
+    assert righe[0]["Esito"] == "errore" and not righe[0]["PDF"]
+    elaborati = [riga for riga in righe if riga["Esito"] == "elaborato"]
+    assert len(elaborati) == 7
+    assert analizzatore.chiamate == 8
+    for riga in elaborati:
+        assert riga["PDF"].startswith("pdf/documento_")
+        assert COGNOME not in riga["PDF"]
+        with fitz.open(destinazione / riga["PDF"]) as risultato:
+            assert COGNOME not in _testo(risultato)
+            assert not _nei_byte(risultato, COGNOME)
+    verifica, = [riga for riga in righe if riga["Esito"] == "da verificare"]
+    assert verifica["PDF"].startswith("da_verificare/")
+    assert "Scansioni non lette (pagine 2)" in verifica["Dettagli"]
+    assert (origine / f"0_{COGNOME}.PDF").read_bytes() == originale
+    with pytest.raises(SystemExit) as exc:
+        app.avvia_batch(argomenti)
+    assert exc.value.code == 2
+
+
+@serve_ocr
+@pytest.mark.parametrize("angolo", [90, 180, 9])
+def test_profilo_scansioni_rileva_il_nome_e_oscuramento_su_pagine_ruotate(angolo):
+    import pytesseract
+    from PIL import Image
+
+    righe = [
+        "Verbale di udienza per una pratica di esempio.",
+        "Il sig. Ermenegildo Zanfretta compare dinanzi al giudice.",
+        "Si prosegue con la lettura dei documenti depositati.",
+        "Le parti richiamano gli atti contenuti nel fascicolo.",
+        "Viene quindi disposta la continuazione dell'esame.",
+        "La seduta prosegue secondo il calendario stabilito.",
+    ]
+    with fitz.open() as base, fitz.open() as doc:
+        pagina = base.new_page()
+        for indice, riga in enumerate(righe):
+            pagina.insert_text((60, 140 + 32 * indice), riga, fontsize=14)
+        img = Image.open(io.BytesIO(pagina.get_pixmap(dpi=185).tobytes("png")))
+        scala = 72 / 185
+        ruotata = img.rotate(angolo, expand=True, fillcolor="white")
+        dati = io.BytesIO()
+        ruotata.save(dati, format="PNG")
+        pagina = doc.new_page(width=ruotata.width * scala, height=ruotata.height * scala)
+        pagina.insert_image(pagina.rect, stream=dati.getvalue())
+
+        lingua = "ita" if app.ITALIAN_AVAILABLE else "eng"
+        esito, out = _esegui(doc, ocr_mode="scans", ocr_lang=lingua)
+        assert any(COGNOME in riga["Testo"] for riga in esito.log)
+        img = Image.open(io.BytesIO(out[0].get_pixmap(dpi=250).tobytes("png")))
+        riallineata = img.rotate(-angolo, expand=True, fillcolor="white")
+        testo = pytesseract.image_to_string(riallineata, lang=lingua).lower()
+    assert COGNOME.lower() not in testo and "fascicolo" in testo
+
+
+@serve_ocr
+@pytest.mark.parametrize("angolo", [0, 90])
+def test_profilo_scansioni_elimina_il_nome_dal_timbro_piccolo_e_conserva_il_testo(angolo):
+    import pytesseract
+    from PIL import Image
+
+    doc, pagina = _pagina("Testo digitale selezionabile del verbale di esempio.")
+    with doc, fitz.open() as timbro:
+        impronta = timbro.new_page(width=160, height=32)
+        impronta.insert_text((8, 22), "Assistito Zanfretta", fontsize=13)
+        zona = fitz.Rect(72, 650, 232, 682)
+        pagina.insert_image(zona, pixmap=impronta.get_pixmap(dpi=300))
+        pagina.set_rotation(angolo)
+        lingua = "ita" if app.ITALIAN_AVAILABLE else "eng"
+        esito, out = _esegui(doc, ocr_mode="scans", ocr_lang=lingua)
+    with out:
+        assert "Testo digitale selezionabile" in _testo(out)
+        assert any(riga["Metodo"] == "OCR" and COGNOME in riga["Testo"] for riga in esito.log)
+        immagini = out[0].get_images(full=True)
+        assert immagini
+        for immagine in immagini:
+            dati = fitz.Pixmap(out, immagine[0]).tobytes("png")
+            testo = pytesseract.image_to_string(Image.open(io.BytesIO(dati)), lang=lingua, config="--psm 7")
+            assert COGNOME.lower() not in testo.lower()
+
+
+@serve_ocr
+def test_profilo_scansioni_segnala_il_numero_incerto_con_pagina_e_zona(tmp_path, monkeypatch):
+    origine = tmp_path / "originali"
+    origine.mkdir()
+    destinazione = tmp_path / "risultati"
+    with _scansione("Numero documento") as doc:
+        doc.save(origine / "scansione.pdf")
+
+    letture = []
+
+    def lettura_simulata(immagine, lingua, config):
+        letture.append(config)
+        testo, conf = ("72", 41) if len(letture) == 1 else ("73", 88)
+        return [{"text": testo, "conf": conf, "line": (1, 1, 1), "box": fitz.Rect(50, 60, 90, 84)}]
+
+    monkeypatch.setattr(app, "_leggi_ocr", lettura_simulata)
+    monkeypatch.setattr(app, "_angolo_ocr", lambda _: 0)
+    monkeypatch.setattr(app, "initialize_analyzer", AnalizzatoreFinto)
+
+    assert app.avvia_batch([str(origine), str(destinazione)]) == 1
+    assert len(letture) == 2 and "--psm 7" in letture[1]
+    with (destinazione / "riepilogo_riservato.csv").open(encoding="utf-8-sig", newline="") as report:
+        riga, = csv.DictReader(report, delimiter=";")
+    assert riga["Esito"] == "da verificare"
+    assert "pagina 1: alto / sinistra" in riga["Dettagli"]
+    assert "72" not in riga["Dettagli"] and "73" not in riga["Dettagli"]

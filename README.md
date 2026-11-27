@@ -116,8 +116,9 @@ L'app include un pulsante **"Verifica aggiornamenti"** nella barra laterale: con
 2. **Spunta le categorie** di dati da anonimizzare (sidebar a sinistra)
 3. **Aggiungi termini specifici** (es. nomi clienti, ragioni sociali) — uno per riga
 4. **Modalità OCR**:
-   - `Automatica` (consigliata): rileva da solo le pagine scansionate
-   - `Forza tutto`: applica OCR a ogni pagina (più lento, più sicuro)
+   - `Automatica`: rileva le pagine scansionate
+   - `Scansioni e documenti misti`: gestisce pagine ruotate o inclinate, legge le immagini anche nelle pagine testuali e segnala le zone dubbie
+   - `Forza OCR su tutto`: applica OCR a ogni pagina e produce pagine rasterizzate
    - `Mai`: solo testo estraibile
 5. **Firme a mano** (opzionale): spunta *Oscura firme e scritte a mano* per
    coprire anche firme in calce, sigle e timbri. Il riconoscimento è grafico,
@@ -126,9 +127,42 @@ L'app include un pulsante **"Verifica aggiornamenti"** nella barra laterale: con
    scansionate usa `Forza tutto`.
 6. Con più documenti in pseudonimizzazione, scegli se usare **codici condivisi** (stessa persona → stesso codice in tutti gli atti del fascicolo, con un'unica tabella di accoppiamento)
 7. Clicca **🔒 Anonimizza**
-8. **Scarica** i PDF risultanti — singolarmente o tutti insieme in ZIP
+8. **Scarica** i PDF risultanti singolarmente. Lo ZIP raccoglie quelli con redazioni rilevate e senza avvisi di analisi.
 
 > ⚠️ **Verifica sempre** il PDF risultante prima dell'invio. L'AI può sbagliare.
+
+### Elaborazione massiva da cartella
+
+Per un intero fascicolo, attiva l'ambiente Python dell'app ed esegui dalla
+radice del repository:
+
+```bash
+python src/app.py batch "/percorso/originali" "/percorso/risultati" --ricorsivo
+```
+
+Su macOS, dalla cartella `mac`, puoi usare `./venv/bin/python app.py batch ...`.
+Su Windows, dalla cartella di installazione, usa `venv\Scripts\python.exe app.py batch ...`.
+La destinazione deve essere una cartella nuova, fuori dagli originali.
+
+- Il comando usa le categorie attive di default nell'app e produce PDF con
+  rettangoli neri. Elabora un documento alla volta, senza limite sul numero
+  di file, con lo stesso limite di 100 MB per ciascun PDF.
+- `--ricorsivo` include le sottocartelle. Con Tesseract disponibile, la modalità
+  da cartella usa il profilo Scansioni (`--ocr scans`). Puoi usare `--termini
+  termini.txt` (UTF-8, un termine per riga), `--ocr always` per rasterizzare e
+  leggere tutte le pagine e `--firme` per oscurare firme e scritte a mano.
+  `--help` mostra le opzioni.
+- I PDF ricevono nomi numerici. `pdf/` raccoglie quelli elaborati senza avvisi
+  di analisi. `da_verificare/` raccoglie le copie con avvisi, incluse le
+  scansioni non lette e i PDF senza redazioni rilevate.
+- `riepilogo_riservato.csv` riporta per ogni originale l'esito, il nome della
+  copia e le pagine o zone da verificare. Il riepilogo contiene i nomi degli
+  originali, quindi va custodito separatamente dai PDF da condividere.
+- Codice di uscita `0` se tutti i file sono stati elaborati senza avvisi,
+  `1` se ci sono file da verificare o con errore, `2` per errori di avvio.
+
+Rivedi le copie prima di condividerle, anche quando l'elaborazione non ha
+segnalato avvisi.
 
 ---
 
